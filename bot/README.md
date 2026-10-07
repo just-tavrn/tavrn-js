@@ -77,7 +77,7 @@ These variables belong to the bot process, not to the node.
 | Event | Payload |
 |---|---|
 | `ready` | `BotInfo` (address, application, device, home domain) |
-| `message` | `BotMessage`: `text`, `content`, `author`, `authorKind`, `mentionsMe`, `encrypted`, `conversation`, `roomId`, `signature` (plaintext: the author device's signature check), `reply()` |
+| `message` | `BotMessage`: `text`, `content`, `author`, `authorKind`, `mentionsMe`, `encrypted`, `conversation`, `roomId`, `threadId`, `signature` (plaintext: the author device's signature check), `reply()`, `replyInThread()` |
 | `undecryptable` | an encrypted message the bot could not read (sent before it joined, unknown device, …) |
 | `install` / `uninstall` | the bot was added to or removed from a room (`node`, `roomId`) |
 | `tokenExpiring` | the token expires in 7 or 1 days |
@@ -90,6 +90,12 @@ embeds }`) to a conversation: `conversation` is the qualified id `<node>/<id>` o
 (`m.conversation`) or the bare id of a conversation on the home node. In encrypted conversations the content is
 encrypted for the conversation's group (the bot joins first if needed); in unencrypted ones it is sent in plaintext,
 signed by the bot device. The bot's own messages are not delivered back to it. **Attachments are not supported yet.**
+
+**Threads** (PROTOCOL.md §7e): `m.threadId` names the thread a message belongs to (null in the channel itself);
+`m.reply()` answers in the same thread, `bot.send(conversation, content, { threadId })` writes into a thread, and
+`m.replyInThread(content, { title? })` answers in the message's thread, in the thread it already started, or in a new
+thread started from it (the title, encrypted in encrypted channels, defaults to the start of the message). Threads
+need no extra scope: reading falls under `messages:read`, writing under `messages:write`.
 
 ## Commands
 
