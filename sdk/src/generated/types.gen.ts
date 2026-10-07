@@ -152,6 +152,29 @@ export type AdminOverview = {
     version: string;
 };
 
+/**
+ * A room of this node with its roles (without `@everyone`).
+ */
+export type AdminRoom = {
+    id: string;
+    members: number;
+    name: string;
+    /**
+     * The owner's address.
+     */
+    owner?: string | null;
+    roles: Array<AdminRoomRole>;
+};
+
+/**
+ * A role of a room in the admin's list.
+ */
+export type AdminRoomRole = {
+    id: string;
+    name: string;
+    position: number;
+};
+
 export type AdminToken = {
     created_at: string;
     created_by: string;
@@ -324,6 +347,88 @@ export type AuthResponse = TokenPair & {
     recovery_code_used: boolean;
     status: SessionStatus;
     user: UserPrivate;
+};
+
+/**
+ * The node's flood detection (read-only).
+ */
+export type AutomodBurst = {
+    /**
+     * Messages per window above which a member is flooding (0 = off).
+     */
+    limit: number;
+    timeout_minutes: number;
+    window_secs: number;
+};
+
+/**
+ * The node lists that apply to every unencrypted conversation.
+ */
+export type AutomodNode = {
+    /**
+     * `TAVRN_AUTOMOD_LINKS` is active.
+     */
+    links: boolean;
+    /**
+     * `TAVRN_AUTOMOD_WORDS_FILE` is active.
+     */
+    words: boolean;
+};
+
+/**
+ * A content rule of a room.
+ */
+export type AutomodRule = {
+    /**
+     * `block`, `delete` or `timeout`.
+     */
+    action: string;
+    /**
+     * Domains of the link filter (at most 500; a domain covers its subdomains).
+     */
+    domains?: Array<string>;
+    enabled?: boolean;
+    /**
+     * Channel ids of the room the rule does not apply to.
+     */
+    exempt_channels?: Array<string>;
+    /**
+     * Role ids of the room the rule does not apply to.
+     */
+    exempt_roles?: Array<string>;
+    /**
+     * Assigned by the node; kept when the rule is sent back with it.
+     */
+    id?: string | null;
+    /**
+     * `off`, `block_all`, `allow_list` or `block_list`.
+     */
+    links?: string;
+    /**
+     * 1–64 characters, unique in the room; named in the error a blocked sender sees.
+     */
+    name: string;
+    /**
+     * Words or phrases (at most 500, 1–100 characters each); `*` matches any run of non-space characters.
+     */
+    terms?: Array<string>;
+    /**
+     * `timeout` only: 1–40320 minutes.
+     */
+    timeout_minutes?: number | null;
+    /**
+     * Matches must start and end at a word boundary.
+     */
+    whole_word?: boolean;
+};
+
+/**
+ * The auto-moderation settings of a room.
+ */
+export type AutomodSettings = {
+    burst: AutomodBurst;
+    node: AutomodNode;
+    rules: Array<AutomodRule>;
 };
 
 export type BTreeMap = {
@@ -1259,6 +1364,42 @@ export type CreatePlanRequest = {
     name: string;
 };
 
+/**
+ * Body of `POST /reports`.
+ */
+export type CreateReportRequest = {
+    /**
+     * `spam`, `harassment`, `illegal`, `sexual`, `violence` or `other`.
+     */
+    category: string;
+    conversation_id?: string | null;
+    /**
+     * At most 2000 characters.
+     */
+    detail?: string;
+    /**
+     * Messages of encrypted conversations only: the plaintext the reporter releases (at most 11 entries).
+     */
+    evidence?: Array<EvidenceEntry> | null;
+    /**
+     * `message`, `user` or `room`.
+     */
+    kind: string;
+    message_id?: string | null;
+    /**
+     * `message`: the node hosting the conversation when it is not this node (DMs on another node).
+     */
+    node?: string | null;
+    /**
+     * `room`: the reported room; `user`: optional context.
+     */
+    room_id?: string | null;
+    /**
+     * `user`: the reported address; `message` on another node: the author.
+     */
+    user?: string | null;
+};
+
 export type CreateRoleRequest = {
     /**
      * Upload categories (protocol/PROTOCOL.md §7a); absent or null = not set (inherit).
@@ -1778,6 +1919,33 @@ export type EpochResponse = {
     epoch: number;
 };
 
+/**
+ * One message the reporter releases in plaintext (MODERATION.md §1.2).
+ */
+export type EvidenceEntry = {
+    /**
+     * File names of the attachments (at most 10), never the files.
+     */
+    attachments?: Array<string>;
+    /**
+     * The author's address.
+     */
+    author: string;
+    /**
+     * RFC 3339.
+     */
+    created_at: string;
+    /**
+     * The sending device as the envelope names it.
+     */
+    device_id?: string | null;
+    message_id?: string | null;
+    /**
+     * The decrypted body (at most 4000 characters).
+     */
+    text?: string;
+};
+
 export type Factors = {
     recovery_codes_left: number;
     totp: boolean;
@@ -2080,11 +2248,6 @@ export type GlobalSettings = {
      */
     browser?: boolean;
     mode?: Mode;
-    /**
-     * Web push (PROTOCOL.md §6d): include a preview of unencrypted messages (default off; never for encrypted
-     * conversations). Left out of the document while off.
-     */
-    push_text?: boolean;
     /**
      * Play a sound for notifications (client side).
      */
@@ -2700,6 +2863,16 @@ export type Message = {
     webhook?: null | WebhookRef;
 };
 
+/**
+ * The content of a plaintext message at report time.
+ */
+export type MessageSnapshot = {
+    attachments: Array<string>;
+    author: string;
+    created_at: string;
+    text: string;
+};
+
 export type Mode = 'all' | 'mentions' | 'nothing';
 
 export type ModerateProfileRequest = {
@@ -2715,6 +2888,66 @@ export type ModerateProfileRequest = {
      * Remove the member's per-room avatar.
      */
     reset_avatar?: boolean;
+};
+
+/**
+ * A report as moderators and node admins see it.
+ */
+export type ModerationReport = {
+    actions: Array<ReportActionRecord>;
+    assignee?: null | User;
+    category: string;
+    conversation_id?: string | null;
+    /**
+     * `channel`, `dm` or `group` (null when unknown here).
+     */
+    conversation_kind?: string | null;
+    created_at: string;
+    detail: string;
+    /**
+     * Only in `GET /reports/{id}` and action results.
+     */
+    evidence?: Array<EvidenceEntry> | null;
+    evidence_count: number;
+    /**
+     * `reporter` when evidence was released by the reporter.
+     */
+    evidence_source?: string | null;
+    id: string;
+    /**
+     * `message`, `user` or `room`.
+     */
+    kind: string;
+    /**
+     * The reported message still exists on this node.
+     */
+    message_exists: boolean;
+    message_id?: string | null;
+    /**
+     * The node hosting the conversation when it is not this node.
+     */
+    node?: string | null;
+    note: string;
+    reporter?: null | User;
+    resolved_at?: string | null;
+    room_id?: string | null;
+    room_name?: string | null;
+    /**
+     * `room` (the room's moderators and node admins) or `node` (node admins).
+     */
+    scope: string;
+    snapshot?: null | MessageSnapshot;
+    /**
+     * `user` or `automod`.
+     */
+    source: string;
+    /**
+     * `open`, `resolved` or `dismissed`.
+     */
+    status: string;
+    target?: null | User;
+    target_address: string;
+    updated_at: string;
 };
 
 export type MoveAllRequest = {
@@ -3712,60 +3945,13 @@ export type PurgeUserResponse = {
 export type Purpose = 'login' | 'link' | 'reauth';
 
 /**
- * A registered push subscription (the keys and the endpoint are never returned). Named apart from the browser's
- * `PushSubscription`.
+ * Body of `PUT /rooms/{room_id}/automod`.
  */
-export type PushRegistration = {
-    created_at: string;
+export type PutAutomodRequest = {
     /**
-     * The subscription belongs to the requesting device.
+     * The complete list (at most 20 rules).
      */
-    current_device: boolean;
-    device_id: string;
-    expires_at?: string | null;
-    /**
-     * Failed deliveries in a row (the node backs off and deletes the subscription after 30).
-     */
-    failures: number;
-    id: string;
-    last_used_at?: string | null;
-    /**
-     * Origin of the push service (`https://host`), to tell the subscriptions apart.
-     */
-    push_service: string;
-};
-
-/**
- * The browser's keys of a subscription (`PushSubscription.toJSON().keys`).
- */
-export type PushSubscriptionKeys = {
-    /**
-     * Base64url of the 16-byte authentication secret.
-     */
-    auth: string;
-    /**
-     * Base64url of the browser's P-256 public key (65 bytes, uncompressed).
-     */
-    p256dh: string;
-};
-
-/**
- * A browser push subscription (`PushSubscription.toJSON()`) of the requesting device.
- */
-export type PushSubscriptionRequest = {
-    /**
-     * The requesting device (optional; another device is refused with `400 push.device_invalid`).
-     */
-    device_id?: string | null;
-    /**
-     * The push service URL (`https://`, at most 2048 characters, a public host).
-     */
-    endpoint: string;
-    /**
-     * `expirationTime` of the browser: Unix milliseconds or null.
-     */
-    expiration_time?: number | null;
-    keys: PushSubscriptionKeys;
+    rules: Array<AutomodRule>;
 };
 
 /**
@@ -4000,6 +4186,73 @@ export type RenameEmoji = {
 
 export type RenameSceneRequest = {
     name: string;
+};
+
+/**
+ * An action shortcut taken on a report.
+ */
+export type ReportActionRecord = {
+    action: string;
+    /**
+     * The moderator's address.
+     */
+    actor: string;
+    at: string;
+    minutes?: number | null;
+};
+
+/**
+ * Body of `POST /reports/{id}/actions`.
+ */
+export type ReportActionRequest = {
+    /**
+     * `delete_message`, `timeout`, `kick`, `ban` or `purge`.
+     */
+    action: string;
+    /**
+     * `purge`: the token of the preview.
+     */
+    confirm_token?: string | null;
+    /**
+     * `timeout`: 1–40320.
+     */
+    minutes?: number | null;
+    /**
+     * Passed to the route (kick, ban, timeout).
+     */
+    reason?: string;
+    /**
+     * Also set the report `resolved`.
+     */
+    resolve?: boolean;
+};
+
+/**
+ * Answer of an action shortcut.
+ */
+export type ReportActionResult = {
+    purge?: null | PurgeResponse;
+    report: ModerationReport;
+};
+
+/**
+ * Answer of `POST /reports` (`201` for a new report, `200` when merged into an open one).
+ */
+export type ReportCreated = {
+    id: string;
+    merged: boolean;
+    status: string;
+};
+
+/**
+ * A page of the inbox.
+ */
+export type ReportList = {
+    /**
+     * Open reports of the list's scope (badges), whatever the filters.
+     */
+    open: number;
+    reports: Array<ModerationReport>;
 };
 
 export type ReportRequest = {
@@ -4670,6 +4923,16 @@ export type TransferRequest = {
 };
 
 /**
+ * Body of `POST /rooms/{room_id}/transfer`.
+ */
+export type TransferRoomRequest = {
+    /**
+     * The member who becomes the owner.
+     */
+    user_id: string;
+};
+
+/**
  * A link preview as the sender's client puts it into the message content.
  */
 export type UnfurlResponse = {
@@ -4830,6 +5093,24 @@ export type UpdatePlanRequest = {
         [key: string]: unknown;
     } | null;
     name?: string | null;
+};
+
+/**
+ * Body of `PATCH /reports/{id}`.
+ */
+export type UpdateReportRequest = {
+    /**
+     * A moderator who may see the report, or null.
+     */
+    assignee_id?: string | null;
+    /**
+     * The resolution note (at most 2000 characters).
+     */
+    note?: string | null;
+    /**
+     * `open`, `resolved` or `dismissed`.
+     */
+    status?: string | null;
 };
 
 export type UpdateRoleRequest = {
@@ -5115,21 +5396,6 @@ export type UserSound = {
     mime: string;
     name: string;
     size: number;
-};
-
-/**
- * Whether the node sends web pushes and the key browsers subscribe with.
- */
-export type VapidInfo = {
-    /**
-     * `TAVRN_PUSH`: the node sends web pushes (capability `push.webpush`).
-     */
-    enabled: boolean;
-    /**
-     * The VAPID public key (RFC 8292): base64url of the uncompressed P-256 point, the `applicationServerKey` of
-     * `PushManager.subscribe()`. Null while push is off.
-     */
-    public_key?: string | null;
 };
 
 export type VerifyEmailRequest = {
@@ -6702,6 +6968,74 @@ export type OverviewResponses = {
 };
 
 export type OverviewResponse = OverviewResponses[keyof OverviewResponses];
+
+export type AdminReportsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * `open`, `resolved` or `dismissed` (default: all).
+         */
+        status?: string | null;
+        /**
+         * Admin list only: `room` or `node`.
+         */
+        scope?: string | null;
+        /**
+         * 1–100, default 50.
+         */
+        limit?: number | null;
+        /**
+         * A report id: older reports only (paging).
+         */
+        before?: string | null;
+    };
+    url: '/api/v1/admin/reports';
+};
+
+export type AdminReportsErrors = {
+    403: ProblemDetails;
+};
+
+export type AdminReportsError = AdminReportsErrors[keyof AdminReportsErrors];
+
+export type AdminReportsResponses = {
+    200: ReportList;
+};
+
+export type AdminReportsResponse = AdminReportsResponses[keyof AdminReportsResponses];
+
+export type AdminRoomsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Part of the room name.
+         */
+        q?: string | null;
+        /**
+         * 1–100, default 50.
+         */
+        limit?: number | null;
+        /**
+         * A room id: rooms after it (paging).
+         */
+        after?: string | null;
+    };
+    url: '/api/v1/admin/rooms';
+};
+
+export type AdminRoomsErrors = {
+    403: ProblemDetails;
+};
+
+export type AdminRoomsError = AdminRoomsErrors[keyof AdminRoomsErrors];
+
+export type AdminRoomsResponses = {
+    200: Array<AdminRoom>;
+};
+
+export type AdminRoomsResponse = AdminRoomsResponses[keyof AdminRoomsResponses];
 
 export type GetGroupMapData = {
     body?: never;
@@ -9796,18 +10130,120 @@ export type List3Responses = {
 
 export type List3Response = List3Responses[keyof List3Responses];
 
-export type VapidData = {
-    body?: never;
+export type CreateReportData = {
+    body: CreateReportRequest;
     path?: never;
     query?: never;
-    url: '/api/v1/push/vapid';
+    url: '/api/v1/reports';
 };
 
-export type VapidResponses = {
-    200: VapidInfo;
+export type CreateReportErrors = {
+    400: ProblemDetails;
+    403: ProblemDetails;
+    404: ProblemDetails;
+    429: ProblemDetails;
 };
 
-export type VapidResponse = VapidResponses[keyof VapidResponses];
+export type CreateReportError = CreateReportErrors[keyof CreateReportErrors];
+
+export type CreateReportResponses = {
+    /**
+     * Merged into an open report
+     */
+    200: ReportCreated;
+    201: ReportCreated;
+};
+
+export type CreateReportResponse = CreateReportResponses[keyof CreateReportResponses];
+
+export type DeleteReportData = {
+    body?: never;
+    path: {
+        report_id: string;
+    };
+    query?: never;
+    url: '/api/v1/reports/{report_id}';
+};
+
+export type DeleteReportErrors = {
+    403: ProblemDetails;
+    404: ProblemDetails;
+};
+
+export type DeleteReportError = DeleteReportErrors[keyof DeleteReportErrors];
+
+export type DeleteReportResponses = {
+    204: void;
+};
+
+export type DeleteReportResponse = DeleteReportResponses[keyof DeleteReportResponses];
+
+export type GetReportData = {
+    body?: never;
+    path: {
+        report_id: string;
+    };
+    query?: never;
+    url: '/api/v1/reports/{report_id}';
+};
+
+export type GetReportErrors = {
+    404: ProblemDetails;
+};
+
+export type GetReportError = GetReportErrors[keyof GetReportErrors];
+
+export type GetReportResponses = {
+    200: ModerationReport;
+};
+
+export type GetReportResponse = GetReportResponses[keyof GetReportResponses];
+
+export type UpdateReportData = {
+    body: UpdateReportRequest;
+    path: {
+        report_id: string;
+    };
+    query?: never;
+    url: '/api/v1/reports/{report_id}';
+};
+
+export type UpdateReportErrors = {
+    400: ProblemDetails;
+    404: ProblemDetails;
+};
+
+export type UpdateReportError = UpdateReportErrors[keyof UpdateReportErrors];
+
+export type UpdateReportResponses = {
+    200: ModerationReport;
+};
+
+export type UpdateReportResponse = UpdateReportResponses[keyof UpdateReportResponses];
+
+export type ActOnReportData = {
+    body: ReportActionRequest;
+    path: {
+        report_id: string;
+    };
+    query?: never;
+    url: '/api/v1/reports/{report_id}/actions';
+};
+
+export type ActOnReportErrors = {
+    400: ProblemDetails;
+    403: ProblemDetails;
+    404: ProblemDetails;
+    409: ProblemDetails;
+};
+
+export type ActOnReportError = ActOnReportErrors[keyof ActOnReportErrors];
+
+export type ActOnReportResponses = {
+    200: ReportActionResult;
+};
+
+export type ActOnReportResponse = ActOnReportResponses[keyof ActOnReportResponses];
 
 export type ListMyRoomsData = {
     body?: never;
@@ -9998,6 +10434,49 @@ export type AuditLog2Responses = {
 };
 
 export type AuditLog2Response = AuditLog2Responses[keyof AuditLog2Responses];
+
+export type GetAutomodData = {
+    body?: never;
+    path: {
+        room_id: string;
+    };
+    query?: never;
+    url: '/api/v1/rooms/{room_id}/automod';
+};
+
+export type GetAutomodErrors = {
+    403: ProblemDetails;
+};
+
+export type GetAutomodError = GetAutomodErrors[keyof GetAutomodErrors];
+
+export type GetAutomodResponses = {
+    200: AutomodSettings;
+};
+
+export type GetAutomodResponse = GetAutomodResponses[keyof GetAutomodResponses];
+
+export type PutAutomodData = {
+    body: PutAutomodRequest;
+    path: {
+        room_id: string;
+    };
+    query?: never;
+    url: '/api/v1/rooms/{room_id}/automod';
+};
+
+export type PutAutomodErrors = {
+    400: ProblemDetails;
+    403: ProblemDetails;
+};
+
+export type PutAutomodError = PutAutomodErrors[keyof PutAutomodErrors];
+
+export type PutAutomodResponses = {
+    200: AutomodSettings;
+};
+
+export type PutAutomodResponse = PutAutomodResponses[keyof PutAutomodResponses];
 
 export type ListBans2Data = {
     body?: never;
@@ -11458,6 +11937,44 @@ export type PutRoomSettingResponses = {
 
 export type PutRoomSettingResponse = PutRoomSettingResponses[keyof PutRoomSettingResponses];
 
+export type RoomReportsData = {
+    body?: never;
+    path: {
+        room_id: string;
+    };
+    query?: {
+        /**
+         * `open`, `resolved` or `dismissed` (default: all).
+         */
+        status?: string | null;
+        /**
+         * Admin list only: `room` or `node`.
+         */
+        scope?: string | null;
+        /**
+         * 1–100, default 50.
+         */
+        limit?: number | null;
+        /**
+         * A report id: older reports only (paging).
+         */
+        before?: string | null;
+    };
+    url: '/api/v1/rooms/{room_id}/reports';
+};
+
+export type RoomReportsErrors = {
+    403: ProblemDetails;
+};
+
+export type RoomReportsError = RoomReportsErrors[keyof RoomReportsErrors];
+
+export type RoomReportsResponses = {
+    200: ReportList;
+};
+
+export type RoomReportsResponse = RoomReportsResponses[keyof RoomReportsResponses];
+
 export type CreateRoleData = {
     body: CreateRoleRequest;
     path: {
@@ -11689,6 +12206,28 @@ export type SoundAudioResponses = {
      */
     200: unknown;
 };
+
+export type TransferRoomData = {
+    body: TransferRoomRequest;
+    path: {
+        room_id: string;
+    };
+    query?: never;
+    url: '/api/v1/rooms/{room_id}/transfer';
+};
+
+export type TransferRoomErrors = {
+    400: ProblemDetails;
+    403: ProblemDetails;
+};
+
+export type TransferRoomError = TransferRoomErrors[keyof TransferRoomErrors];
+
+export type TransferRoomResponses = {
+    200: RoomDetail;
+};
+
+export type TransferRoomResponse = TransferRoomResponses[keyof TransferRoomResponses];
 
 export type RoomStatesData = {
     body?: never;
@@ -12952,107 +13491,20 @@ export type List9Data = {
     body?: never;
     path?: never;
     query?: never;
-    url: '/api/v1/users/me/push-subscriptions';
+    url: '/api/v1/users/me/secret-storage';
 };
 
 export type List9Errors = {
-    403: ProblemDetails;
+    401: ProblemDetails;
 };
 
 export type List9Error = List9Errors[keyof List9Errors];
 
 export type List9Responses = {
-    200: Array<PushRegistration>;
-};
-
-export type List9Response = List9Responses[keyof List9Responses];
-
-export type Register2Data = {
-    body: PushSubscriptionRequest;
-    path?: never;
-    query?: never;
-    url: '/api/v1/users/me/push-subscriptions';
-};
-
-export type Register2Errors = {
-    400: ProblemDetails;
-    403: ProblemDetails;
-    404: ProblemDetails;
-    409: ProblemDetails;
-    429: ProblemDetails;
-};
-
-export type Register2Error = Register2Errors[keyof Register2Errors];
-
-export type Register2Responses = {
-    200: PushRegistration;
-    201: PushRegistration;
-};
-
-export type Register2Response = Register2Responses[keyof Register2Responses];
-
-export type TestData = {
-    body?: never;
-    path?: never;
-    query?: never;
-    url: '/api/v1/users/me/push-subscriptions/test';
-};
-
-export type TestErrors = {
-    403: ProblemDetails;
-    404: ProblemDetails;
-    429: ProblemDetails;
-};
-
-export type TestError = TestErrors[keyof TestErrors];
-
-export type TestResponses = {
-    202: unknown;
-};
-
-export type Remove2Data = {
-    body?: never;
-    path: {
-        /**
-         * Subscription id
-         */
-        subscription_id: string;
-    };
-    query?: never;
-    url: '/api/v1/users/me/push-subscriptions/{subscription_id}';
-};
-
-export type Remove2Errors = {
-    403: ProblemDetails;
-    404: ProblemDetails;
-};
-
-export type Remove2Error = Remove2Errors[keyof Remove2Errors];
-
-export type Remove2Responses = {
-    204: void;
-};
-
-export type Remove2Response = Remove2Responses[keyof Remove2Responses];
-
-export type List10Data = {
-    body?: never;
-    path?: never;
-    query?: never;
-    url: '/api/v1/users/me/secret-storage';
-};
-
-export type List10Errors = {
-    401: ProblemDetails;
-};
-
-export type List10Error = List10Errors[keyof List10Errors];
-
-export type List10Responses = {
     200: SecretStorageList;
 };
 
-export type List10Response = List10Responses[keyof List10Responses];
+export type List9Response = List9Responses[keyof List9Responses];
 
 export type DeletePasskeyData = {
     body?: never;
