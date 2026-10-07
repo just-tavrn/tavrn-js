@@ -235,6 +235,9 @@ export type Decrypted =
   | { ok: true; content: Record<string, unknown>; retired?: true; sealedBy?: SealedBy; webhookName?: string }
   | { ok: false; reason: DecryptFailure };
 
+/** Longest thread title in characters (PROTOCOL.md §7e). */
+export const THREAD_TITLE_MAX = 100;
+
 /** Messages of a retired device count until this long after its deletion (clock skew, messages in flight). */
 export const RETIRED_SLACK_MS = 5 * 60 * 1000;
 
@@ -849,6 +852,33 @@ export class MlsManager {
     this.backupTried.add(q);
     await this.run(() => this.restoreOne(q)).catch(() => undefined);
     return true;
+  }
+
+  /**
+   * Encrypts a thread title for an encrypted channel (PROTOCOL.md §7e): content format 1 of
+   * `{ "type": "thread.title", "body" }` under the current epoch, sent as `title` with `title_epoch`.
+   */
+  async encryptThreadTitle(conversationId: string, title: string): Promise<{ title: string; title_epoch: number }> {
+    const body = title.trim();
+    if (!body || Array.from(body).length > THREAD_TITLE_MAX) throw new RangeError(`thread title: 1 to ${THREAD_TITLE_MAX} characters`);
+    const { content, epoch } = await this.encrypt(conversationId, { type: "thread.title", body });
+    return { title: content, title_epoch: epoch };
+  }
+
+  /**
+   * Decrypts and verifies the title of a thread in an encrypted channel with its author and device. Anything that is
+   * not a `thread.title` object with a body of 1–100 characters is `invalid` (the node cannot pass off message
+   * content as a title: the type differs, and the same ciphertext seen twice is a replay).
+   */
+  async decryptThreadTitle(
+    conversationId: string,
+    t: { id: string; title: string; title_epoch?: number | null; title_author: string; title_device_id?: string | null; created_at?: string | null },
+  ): Promise<{ ok: true; title: string } | { ok: false; reason: DecryptFailure }> {
+    const r = await this.decrypt(conversationId, { id: `thread-title:${t.id}`, author: t.title_author, device_id: t.title_device_id ?? null, epoch: t.title_epoch ?? null, content: t.title, created_at: t.created_at ?? null });
+    if (!r.ok) return r;
+    const body = r.content.body;
+    if (r.content.type !== "thread.title" || typeof body !== "string" || !body.trim() || Array.from(body).length > THREAD_TITLE_MAX) return { ok: false, reason: "invalid" };
+    return { ok: true, title: body.trim() };
   }
 
   /** Synchronous lookup of an already decrypted message (pins panel, edits). */

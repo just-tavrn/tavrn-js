@@ -597,6 +597,11 @@ export type ChangePasswordRequest = {
 };
 
 export type Channel = {
+    /**
+     * Threads without a message for this many minutes are archived (60–43200, default 10080 = 7 days;
+     * PROTOCOL.md §7e).
+     */
+    auto_archive_minutes?: number;
     bitrate_kbps: number;
     /**
      * Encrypted channels of a `per_channel` room: bots may be in this channel (the `no_bots` flags still win).
@@ -638,6 +643,10 @@ export type Channel = {
      * Set on default channels (`general`, `voice`) so that clients localize the name; NULL after a rename.
      */
     system_name?: string | null;
+    /**
+     * Forum channels: the tags posts can carry (at most 20); empty for other kinds.
+     */
+    tags?: Array<ForumTag>;
     topic: string;
     user_limit: number;
 };
@@ -1244,6 +1253,11 @@ export type CreateMessageRequest = {
      * Encrypted messages carry `spoiler: true` in the attachment entries of the encrypted content.
      */
     spoilers?: Array<string>;
+    /**
+     * Write into this thread of the channel (PROTOCOL.md §7e): needs `create_threads` in text and announcement
+     * channels, `manage_threads` in a locked thread; an archived thread reopens.
+     */
+    thread_id?: string | null;
 };
 
 export type CreatePlanRequest = {
@@ -1285,6 +1299,26 @@ export type CreateRoomRequest = {
      */
     join_mode?: string | null;
     name: string;
+};
+
+export type CreateThreadRequest = {
+    message?: null | CreateMessageRequest;
+    /**
+     * Text and announcement channels: the channel message the thread starts from.
+     */
+    root_message_id?: string | null;
+    /**
+     * Forum posts: at most 5 tag ids of the channel.
+     */
+    tags?: Array<string>;
+    /**
+     * 1–100 characters; in encrypted channels content-format ciphertext of `{ "type": "thread.title", "body" }`.
+     */
+    title: string;
+    /**
+     * Encrypted channels: the epoch of the title ciphertext.
+     */
+    title_epoch?: number | null;
 };
 
 export type CreateTokenRequest = {
@@ -1998,11 +2032,30 @@ export type FollowUpResponse = {
     message?: null | Message;
 };
 
+export type FollowedThreads = {
+    items: Array<ThreadReadState>;
+};
+
 export type ForgotPasswordRequest = {
     /**
      * Username or email address
      */
     account: string;
+};
+
+/**
+ * A tag of a forum channel (PROTOCOL.md §7e).
+ */
+export type ForumTag = {
+    /**
+     * A Unicode emoji or a custom emoji token, null without.
+     */
+    emoji?: string | null;
+    id: string;
+    /**
+     * 1–32 characters, unique in the channel ignoring case.
+     */
+    name: string;
 };
 
 export type Friend = {
@@ -2691,6 +2744,7 @@ export type Message = {
      * device. Null for encrypted and unsigned messages. The node does not verify it; clients do.
      */
     signature?: string | null;
+    thread?: null | ThreadSummary;
     thread_id?: string | null;
     webhook?: null | WebhookRef;
 };
@@ -4536,6 +4590,18 @@ export type Subscription = {
 };
 
 /**
+ * A tag entry of `PATCH …/channels/{id} { tags }`.
+ */
+export type TagInput = {
+    emoji?: string | null;
+    /**
+     * Keep this existing tag (absent: a new tag).
+     */
+    id?: string | null;
+    name: string;
+};
+
+/**
  * The terms acceptance state of a user.
  */
 export type TermsStatus = {
@@ -4556,6 +4622,131 @@ export type TermsStatus = {
      * The current version still needs the user's acceptance.
      */
     pending: boolean;
+};
+
+/**
+ * A thread (PROTOCOL.md §7e).
+ */
+export type Thread = {
+    archived_at?: string | null;
+    channel_id: string;
+    created_at: string;
+    /**
+     * Address of the creator.
+     */
+    created_by: string;
+    created_by_id: string;
+    /**
+     * The title is ciphertext (content format 1 of `{ "type": "thread.title", "body" }`, ENCRYPTION.md §5.2).
+     */
+    encrypted: boolean;
+    first_message?: null | Message;
+    id: string;
+    last_message_at: string;
+    last_message_id?: string | null;
+    /**
+     * Only members with `manage_threads` write in a locked thread.
+     */
+    locked: boolean;
+    me?: null | ThreadUserState;
+    /**
+     * Messages in the thread (the root not included).
+     */
+    message_count: number;
+    /**
+     * Up to three users who wrote in the thread most recently, newest first.
+     */
+    participant_ids: Array<string>;
+    room_id: string;
+    /**
+     * The root message was deleted (the thread stays).
+     */
+    root_deleted: boolean;
+    root_message?: null | Message;
+    /**
+     * The channel message the thread was started from; null for standalone threads and forum posts.
+     */
+    root_message_id?: string | null;
+    /**
+     * Forum posts: tag ids of the channel.
+     */
+    tags: Array<string>;
+    /**
+     * 1–100 characters; ciphertext when `encrypted`.
+     */
+    title: string;
+    /**
+     * Who set the title (author of the title ciphertext).
+     */
+    title_author: string;
+    /**
+     * The device that set the title (verifies the ciphertext's signature).
+     */
+    title_device_id?: string | null;
+    /**
+     * The epoch of an encrypted title (null for plaintext).
+     */
+    title_epoch?: number | null;
+};
+
+export type ThreadList = {
+    items: Array<Thread>;
+    /**
+     * `before` of the next page; null on the last page.
+     */
+    next?: string | null;
+};
+
+export type ThreadReadRequest = {
+    /**
+     * Newest message of the thread the user has seen; the marker never moves backwards.
+     */
+    last_read_message_id: string;
+};
+
+/**
+ * The requester's per-thread read state (`PUT /threads/{id}/read`, event `thread.read`).
+ */
+export type ThreadReadState = {
+    channel_id: string;
+    following: boolean;
+    last_read_message_id?: string | null;
+    mention_count: number;
+    room_id: string;
+    thread_id: string;
+    unread_count: number;
+};
+
+/**
+ * The summary of the thread a message started (PROTOCOL.md §7e), on the root message only.
+ */
+export type ThreadSummary = {
+    archived_at?: string | null;
+    id: string;
+    last_message_at: string;
+    last_message_id?: string | null;
+    locked: boolean;
+    message_count: number;
+    /**
+     * Up to three users who wrote in the thread most recently, newest first.
+     */
+    participant_ids: Array<string>;
+};
+
+/**
+ * The requester's state in a thread.
+ */
+export type ThreadUserState = {
+    following: boolean;
+    last_read_message_id?: string | null;
+    /**
+     * Of those, mentions of the user, one of their roles or @everyone (notification settings applied).
+     */
+    mention_count: number;
+    /**
+     * Messages of others after the marker, at most 999; 0 for threads the user does not follow.
+     */
+    unread_count: number;
 };
 
 export type TimeoutRequest = {
@@ -4667,6 +4858,10 @@ export type UpdateCategoryRequest = {
 };
 
 export type UpdateChannelRequest = {
+    /**
+     * Threads without a message for this many minutes are archived (60–43200; PROTOCOL.md §7e).
+     */
+    auto_archive_minutes?: number | null;
     bitrate_kbps?: number | null;
     /**
      * Encrypted channels of a `per_channel` room: bots may join this channel's group (APPLICATIONS.md §3.5; the
@@ -4691,6 +4886,10 @@ export type UpdateChannelRequest = {
     position?: number | null;
     slowmode_secs?: number | null;
     sync_with_category?: boolean | null;
+    /**
+     * Forum channels: the complete new tag list (at most 20; entries without `id` are new tags). Audit-logged.
+     */
+    tags?: Array<TagInput> | null;
     topic?: string | null;
     user_limit?: number | null;
 };
@@ -4819,6 +5018,20 @@ export type UpdateSound = {
      * New name (1–32 characters).
      */
     name?: string | null;
+};
+
+export type UpdateThreadRequest = {
+    archived?: boolean | null;
+    locked?: boolean | null;
+    /**
+     * Forum posts: the new tag ids.
+     */
+    tags?: Array<string> | null;
+    /**
+     * New title (ciphertext with `title_epoch` in encrypted channels).
+     */
+    title?: string | null;
+    title_epoch?: number | null;
 };
 
 export type UpdateUserRequest = {
@@ -8657,9 +8870,14 @@ export type ListConversationMessagesData = {
          */
         around?: string | null;
         /**
-         * Only encrypted messages of this MLS epoch (used to check shared history keys, ENCRYPTION.md §7b).
+         * Only encrypted messages of this MLS epoch (used to check shared history keys, ENCRYPTION.md §7b). Lists
+         * the messages of the whole channel, threads included.
          */
         epoch?: number | null;
+        /**
+         * Page this thread of the channel (PROTOCOL.md §7e); without it the channel's list leaves thread messages out.
+         */
+        thread?: string | null;
     };
     url: '/api/v1/conversations/{conversation_id}/messages';
 };
@@ -10374,9 +10592,14 @@ export type ListMessagesData = {
          */
         around?: string | null;
         /**
-         * Only encrypted messages of this MLS epoch (used to check shared history keys, ENCRYPTION.md §7b).
+         * Only encrypted messages of this MLS epoch (used to check shared history keys, ENCRYPTION.md §7b). Lists
+         * the messages of the whole channel, threads included.
          */
         epoch?: number | null;
+        /**
+         * Page this thread of the channel (PROTOCOL.md §7e); without it the channel's list leaves thread messages out.
+         */
+        thread?: string | null;
     };
     url: '/api/v1/rooms/{room_id}/channels/{channel_id}/messages';
 };
@@ -10566,6 +10789,77 @@ export type PlaySoundResponses = {
 };
 
 export type PlaySoundResponse = PlaySoundResponses[keyof PlaySoundResponses];
+
+export type ListThreadsData = {
+    body?: never;
+    path: {
+        room_id: string;
+        channel_id: string;
+    };
+    query?: {
+        /**
+         * `false` (default: active threads), `true` (archived only) or `all`.
+         */
+        archived?: string | null;
+        /**
+         * Forum posts carrying this tag id.
+         */
+        tag?: string | null;
+        /**
+         * `activity` (default, the newest last message first) or `created` (newest first).
+         */
+        sort?: string | null;
+        /**
+         * The id of the last thread of the previous page.
+         */
+        before?: string | null;
+        /**
+         * 1–50 (default 25).
+         */
+        limit?: number | null;
+    };
+    url: '/api/v1/rooms/{room_id}/channels/{channel_id}/threads';
+};
+
+export type ListThreadsErrors = {
+    400: ProblemDetails;
+    403: ProblemDetails;
+    404: ProblemDetails;
+};
+
+export type ListThreadsError = ListThreadsErrors[keyof ListThreadsErrors];
+
+export type ListThreadsResponses = {
+    200: ThreadList;
+};
+
+export type ListThreadsResponse = ListThreadsResponses[keyof ListThreadsResponses];
+
+export type CreateThreadData = {
+    body: CreateThreadRequest;
+    path: {
+        room_id: string;
+        channel_id: string;
+    };
+    query?: never;
+    url: '/api/v1/rooms/{room_id}/channels/{channel_id}/threads';
+};
+
+export type CreateThreadErrors = {
+    400: ProblemDetails;
+    403: ProblemDetails;
+    404: ProblemDetails;
+    409: ProblemDetails;
+    429: ProblemDetails;
+};
+
+export type CreateThreadError = CreateThreadErrors[keyof CreateThreadErrors];
+
+export type CreateThreadResponses = {
+    201: Thread;
+};
+
+export type CreateThreadResponse = CreateThreadResponses[keyof CreateThreadResponses];
 
 export type Upload2Data = {
     body: Array<number>;
@@ -10935,6 +11229,28 @@ export type ImageResponses = {
      */
     200: unknown;
 };
+
+export type FollowedThreadsData = {
+    body?: never;
+    path: {
+        room_id: string;
+    };
+    query?: never;
+    url: '/api/v1/rooms/{room_id}/followed-threads';
+};
+
+export type FollowedThreadsErrors = {
+    403: ProblemDetails;
+    404: ProblemDetails;
+};
+
+export type FollowedThreadsError = FollowedThreadsErrors[keyof FollowedThreadsErrors];
+
+export type FollowedThreadsResponses = {
+    200: FollowedThreads;
+};
+
+export type FollowedThreadsResponse = FollowedThreadsResponses[keyof FollowedThreadsResponses];
 
 export type DeleteRoomIconData = {
     body?: never;
@@ -11815,6 +12131,141 @@ export type PublicSoundAudioResponses = {
      */
     200: unknown;
 };
+
+export type DeleteThreadData = {
+    body?: never;
+    path: {
+        thread_id: string;
+    };
+    query?: never;
+    url: '/api/v1/threads/{thread_id}';
+};
+
+export type DeleteThreadErrors = {
+    403: ProblemDetails;
+    404: ProblemDetails;
+};
+
+export type DeleteThreadError = DeleteThreadErrors[keyof DeleteThreadErrors];
+
+export type DeleteThreadResponses = {
+    204: void;
+};
+
+export type DeleteThreadResponse = DeleteThreadResponses[keyof DeleteThreadResponses];
+
+export type GetThreadData = {
+    body?: never;
+    path: {
+        thread_id: string;
+    };
+    query?: never;
+    url: '/api/v1/threads/{thread_id}';
+};
+
+export type GetThreadErrors = {
+    403: ProblemDetails;
+    404: ProblemDetails;
+};
+
+export type GetThreadError = GetThreadErrors[keyof GetThreadErrors];
+
+export type GetThreadResponses = {
+    200: Thread;
+};
+
+export type GetThreadResponse = GetThreadResponses[keyof GetThreadResponses];
+
+export type UpdateThreadData = {
+    body: UpdateThreadRequest;
+    path: {
+        thread_id: string;
+    };
+    query?: never;
+    url: '/api/v1/threads/{thread_id}';
+};
+
+export type UpdateThreadErrors = {
+    400: ProblemDetails;
+    403: ProblemDetails;
+    404: ProblemDetails;
+};
+
+export type UpdateThreadError = UpdateThreadErrors[keyof UpdateThreadErrors];
+
+export type UpdateThreadResponses = {
+    200: Thread;
+};
+
+export type UpdateThreadResponse = UpdateThreadResponses[keyof UpdateThreadResponses];
+
+export type UnfollowData = {
+    body?: never;
+    path: {
+        thread_id: string;
+    };
+    query?: never;
+    url: '/api/v1/threads/{thread_id}/follow';
+};
+
+export type UnfollowErrors = {
+    403: ProblemDetails;
+    404: ProblemDetails;
+};
+
+export type UnfollowError = UnfollowErrors[keyof UnfollowErrors];
+
+export type UnfollowResponses = {
+    200: ThreadReadState;
+};
+
+export type UnfollowResponse = UnfollowResponses[keyof UnfollowResponses];
+
+export type FollowData = {
+    body?: never;
+    path: {
+        thread_id: string;
+    };
+    query?: never;
+    url: '/api/v1/threads/{thread_id}/follow';
+};
+
+export type FollowErrors = {
+    403: ProblemDetails;
+    404: ProblemDetails;
+};
+
+export type FollowError = FollowErrors[keyof FollowErrors];
+
+export type FollowResponses = {
+    200: ThreadReadState;
+};
+
+export type FollowResponse = FollowResponses[keyof FollowResponses];
+
+export type MarkRead2Data = {
+    body: ThreadReadRequest;
+    path: {
+        thread_id: string;
+    };
+    query?: never;
+    url: '/api/v1/threads/{thread_id}/read';
+};
+
+export type MarkRead2Errors = {
+    400: ProblemDetails;
+    403: ProblemDetails;
+    404: ProblemDetails;
+    429: ProblemDetails;
+};
+
+export type MarkRead2Error = MarkRead2Errors[keyof MarkRead2Errors];
+
+export type MarkRead2Responses = {
+    200: ThreadReadState;
+};
+
+export type MarkRead2Response = MarkRead2Responses[keyof MarkRead2Responses];
 
 export type UnfurlData = {
     body?: never;

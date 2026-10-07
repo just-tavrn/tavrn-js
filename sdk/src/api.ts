@@ -52,6 +52,12 @@ import type {
   CreateChannelRequest,
   CreateInviteRequest,
   CreateMessageRequest,
+  CreateThreadRequest,
+  FollowedThreads,
+  Thread,
+  ThreadList,
+  ThreadReadState,
+  UpdateThreadRequest,
   CreateRoleRequest,
   CreateRoomRequest,
   DeviceInfo,
@@ -259,6 +265,19 @@ export interface SearchQuery {
   has?: "file";
   sort?: "newest" | "relevance";
   cursor?: string;
+  limit?: number;
+}
+
+/** Filters of `GET /rooms/{room_id}/channels/{channel_id}/threads` (PROTOCOL.md §7e). */
+export interface ThreadListQuery {
+  /** `false` (default: active threads), `true` (archived only) or `all`. */
+  archived?: "false" | "true" | "all";
+  /** Forum posts carrying this tag id. */
+  tag?: string;
+  /** `activity` (default) or `created`. */
+  sort?: "activity" | "created";
+  /** `next` of the previous page. */
+  before?: string;
   limit?: number;
 }
 
@@ -746,7 +765,8 @@ export class TavrnApi {
     removeMember: (conversationId: string, username: string) => this.del(`/conversations/${conversationId}/members/${encodeURIComponent(username)}`),
     /** `epoch`: only encrypted messages of that MLS epoch (key checks, ENCRYPTION.md §7b). */
     /** `around`: the page around a message, newest first (jump to a search result; PROTOCOL.md §7). */
-    messages: (conversationId: string, query?: { limit?: number; before?: string; after?: string; around?: string; epoch?: number }) => this.get<Message[]>(`/conversations/${conversationId}/messages`, query),
+    /** `thread`: page one thread of the channel; without it the channel's list leaves thread messages out (§7e). */
+    messages: (conversationId: string, query?: { limit?: number; before?: string; after?: string; around?: string; epoch?: number; thread?: string }) => this.get<Message[]>(`/conversations/${conversationId}/messages`, query),
     /** Moves the read marker forward (never backwards); returns the counts after the update. */
     markRead: (conversationId: string, lastReadMessageId: string) => this.put<ReadState>(`/conversations/${conversationId}/read`, { last_read_message_id: lastReadMessageId }),
     send: (conversationId: string, req: CreateMessageRequest) => this.post<Message>(`/conversations/${conversationId}/messages`, req),
@@ -757,6 +777,30 @@ export class TavrnApi {
     pins: (conversationId: string) => this.get<PinList>(`/conversations/${conversationId}/pins`),
     pin: (conversationId: string, messageId: string) => this.put<Message>(`/conversations/${conversationId}/pins/${messageId}`, {}),
     unpin: (conversationId: string, messageId: string) => this.del<Message>(`/conversations/${conversationId}/pins/${messageId}`),
+  };
+
+  /**
+   * Threads, forum posts and announcement channels (PROTOCOL.md §7e). Thread messages are messages of the channel:
+   * send them with `thread_id` (`conversations.send`, `messages.create`) and page them with `threads.messages`.
+   */
+  threads = {
+    /** Start a thread (from `root_message_id` or standalone) or, in a forum channel, a post with its first `message`. */
+    create: (roomId: string, channelId: string, req: CreateThreadRequest) => this.post<Thread>(`/rooms/${roomId}/channels/${channelId}/threads`, req),
+    list: (roomId: string, channelId: string, query?: ThreadListQuery) => this.get<ThreadList>(`/rooms/${roomId}/channels/${channelId}/threads`, query as Query),
+    get: (threadId: string) => this.get<Thread>(`/threads/${encodeURIComponent(threadId)}`),
+    /** Rename (ciphertext with `title_epoch` in encrypted channels), retag, archive or lock (creator or `manage_threads`). */
+    update: (threadId: string, req: UpdateThreadRequest) => this.patch<Thread>(`/threads/${encodeURIComponent(threadId)}`, req),
+    /** Deletes the thread with all its messages. */
+    delete: (threadId: string) => this.del(`/threads/${encodeURIComponent(threadId)}`),
+    markRead: (threadId: string, lastReadMessageId: string) =>
+      this.put<ThreadReadState>(`/threads/${encodeURIComponent(threadId)}/read`, { last_read_message_id: lastReadMessageId }),
+    follow: (threadId: string) => this.post<ThreadReadState>(`/threads/${encodeURIComponent(threadId)}/follow`, {}),
+    unfollow: (threadId: string) => this.del<ThreadReadState>(`/threads/${encodeURIComponent(threadId)}/follow`),
+    /** The requester's followed threads in a room (badges, which thread messages notify). */
+    followed: (roomId: string) => this.get<FollowedThreads>(`/rooms/${roomId}/followed-threads`),
+    /** A page of a thread's messages (same paging as the channel). */
+    messages: (conversationId: string, threadId: string, query?: { limit?: number; before?: string; after?: string; around?: string }) =>
+      this.get<Message[]>(`/conversations/${conversationId}/messages`, { ...query, thread: threadId }),
   };
 
   /** Node-side message search over the unencrypted channels of a room (PROTOCOL.md §7d, `search.v1`). */
@@ -1238,7 +1282,7 @@ export class TavrnApi {
   };
 
   messages = {
-    list: (roomId: string, channelId: string, query?: { limit?: number; before?: string; after?: string }) =>
+    list: (roomId: string, channelId: string, query?: { limit?: number; before?: string; after?: string; around?: string; thread?: string }) =>
       this.get<Message[]>(`/rooms/${roomId}/channels/${channelId}/messages`, query),
     create: (roomId: string, channelId: string, req: CreateMessageRequest) => this.post<Message>(`/rooms/${roomId}/channels/${channelId}/messages`, req),
     edit: (roomId: string, channelId: string, messageId: string, req: EditMessageRequest) =>

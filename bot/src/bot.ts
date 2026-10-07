@@ -110,10 +110,24 @@ export interface BotMessage {
   /** Plaintext messages: the author device's signature check (FEDERATION.md §10.3); null for encrypted ones. */
   signature: PlainStatus | null;
   replyToId: string | null;
+  /** The thread the message belongs to (PROTOCOL.md §7e), null for messages of the channel itself. */
+  threadId: string | null;
   createdAt: string;
   raw: Message;
-  /** Answers in the same conversation, as a reply to this message. */
+  /** Answers in the same conversation (and the same thread), as a reply to this message. */
   reply(content: ReplyContent, opts?: SendOptions): Promise<Message>;
+  /**
+   * Answers in a thread: the message's own thread, the thread it already started, or a new thread started from it
+   * (`title` defaults to the start of the message's text). Room channels only.
+   */
+  replyInThread(content: ReplyContent, opts?: SendOptions & { title?: string }): Promise<Message>;
+}
+
+/** A thread title from free text: one line, at most 100 characters, never empty (PROTOCOL.md §7e). */
+export function threadTitle(text: string): string {
+  const line = Array.from(text.replace(/\s+/g, " ").trim());
+  const title = line.length > 100 ? `${line.slice(0, 99).join("")}…` : line.join("");
+  return title || "Thread";
 }
 
 export interface SendOptions {
@@ -121,6 +135,8 @@ export interface SendOptions {
   replyTo?: string | null;
   /** Addresses mentioned (lowercase, without duplicates). */
   mentions?: string[];
+  /** Write into this thread of the channel (PROTOCOL.md §7e). */
+  threadId?: string | null;
 }
 
 export interface InstallEvent {
@@ -803,9 +819,11 @@ export class Bot {
       mentionsMe: mentions.includes(me.address.toLowerCase()),
       signature,
       replyToId: m.reply_to_id ?? null,
+      threadId: m.thread_id ?? null,
       createdAt: m.created_at,
       raw: m,
-      reply: (c, o = {}) => this.send(q, c, { ...o, replyTo: o.replyTo ?? m.id }),
+      reply: (c, o = {}) => this.send(q, c, { ...o, replyTo: o.replyTo ?? m.id, threadId: o.threadId !== undefined ? o.threadId : (m.thread_id ?? null) }),
+      replyInThread: (c, o = {}) => this.replyInThread(q, m, typeof content.body === "string" ? content.body : "", c, o),
     };
     this.emit("message", message);
   }
@@ -871,13 +889,39 @@ export class Bot {
     const object = normalizeContent(content);
     const mentions = mentionList(opts.mentions);
     const replyTo = opts.replyTo ?? null;
+    const threadId = opts.threadId ?? null;
+    const thread = threadId ? { thread_id: threadId } : {};
     if (await this.isEncrypted(link, q, id)) {
       if (!(await this.join(q, true))) throw new BotError("not_member", `The bot could not join the encryption group of ${q}`);
       const sealed = await mls.encrypt(q, object);
-      return link.api.conversations.send(id, { content: sealed.content, epoch: sealed.epoch, mentions, reply_to_id: replyTo });
+      return link.api.conversations.send(id, { content: sealed.content, epoch: sealed.epoch, mentions, reply_to_id: replyTo, ...thread });
     }
-    const signature = mls.signPlaintext(q, { reply_to: replyTo, thread_id: null, mentions_everyone: false, mentions, attachments: [] }, object);
-    return link.api.conversations.send(id, { content: object, mentions, reply_to_id: replyTo, signature });
+    const signature = mls.signPlaintext(q, { reply_to: replyTo, thread_id: threadId, mentions_everyone: false, mentions, attachments: [] }, object);
+    return link.api.conversations.send(id, { content: object, mentions, reply_to_id: replyTo, signature, ...thread });
+  }
+
+  /** {@link BotMessage.replyInThread}: the message's thread, the thread it started, or a new one from it. */
+  private async replyInThread(q: string, m: Message, text: string, content: ReplyContent, opts: SendOptions & { title?: string }): Promise<Message> {
+    const existing = m.thread_id ?? m.thread?.id ?? null;
+    if (existing) return this.send(q, content, { ...opts, threadId: existing });
+    const roomId = this.channels.get(q)?.roomId;
+    if (!roomId) throw new BotError("not_member", "Threads exist in room channels only");
+    const { domain, id } = splitQualified(q);
+    const link = this.linkFor(domain);
+    const title = threadTitle(opts.title ?? text);
+    const encrypted = await this.isEncrypted(link, q, id);
+    if (encrypted && !(await this.join(q, true))) throw new BotError("not_member", `The bot could not join the encryption group of ${q}`);
+    const sealedTitle = encrypted ? await this.mls!.encryptThreadTitle(q, title) : { title };
+    let threadId: string;
+    try {
+      threadId = (await link.api.threads.create(roomId, id, { ...sealedTitle, root_message_id: m.id })).id;
+    } catch (e) {
+      // Another member started the thread in between: write into theirs.
+      const started = e instanceof TavrnApiError && e.code === "thread.exists" ? (e.problem as { meta?: { thread_id?: unknown } }).meta?.thread_id : undefined;
+      if (typeof started !== "string") throw e;
+      threadId = started;
+    }
+    return this.send(q, content, { ...opts, threadId });
   }
 
   // ---- Tokens ---------------------------------------------------------------------------------
