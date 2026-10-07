@@ -765,8 +765,11 @@ export class TavrnApi {
     removeMember: (conversationId: string, username: string) => this.del(`/conversations/${conversationId}/members/${encodeURIComponent(username)}`),
     /** `epoch`: only encrypted messages of that MLS epoch (key checks, ENCRYPTION.md §7b). */
     /** `around`: the page around a message, newest first (jump to a search result; PROTOCOL.md §7). */
-    /** `thread`: page one thread of the channel; without it the channel's list leaves thread messages out (§7e). */
-    messages: (conversationId: string, query?: { limit?: number; before?: string; after?: string; around?: string; epoch?: number; thread?: string }) => this.get<Message[]>(`/conversations/${conversationId}/messages`, query),
+    /**
+     * `thread`: page one thread of the channel; without it the channel's list leaves thread messages out (§7e).
+     * `threads: "all"`: the channel together with its threads (local search index syncs).
+     */
+    messages: (conversationId: string, query?: { limit?: number; before?: string; after?: string; around?: string; epoch?: number; thread?: string; threads?: "all" }) => this.get<Message[]>(`/conversations/${conversationId}/messages`, query),
     /** Moves the read marker forward (never backwards); returns the counts after the update. */
     markRead: (conversationId: string, lastReadMessageId: string) => this.put<ReadState>(`/conversations/${conversationId}/read`, { last_read_message_id: lastReadMessageId }),
     send: (conversationId: string, req: CreateMessageRequest) => this.post<Message>(`/conversations/${conversationId}/messages`, req),

@@ -8878,6 +8878,10 @@ export type ListConversationMessagesData = {
          * Page this thread of the channel (PROTOCOL.md §7e); without it the channel's list leaves thread messages out.
          */
         thread?: string | null;
+        /**
+         * `all`: the channel's messages including those of its threads (clients syncing their local search index).
+         */
+        threads?: string | null;
     };
     url: '/api/v1/conversations/{conversation_id}/messages';
 };
@@ -10600,6 +10604,10 @@ export type ListMessagesData = {
          * Page this thread of the channel (PROTOCOL.md §7e); without it the channel's list leaves thread messages out.
          */
         thread?: string | null;
+        /**
+         * `all`: the channel's messages including those of its threads (clients syncing their local search index).
+         */
+        threads?: string | null;
     };
     url: '/api/v1/rooms/{room_id}/channels/{channel_id}/messages';
 };

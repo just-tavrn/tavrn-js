@@ -54,6 +54,8 @@ export interface IndexedMessage {
   files: string[];
   /** Room of a room channel (the client needs it to open the message); absent for DMs. Stored sealed. */
   room?: string;
+  /** The thread of a thread message (PROTOCOL.md §7e; the client opens it there). Stored sealed. */
+  thread?: string;
 }
 
 export interface SearchFilter {
@@ -80,6 +82,8 @@ export interface LocalHit {
   files: string[];
   /** The room of a room channel, as given to `add`. */
   room?: string;
+  /** The thread, as given to `add`. */
+  thread?: string;
 }
 
 export interface SyncState {
@@ -117,6 +121,8 @@ interface DocRecord {
   f: string[];
   /** Room id (room channels). */
   r?: string;
+  /** Thread id (thread messages). */
+  h?: string;
   /** Lookup keys of the message (its posting token keys are derived from them). */
   k: string[];
 }
@@ -182,6 +188,7 @@ function cleanMessage(m: IndexedMessage): IndexedMessage {
     text: cutText(String(m.text ?? ""), MAX_INDEXED_CHARS),
     files: Array.isArray(m.files) ? m.files.map(String) : [],
     ...(typeof m.room === "string" && m.room ? { room: m.room } : {}),
+    ...(typeof m.thread === "string" && m.thread ? { thread: m.thread } : {}),
   };
 }
 
@@ -302,6 +309,7 @@ export class SearchIndex {
         snippet: snippet(d.x, terms),
         files: d.f,
         ...(d.r ? { room: d.r } : {}),
+        ...(d.h ? { thread: d.h } : {}),
       }));
     });
   }
@@ -595,7 +603,7 @@ export class SearchIndex {
         list.map(async (m) => {
           const lookups = indexKeys(m.files.length ? `${m.files.join("\n")}\n${m.text}` : m.text);
           const key = await this.docKey(c, m.id);
-          const doc: DocRecord = { c, m: m.id, t: m.ts, a: m.author, x: m.text, f: m.files, k: lookups, ...(m.room ? { r: m.room } : {}) };
+          const doc: DocRecord = { c, m: m.id, t: m.ts, a: m.author, x: m.text, f: m.files, k: lookups, ...(m.room ? { r: m.room } : {}), ...(m.thread ? { h: m.thread } : {}) };
           const sealed = await seal(keys, aad("docs", key), doc);
           return { m, key, lookups, sealed };
         }),

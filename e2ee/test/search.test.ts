@@ -124,6 +124,10 @@ describe("SearchIndex", () => {
     expect(hit!.room).toBeUndefined();
     await index.add([msg("roomy channel text", { room: "ROOM1" })]);
     expect((await index.search("roomy"))[0]!.room).toBe("ROOM1");
+    expect((await index.search("roomy"))[0]!.thread).toBeUndefined();
+    // Thread messages keep their thread (PROTOCOL.md §7e), sealed like the room.
+    await index.add([msg("threaded reply text", { room: "ROOM1", thread: "THREAD1" })]);
+    expect((await index.search("threaded"))[0]).toMatchObject({ room: "ROOM1", thread: "THREAD1" });
   });
 
   it("finds file names, filters by author, date, files, conversation and limit", async () => {
