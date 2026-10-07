@@ -43,7 +43,7 @@ describe("computePermissions", () => {
     // Same bits as the Rust constant: administrator, room/role/channel management, audit log, kick, ban,
     // timeout, emojis, whiteboard management, webhooks, files, move, mute, manage messages, manage nicknames,
     // applications, purge.
-    expect(EVERYONE_RESTRICTED.toString()).toBe("4611686062204976004");
+    expect(EVERYONE_RESTRICTED.toString()).toBe("4611686130924452740");
     expect(isEveryoneRestricted("MANAGE_APPLICATIONS")).toBe(true);
     expect(isEveryoneRestricted("ADMINISTRATOR")).toBe(true);
     expect(isEveryoneRestricted("MANAGE_WHITEBOARD")).toBe(true);

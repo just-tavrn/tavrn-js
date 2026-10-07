@@ -41,6 +41,7 @@ export const Permission = {
   MANAGE_FILES: 1n << 33n,
   READ_HISTORY: 1n << 34n,
   MANAGE_APPLICATIONS: 1n << 35n,
+  MANAGE_THREADS: 1n << 36n,
   ADMINISTRATOR: 1n << 62n,
 } as const;
 
@@ -71,6 +72,7 @@ export const EVERYONE_RESTRICTED: bigint = [
   Permission.MANAGE_MESSAGES,
   Permission.MANAGE_NICKNAMES,
   Permission.MANAGE_APPLICATIONS,
+  Permission.MANAGE_THREADS,
   Permission.PURGE,
 ].reduce((a, b) => a | b, 0n);
 
@@ -107,6 +109,7 @@ export const PERMISSION_LABELS: { name: PermissionName; label: string; group: st
   { name: "CREATE_THREADS", label: "Create threads", group: "Text" },
   { name: "PIN_MESSAGES", label: "Pin messages", group: "Text" },
   { name: "MANAGE_MESSAGES", label: "Manage messages", group: "Moderation" },
+  { name: "MANAGE_THREADS", label: "Manage threads", group: "Moderation" },
   { name: "KICK_MEMBERS", label: "Remove members", group: "Moderation" },
   { name: "BAN_MEMBERS", label: "Ban members", group: "Moderation" },
   { name: "MODERATE_MEMBERS", label: "Moderate members (timeout)", group: "Moderation" },
@@ -199,7 +202,8 @@ export const SCOPES: readonly (readonly [string, bigint])[] = [
       Permission.VIEW_AUDIT_LOG |
       Permission.MANAGE_NICKNAMES |
       Permission.MUTE_MEMBERS |
-      Permission.MOVE_MEMBERS,
+      Permission.MOVE_MEMBERS |
+      Permission.MANAGE_THREADS,
   ],
   ["rooms:manage", Permission.MANAGE_ROOM | Permission.MANAGE_CHANNELS | Permission.MANAGE_ROLES | Permission.CREATE_INVITES | Permission.MANAGE_EMOJIS | Permission.MANAGE_FILES | Permission.MANAGE_APPLICATIONS],
   ["voice", Permission.CONNECT | Permission.SPEAK | Permission.STREAM | Permission.USE_CAMERA | Permission.USE_SOUNDBOARD | Permission.USE_EXTERNAL_SOUNDS | Permission.PRIORITY_SPEAKER],

@@ -764,6 +764,47 @@ describe("MlsManager across nodes (FEDERATION.md §3.5, §3.6, §6)", () => {
   });
 });
 
+describe("threads (PROTOCOL.md §7e)", () => {
+  it("thread messages and titles use the channel's group: no new group, no new keys", async () => {
+    const { node, device } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    await bob.mls.ensureJoined(CONV, { canCreate: true });
+    await alice.mls.catchUp(CONV);
+    const groups = node.groups.size;
+    const epoch = node.groups.get(ID)!.epoch;
+    // A thread reply is an ordinary message of the channel (the envelope's thread_id is not part of the encryption).
+    const reply = { ...(await send(bob, CONV, "in the thread", "t1")), thread_id: "01J9ZK3G5M8Q2W4E6R8T0Y2VT1" };
+    expect(await alice.mls.decrypt(CONV, reply)).toEqual({ ok: true, content: { type: "text", body: "in the thread" } });
+    const title = await alice.mls.encryptThreadTitle(CONV, "  Release plan ");
+    expect(title.title_epoch).toBe(alice.mls.epoch(CONV));
+    const thread = { id: "01J9ZK3G5M8Q2W4E6R8T0Y2VT1", title: title.title, title_epoch: title.title_epoch, title_author: alice.address, title_device_id: DEV.a };
+    expect(await bob.mls.decryptThreadTitle(CONV, thread)).toEqual({ ok: true, title: "Release plan" });
+    expect(node.groups.size).toBe(groups);
+    expect(node.groups.get(ID)!.epoch).toBe(epoch);
+  });
+
+  it("refuses message content as a title, replays, wrong authors and overlong titles", async () => {
+    const { device } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    await bob.mls.ensureJoined(CONV, { canCreate: true });
+    await alice.mls.catchUp(CONV);
+    const message = await send(alice, CONV, "not a title", "m1");
+    const asTitle = { id: "T1", title: message.content, title_epoch: message.epoch, title_author: alice.address, title_device_id: DEV.a };
+    expect(await bob.mls.decryptThreadTitle(CONV, asTitle)).toEqual({ ok: false, reason: "invalid" });
+    const t = await alice.mls.encryptThreadTitle(CONV, "Plans");
+    const thread = { id: "T2", title: t.title, title_epoch: t.title_epoch, title_author: alice.address, title_device_id: DEV.a };
+    expect((await bob.mls.decryptThreadTitle(CONV, thread)).ok).toBe(true);
+    expect(await bob.mls.decryptThreadTitle(CONV, { ...thread, id: "T3" })).toEqual({ ok: false, reason: "replay" });
+    expect((await bob.mls.decryptThreadTitle(CONV, { ...thread, id: "T4", title_author: bob.address, title_device_id: DEV.b })).ok).toBe(false);
+    await expect(alice.mls.encryptThreadTitle(CONV, "x".repeat(101))).rejects.toThrow(RangeError);
+    await expect(alice.mls.encryptThreadTitle(CONV, "   ")).rejects.toThrow(RangeError);
+  });
+});
+
 describe("qualified ids and stored meta data", () => {
   it("checks embeds: the sender refuses invalid ones, receivers drop invalid ones (APPLICATIONS.md §6.4)", async () => {
     const { device } = setup();
