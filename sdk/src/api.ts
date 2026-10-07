@@ -179,6 +179,7 @@ import type { InboxKey, PublishInboxKeyRequest } from "./generated/types.gen";
 import type { BackendInfo, BackendRequest, BackendTest, DeleteResult, FileEntry, FileEntryDetail, FileList, FilesInfo, UpdateEntryRequest } from "./generated/types.gen";
 import type { AdminApplication, AdminApplicationUpdate, ApplicationBlock, ApplicationBlockRequest, InstallIndexEntry, InstallRequest, Installation, PublicApplication } from "./generated/types.gen";
 import type { PeerResolution } from "./generated/types.gen";
+import type { AdminRoom, AutomodRule, AutomodSettings, CreateReportRequest, ModerationReport, ReportActionRequest, ReportActionResult, ReportCreated, ReportList, UpdateReportRequest } from "./generated/types.gen";
 import type { AcceptTermsRequest, AccountDeletion, CounterDecision, CounterNoticeRequest, DataSummary, DeleteAccountRequest, DeletionStarted, LegalContact, LegalDocument, LegalTemplate, Notice, NoticeAction, NoticeActionResult, NoticeCreated, NoticeDetail, NoticeRequest, NoticeStatus, TermsStatus, UploaderNotice } from "./generated/types.gen";
 import type { Callback, CommandApproval, CommandApprovalRequest, CommandApprovalSettings, CommandDefinition, CommandSet, FollowUp, FollowUpResponse, InvokeRequest, InvokeResponse, PaletteCommand, PutCommandSettings, RoomCommand, RoomCommands } from "./generated/types.gen";
 
@@ -634,6 +635,8 @@ export class TavrnApi {
     tokens: () => this.get<AdminToken[]>("/admin/tokens"),
     createToken: (req: CreateAdminTokenRequest) => this.post<CreatedAdminToken>("/admin/tokens", req),
     revokeToken: (tokenId: string) => this.del(`/admin/tokens/${encodeURIComponent(tokenId)}`),
+    /** The node's rooms with their roles (pickers such as the SSO group map). */
+    rooms: (query?: { q?: string; limit?: number; after?: string }) => this.get<AdminRoom[]>("/admin/rooms", query),
   };
 
   /**
@@ -1008,6 +1011,30 @@ export class TavrnApi {
     deleteIcon: (roomId: string) => this.del<Room>(`/rooms/${roomId}/icon`),
     auditLog: (roomId: string, query?: { limit?: number; before?: string }) => this.get<AuditEntry[]>(`/rooms/${roomId}/audit-log`, query),
     purge: (roomId: string, req: PurgeRequest) => this.post<PurgeResponse>(`/rooms/${roomId}/moderation/purge`, req),
+    /** Hands the room to another member (owner only, needs a reauth token, MODERATION.md §4). */
+    transfer: (roomId: string, userId: string) => this.post<RoomDetail>(`/rooms/${roomId}/transfer`, { user_id: userId }),
+  };
+
+  /**
+   * Reports and the moderation inbox (MODERATION.md §1, capability `reports.v1`). Room moderators read `room`, node
+   * admins `admin`; `act` runs the moderation shortcuts with the caller's permissions.
+   */
+  reports = {
+    create: (req: CreateReportRequest) => this.post<ReportCreated>("/reports", req),
+    get: (reportId: string) => this.get<ModerationReport>(`/reports/${encodeURIComponent(reportId)}`),
+    update: (reportId: string, req: UpdateReportRequest) => this.patch<ModerationReport>(`/reports/${encodeURIComponent(reportId)}`, req),
+    /** Node admins only. */
+    delete: (reportId: string) => this.del(`/reports/${encodeURIComponent(reportId)}`),
+    act: (reportId: string, req: ReportActionRequest) => this.post<ReportActionResult>(`/reports/${encodeURIComponent(reportId)}/actions`, req),
+    room: (roomId: string, query?: { status?: string; limit?: number; before?: string }) => this.get<ReportList>(`/rooms/${roomId}/reports`, query),
+    admin: (query?: { status?: string; scope?: string; limit?: number; before?: string }) => this.get<ReportList>("/admin/reports", query),
+  };
+
+  /** Content rules of a room's unencrypted channels (MODERATION.md §2, capability `automod.v1`). */
+  automod = {
+    get: (roomId: string) => this.get<AutomodSettings>(`/rooms/${roomId}/automod`),
+    /** Replaces the whole list (`manage_room`). */
+    set: (roomId: string, rules: AutomodRule[]) => this.put<AutomodSettings>(`/rooms/${roomId}/automod`, { rules }),
   };
 
   invites = {
