@@ -7,6 +7,10 @@ updates:
     groups:
       javascript:
         patterns: ["*"]
+    ignore:
+      # TypeScript 7 (the Go compiler) breaks @hey-api/openapi-ts, which generates the SDK types.
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }
