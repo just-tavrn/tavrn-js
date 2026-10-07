@@ -1,0 +1,42 @@
+{
+  "name": "@tavrn/e2ee",
+  "version": "0.1.0",
+  "description": "tavrn end-to-end encryption client logic (MLS session manager, content codecs, key storage) for the web client and bots",
+  "license": "MPL-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/just-tavrn/tavrn-js.git",
+    "directory": "e2ee"
+  },
+  "homepage": "https://github.com/just-tavrn/tavrn-js/tree/main/e2ee#readme",
+  "bugs": "https://github.com/just-tavrn/tavrn-js/issues",
+  "keywords": [
+    "tavrn",
+    "e2ee",
+    "mls",
+    "end-to-end-encryption"
+  ],
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./node": "./src/node.ts",
+    "./search-contract": "./src/search/contract.ts"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@tavrn/crypto": "github:just-tavrn/tavrn-crypto#v0.1.0&path:pkg",
+    "@tavrn/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}

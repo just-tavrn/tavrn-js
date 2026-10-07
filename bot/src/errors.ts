@@ -1,0 +1,39 @@
+// SPDX-License-Identifier: Apache-2.0
+/** Errors of the bot runtime with stable codes (log them, branch on `code`, never on the message). */
+
+export type BotErrorCode =
+  /** The token is not an app token of a bot (`typ` ≠ `app`, malformed, or the account is no bot). */
+  | "token_invalid"
+  /** The token's `exp` has passed: the owner resets it, or the bot rotated too late (APPLICATIONS.md §2.2). */
+  | "token_expired"
+  /** The node refused the token while running (revoked, reset, application disabled): WebSocket close `4001`. */
+  | "token_refused"
+  /** A newer connection of the same token replaced this one (close code `4004`, do not reconnect). */
+  | "replaced"
+  /** The account has an identity key but the process has no key (APPLICATIONS.md §3.1). */
+  | "key_missing"
+  /** The configured key does not belong to the published identity key of the bot. */
+  | "key_mismatch"
+  /** The key (`key` option or the key file) cannot be parsed. */
+  | "key_invalid"
+  /** The state directory holds the data of another account (one bot account and device per directory). */
+  | "state_dir_in_use"
+  /** The node of `node` cannot be used (unreachable, not a tavrn node, domain differs from the token issuer). */
+  | "node_invalid"
+  /** The conversation is not known to the bot or the bot is not a member of its encryption group. */
+  | "not_member"
+  /** An interaction was answered twice, or answered after it expired. */
+  | "interaction_answered"
+  /** The bot was stopped (or not started yet). */
+  | "stopped";
+
+export class BotError extends Error {
+  constructor(
+    readonly code: BotErrorCode,
+    message: string,
+    options?: { cause?: unknown },
+  ) {
+    super(message, options);
+    this.name = "BotError";
+  }
+}

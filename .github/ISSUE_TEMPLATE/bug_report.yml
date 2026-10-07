@@ -1,0 +1,46 @@
+name: Bug report
+description: Something in @tavrn/sdk, @tavrn/e2ee or @tavrn/bot does not work as described
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security problems (anything that could weaken the encryption, leak secrets or bypass permissions) are
+        reported privately through "Report a vulnerability" on the Security tab, not here.
+  - type: dropdown
+    id: package
+    attributes:
+      label: Package
+      options:
+        - "@tavrn/sdk"
+        - "@tavrn/e2ee"
+        - "@tavrn/bot"
+        - example bot (bot/examples)
+        - build, workspace or CI
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What did you do, what did you expect, what happened instead? Error codes (`TavrnApiError` problem types, `E2eeError` codes, bot `error` events) help.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: A minimal code sample or test. Never paste tokens, key files, state directories or recovery keys.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Browser or Node.js version, bundler, operating system, node version (`GET /node`) if relevant.

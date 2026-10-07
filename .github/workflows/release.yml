@@ -1,0 +1,95 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Release of @tavrn/sdk, @tavrn/e2ee and @tavrn/bot (docs/GITHUB.md "Releases"). Push a tag vX.Y.Z whose commit
+# carries version X.Y.Z in all three package.json files: the workflow checks the tag, the generated types and the
+# tests, packs the three npm tarballs (pnpm pack replaces workspace:* with the version) and attaches them to a
+# GitHub release. Publishing to npm (with provenance) additionally needs the repository variable PUBLISH_ENABLED and
+# the secret NPM_TOKEN, and refuses git dependencies (they must become version ranges first). Gated by CI_ENABLED.
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Release ${{ github.ref_name }}
+    if: ${{ vars.CI_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Access to private organization repositories
+        env:
+          READ_TOKEN: ${{ secrets.TAVRN_READ_PAT }}
+        run: |
+          if [ -n "$READ_TOKEN" ]; then
+            git config --global url."https://x-access-token:${READ_TOKEN}@github.com/just-tavrn/".insteadOf "https://github.com/just-tavrn/"
+            git config --global --add url."https://x-access-token:${READ_TOKEN}@github.com/just-tavrn/".insteadOf "ssh://git@github.com/just-tavrn/"
+            git config --global --add url."https://x-access-token:${READ_TOKEN}@github.com/just-tavrn/".insteadOf "git@github.com:just-tavrn/"
+          fi
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          token: ${{ secrets.TAVRN_READ_PAT || github.token }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+      - name: Tag matches the package versions
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          v="${TAG#v}"
+          for p in sdk e2ee bot; do
+            pv="$(node -p "require('./$p/package.json').version")"
+            if [ "$pv" != "$v" ]; then
+              echo "tag $TAG does not match $p/package.json version $pv" >&2
+              exit 1
+            fi
+          done
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - run: pnpm install --frozen-lockfile
+      - name: Checks (generated types, SPDX headers, dependency licenses, typecheck, tests)
+        run: |
+          scripts/check-generated.sh
+          scripts/check-spdx.sh
+          node scripts/check-js-licenses.mjs
+          pnpm -r typecheck
+          pnpm -r test
+      - name: Pack the npm tarballs
+        run: |
+          mkdir -p release
+          for p in sdk e2ee bot; do (cd "$p" && pnpm pack --pack-destination ../release); done
+          ls -l release
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes --verify-tag release/*.tgz
+      - name: Publish to npm
+        if: ${{ vars.PUBLISH_ENABLED == 'true' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # Published packages must not point at git repositories (private-phase references such as
+          # github:just-tavrn/tavrn-crypto#v0.1.0&path:pkg become version ranges first).
+          for p in sdk e2ee bot; do
+            if node -e "const d=require('./$p/package.json').dependencies??{};process.exit(Object.values(d).some(s=>/^(github:|git\+|git:|https?:)/.test(s))?0:1)"; then
+              echo "$p/package.json still has git dependencies; switch them to version ranges before publishing" >&2
+              exit 1
+            fi
+          done
+          for p in sdk e2ee bot; do
+            npm publish "release/tavrn-$p-$VERSION.tgz" --provenance --access public
+          done

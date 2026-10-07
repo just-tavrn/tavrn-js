@@ -1,0 +1,47 @@
+{
+  "name": "@tavrn/bot",
+  "version": "0.1.0",
+  "description": "tavrn bot runtime for Node.js: key file, bot device, end-to-end encryption, events, commands and federated installations",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/just-tavrn/tavrn-js.git",
+    "directory": "bot"
+  },
+  "homepage": "https://github.com/just-tavrn/tavrn-js/tree/main/bot#readme",
+  "bugs": "https://github.com/just-tavrn/tavrn-js/issues",
+  "keywords": [
+    "tavrn",
+    "bot",
+    "chat",
+    "e2ee"
+  ],
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "NOTICE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "example": "vite-node examples/echo-weather/index.ts"
+  },
+  "dependencies": {
+    "@tavrn/crypto": "github:just-tavrn/tavrn-crypto#v0.1.0&path:pkg",
+    "@tavrn/e2ee": "workspace:*",
+    "@tavrn/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "^5.9.0",
+    "vite-node": "^3.2.4",
+    "vitest": "^3.2.0"
+  }
+}

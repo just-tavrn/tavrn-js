@@ -1,0 +1,37 @@
+name: Feature request
+description: Suggest an improvement to the SDK, the encryption client or the bot runtime
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        New routes, events, wire formats or encryption rules start as a proposal in
+        [tavrn-protocol](https://github.com/just-tavrn/tavrn-protocol).
+  - type: dropdown
+    id: package
+    attributes:
+      label: Package
+      options:
+        - "@tavrn/sdk"
+        - "@tavrn/e2ee"
+        - "@tavrn/bot"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what is missing?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: How could the API look?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives

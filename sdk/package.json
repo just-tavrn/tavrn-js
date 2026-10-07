@@ -1,0 +1,40 @@
+{
+  "name": "@tavrn/sdk",
+  "version": "0.1.0",
+  "description": "tavrn API client for web clients and bots, generated from the node's OpenAPI spec",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/just-tavrn/tavrn-js.git",
+    "directory": "sdk"
+  },
+  "homepage": "https://github.com/just-tavrn/tavrn-js/tree/main/sdk#readme",
+  "bugs": "https://github.com/just-tavrn/tavrn-js/issues",
+  "keywords": [
+    "tavrn",
+    "chat",
+    "api-client",
+    "openapi",
+    "websocket",
+    "federation"
+  ],
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "NOTICE"
+  ],
+  "scripts": {
+    "generate": "openapi-ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "devDependencies": {
+    "@hey-api/openapi-ts": "^0.84.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}

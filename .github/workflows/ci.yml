@@ -1,0 +1,114 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Uses the organization's reusable workflows (just-tavrn/.github). Every job is gated by the repository
+# variable CI_ENABLED (docs/GITHUB.md): nothing runs until the owner sets it to "true".
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      node-image:
+        description: "Bot integration tests: container image of the node (default: vars.TAVRN_NODE_IMAGE or ghcr.io/just-tavrn/tavrn-node:edge)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  js:
+    name: JavaScript
+    if: ${{ vars.CI_ENABLED == 'true' }}
+    uses: just-tavrn/.github/.github/workflows/js-ci.yml@main
+    with:
+      # The generated SDK types must match protocol/openapi.json; then SPDX headers, dependency licenses, typecheck,
+      # Vitest (sdk, e2ee with the WebAssembly module of @tavrn/crypto, bot unit tests) and the npm tarballs.
+      pre-test: scripts/check-generated.sh
+      typecheck: pnpm -r typecheck
+      test: pnpm -r test
+      build: |
+        for p in sdk e2ee bot; do (cd "$p" && pnpm pack --dry-run); done
+    secrets:
+      # The protocol submodule and the @tavrn/crypto git dependency are private until the repositories go public.
+      READ_TOKEN: ${{ secrets.TAVRN_READ_PAT }}
+
+  publish-check:
+    name: Publication hygiene
+    if: ${{ vars.CI_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: No private files, domains or secrets
+        env:
+          # Comma-separated private domains, hosts and addresses (repository or organization secret).
+          PUBLISH_CHECK_PRIVATE: ${{ secrets.PUBLISH_CHECK_PRIVATE }}
+        run: scripts/publish-check.sh
+
+  # The bot runtime's integration tests (bot/test/node) start real nodes. They run on the self-hosted runner of the
+  # test host (label tavrn-e2e) with the node binary copied out of the node's container image, only on pushes to main
+  # and by hand (never for pull requests: a self-hosted runner executes the code it checks out). Additionally gated by
+  # the variable BOT_NODE_TESTS until the node image exists (docs/GITHUB.md).
+  bot-node:
+    name: Bot integration tests (real nodes)
+    if: ${{ vars.CI_ENABLED == 'true' && vars.BOT_NODE_TESTS == 'true' && github.event_name != 'pull_request' }}
+    runs-on: [self-hosted, tavrn-e2e]
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Access to private organization repositories
+        env:
+          READ_TOKEN: ${{ secrets.TAVRN_READ_PAT }}
+        run: |
+          # Per-job git configuration, removed again in the cleanup step (the runner is persistent).
+          export GIT_CONFIG_GLOBAL="$RUNNER_TEMP/gitconfig"
+          echo "GIT_CONFIG_GLOBAL=$GIT_CONFIG_GLOBAL" >> "$GITHUB_ENV"
+          : > "$GIT_CONFIG_GLOBAL"
+          if [ -n "$READ_TOKEN" ]; then
+            git config --global url."https://x-access-token:${READ_TOKEN}@github.com/just-tavrn/".insteadOf "https://github.com/just-tavrn/"
+            git config --global --add url."https://x-access-token:${READ_TOKEN}@github.com/just-tavrn/".insteadOf "ssh://git@github.com/just-tavrn/"
+            git config --global --add url."https://x-access-token:${READ_TOKEN}@github.com/just-tavrn/".insteadOf "git@github.com:just-tavrn/"
+          fi
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          token: ${{ secrets.TAVRN_READ_PAT || github.token }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+      - name: Node binary from the image
+        env:
+          NODE_IMAGE: ${{ inputs.node-image || vars.TAVRN_NODE_IMAGE || 'ghcr.io/just-tavrn/tavrn-node:edge' }}
+          # The job token pulls the image when the package grants this repository read access (docs/GITHUB.md).
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          bin="$RUNNER_TEMP/tavrn-bin"
+          mkdir -p "$bin"
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker pull "$NODE_IMAGE"
+          cid="$(docker create "$NODE_IMAGE")"
+          trap 'docker rm -f "$cid" >/dev/null' EXIT
+          docker cp "$cid:/usr/local/bin/tavrn-node" "$bin/tavrn-node"
+          docker logout ghcr.io
+          echo "TAVRN_NODE_BIN=$bin/tavrn-node" >> "$GITHUB_ENV"
+          "$bin/tavrn-node" --version
+      - name: Bot tests (unit and integration)
+        run: pnpm --filter @tavrn/bot test
+      - name: Clean up
+        if: ${{ always() }}
+        run: rm -rf "$RUNNER_TEMP/tavrn-bin" "$RUNNER_TEMP/gitconfig"

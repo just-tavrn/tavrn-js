@@ -1,0 +1,4 @@
+# Configuration of actionlint (https://github.com/rhysd/actionlint); the self-hosted runner label of the test host (docs/GITHUB.md).
+self-hosted-runner:
+  labels:
+    - tavrn-e2e

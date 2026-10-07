@@ -1,0 +1,11 @@
+{
+  "name": "tavrn-js-workspace",
+  "private": true,
+  "license": "Apache-2.0",
+  "scripts": {
+    "generate": "pnpm --filter @tavrn/sdk generate",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test"
+  },
+  "packageManager": "pnpm@12.9.1"
+}

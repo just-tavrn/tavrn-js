@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# gitleaks configuration: the default rules, minus known false positives. The protocol's test vectors
+# (submodule protocol/) contain keys derived from fixed, published seeds so that every implementation can
+# reproduce them; they protect nothing. Every other file is scanned with the default rules.
+title = "tavrn-js"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Deterministic test vectors (fixed published seeds)"
+paths = ['''^protocol/testvectors/[^/]+\.json$''']

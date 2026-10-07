@@ -1,0 +1,46 @@
+# Node
+node_modules/
+*.tsbuildinfo
+*.tgz
+dist/
+# sdk/src/generated (the types generated from the protocol's openapi.json) is committed on purpose: git-dependency
+# consumers get no generation step. See README.md ("Generated code").
+
+# Local data and secrets: never part of the repository
+/data
+data/
+data-dev/
+pgdata/
+*.db
+*.sqlite
+*.sqlite3
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+# Bot key files and state directories of local example runs
+tavrn-key-*.txt
+.tavrn-state*/
+
+# Rust build output (a locally built tavrn-node for the integration tests lives elsewhere)
+target/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Agent settings, memory files and planning notes: never part of the repository
+.claude/
+CLAUDE.md
+docs/PLAN.md
+
+# Test output
+test-results/
+playwright-report/
+coverage/
+perf/results/
+
+# Private pattern list of the pre-publication check
+.publish-check.private
