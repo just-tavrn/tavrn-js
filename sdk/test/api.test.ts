@@ -201,4 +201,30 @@ describe("notification settings", () => {
     expect(calls[1]!.init.method).toBe("PUT");
     expect(JSON.parse(calls[1]!.init.body as string)).toEqual(settings);
   });
+
+  it("web push: VAPID key, subscribe, list, unsubscribe and the test push", async () => {
+    const registration = { id: "s1", device_id: "d1", push_service: "https://push.example", current_device: true, created_at: "2026-10-07T00:00:00.000Z", failures: 0 };
+    const { impl, calls } = fetchMock([
+      { status: 200, body: { enabled: true, public_key: "BKey" } },
+      { status: 201, body: registration },
+      { status: 200, body: [registration] },
+      { status: 204 },
+      { status: 202 },
+    ]);
+    const api = new TavrnApi({ baseUrl: "https://n.example", fetchImpl: impl });
+    expect(await api.push.vapid()).toEqual({ enabled: true, public_key: "BKey" });
+    const subscription = { endpoint: "https://push.example/abc", keys: { p256dh: "p", auth: "a" }, expiration_time: null };
+    expect(await api.push.subscribe(subscription)).toEqual(registration);
+    expect(await api.push.subscriptions()).toEqual([registration]);
+    await api.push.unsubscribe("s/1");
+    await api.push.test();
+    expect(calls.map((c) => `${c.init.method ?? "GET"} ${c.url}`)).toEqual([
+      "GET https://n.example/api/v1/push/vapid",
+      "PUT https://n.example/api/v1/users/me/push-subscriptions",
+      "GET https://n.example/api/v1/users/me/push-subscriptions",
+      "DELETE https://n.example/api/v1/users/me/push-subscriptions/s%2F1",
+      "POST https://n.example/api/v1/users/me/push-subscriptions/test",
+    ]);
+    expect(JSON.parse(calls[1]!.init.body as string)).toEqual(subscription);
+  });
 });

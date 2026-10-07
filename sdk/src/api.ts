@@ -179,6 +179,7 @@ import type { InboxKey, PublishInboxKeyRequest } from "./generated/types.gen";
 import type { BackendInfo, BackendRequest, BackendTest, DeleteResult, FileEntry, FileEntryDetail, FileList, FilesInfo, UpdateEntryRequest } from "./generated/types.gen";
 import type { AdminApplication, AdminApplicationUpdate, ApplicationBlock, ApplicationBlockRequest, InstallIndexEntry, InstallRequest, Installation, PublicApplication } from "./generated/types.gen";
 import type { PeerResolution } from "./generated/types.gen";
+import type { PushRegistration, PushSubscriptionRequest, VapidInfo } from "./generated/types.gen";
 import type { AcceptTermsRequest, AccountDeletion, CounterDecision, CounterNoticeRequest, DataSummary, DeleteAccountRequest, DeletionStarted, LegalContact, LegalDocument, LegalTemplate, Notice, NoticeAction, NoticeActionResult, NoticeCreated, NoticeDetail, NoticeRequest, NoticeStatus, TermsStatus, UploaderNotice } from "./generated/types.gen";
 import type { Callback, CommandApproval, CommandApprovalRequest, CommandApprovalSettings, CommandDefinition, CommandSet, FollowUp, FollowUpResponse, InvokeRequest, InvokeResponse, PaletteCommand, PutCommandSettings, RoomCommand, RoomCommands } from "./generated/types.gen";
 
@@ -220,7 +221,8 @@ export type NotificationMode = "all" | "mentions" | "nothing";
  * are the ids on the node hosting them.
  */
 export interface NotificationSettings {
-  global: { mode: NotificationMode; sound: boolean; browser: boolean };
+  /** `push_text`: web pushes of unencrypted conversations carry a text preview (PROTOCOL.md §6d; default off). */
+  global: { mode: NotificationMode; sound: boolean; browser: boolean; push_text?: boolean };
   rooms: Record<string, { mode?: NotificationMode | null; muted_until?: string | null; suppress_everyone?: boolean | null }>;
   channels: Record<string, { mode?: NotificationMode | null; muted_until?: string | null }>;
 }
@@ -891,6 +893,22 @@ export class TavrnApi {
     /** Notification settings (home node; design note 4.11). Older nodes answer 404. */
     notificationSettings: () => this.get<NotificationSettings>("/users/me/notification-settings"),
     putNotificationSettings: (settings: NotificationSettings) => this.put<NotificationSettings>("/users/me/notification-settings", settings),
+  };
+
+  /**
+   * Web push (PROTOCOL.md §6d, capability `push.webpush`): the node's VAPID key and the push subscriptions of the
+   * own devices. Home node only (other nodes forward their notifications as `notify` hints to it).
+   */
+  push = {
+    /** Whether the node sends pushes and its VAPID public key (`applicationServerKey`). Public. */
+    vapid: () => this.get<VapidInfo>("/push/vapid"),
+    /** The account's registered subscriptions (`current_device` marks this device's). */
+    subscriptions: () => this.get<PushRegistration[]>("/users/me/push-subscriptions"),
+    /** Registers the browser's `PushSubscription.toJSON()` for this device (new, or taken over by endpoint). */
+    subscribe: (subscription: PushSubscriptionRequest) => this.put<PushRegistration>("/users/me/push-subscriptions", subscription),
+    unsubscribe: (subscriptionId: string) => this.del(`/users/me/push-subscriptions/${encodeURIComponent(subscriptionId)}`),
+    /** Queues a test push to every subscription of the account (5 per 10 minutes). */
+    test: () => this.post<void>("/users/me/push-subscriptions/test", {}),
   };
 
   /**
