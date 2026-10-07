@@ -2081,6 +2081,11 @@ export type GlobalSettings = {
     browser?: boolean;
     mode?: Mode;
     /**
+     * Web push (PROTOCOL.md §6d): include a preview of unencrypted messages (default off; never for encrypted
+     * conversations). Left out of the document while off.
+     */
+    push_text?: boolean;
+    /**
      * Play a sound for notifications (client side).
      */
     sound?: boolean;
@@ -3707,6 +3712,63 @@ export type PurgeUserResponse = {
 export type Purpose = 'login' | 'link' | 'reauth';
 
 /**
+ * A registered push subscription (the keys and the endpoint are never returned). Named apart from the browser's
+ * `PushSubscription`.
+ */
+export type PushRegistration = {
+    created_at: string;
+    /**
+     * The subscription belongs to the requesting device.
+     */
+    current_device: boolean;
+    device_id: string;
+    expires_at?: string | null;
+    /**
+     * Failed deliveries in a row (the node backs off and deletes the subscription after 30).
+     */
+    failures: number;
+    id: string;
+    last_used_at?: string | null;
+    /**
+     * Origin of the push service (`https://host`), to tell the subscriptions apart.
+     */
+    push_service: string;
+};
+
+/**
+ * The browser's keys of a subscription (`PushSubscription.toJSON().keys`).
+ */
+export type PushSubscriptionKeys = {
+    /**
+     * Base64url of the 16-byte authentication secret.
+     */
+    auth: string;
+    /**
+     * Base64url of the browser's P-256 public key (65 bytes, uncompressed).
+     */
+    p256dh: string;
+};
+
+/**
+ * A browser push subscription (`PushSubscription.toJSON()`) of the requesting device.
+ */
+export type PushSubscriptionRequest = {
+    /**
+     * The requesting device (optional; another device is refused with `400 push.device_invalid`).
+     */
+    device_id?: string | null;
+    /**
+     * The push service URL (`https://`, at most 2048 characters, a public host).
+     */
+    endpoint: string;
+    /**
+     * `expirationTime` of the browser: Unix milliseconds or null.
+     */
+    expiration_time?: number | null;
+    keys: PushSubscriptionKeys;
+};
+
+/**
  * `PUT /rooms/{room_id}/commands/{command_ref}` body.
  */
 export type PutCommandSettings = {
@@ -5053,6 +5115,21 @@ export type UserSound = {
     mime: string;
     name: string;
     size: number;
+};
+
+/**
+ * Whether the node sends web pushes and the key browsers subscribe with.
+ */
+export type VapidInfo = {
+    /**
+     * `TAVRN_PUSH`: the node sends web pushes (capability `push.webpush`).
+     */
+    enabled: boolean;
+    /**
+     * The VAPID public key (RFC 8292): base64url of the uncompressed P-256 point, the `applicationServerKey` of
+     * `PushManager.subscribe()`. Null while push is off.
+     */
+    public_key?: string | null;
 };
 
 export type VerifyEmailRequest = {
@@ -9719,6 +9796,19 @@ export type List3Responses = {
 
 export type List3Response = List3Responses[keyof List3Responses];
 
+export type VapidData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/push/vapid';
+};
+
+export type VapidResponses = {
+    200: VapidInfo;
+};
+
+export type VapidResponse = VapidResponses[keyof VapidResponses];
+
 export type ListMyRoomsData = {
     body?: never;
     path?: never;
@@ -12862,20 +12952,107 @@ export type List9Data = {
     body?: never;
     path?: never;
     query?: never;
-    url: '/api/v1/users/me/secret-storage';
+    url: '/api/v1/users/me/push-subscriptions';
 };
 
 export type List9Errors = {
-    401: ProblemDetails;
+    403: ProblemDetails;
 };
 
 export type List9Error = List9Errors[keyof List9Errors];
 
 export type List9Responses = {
-    200: SecretStorageList;
+    200: Array<PushRegistration>;
 };
 
 export type List9Response = List9Responses[keyof List9Responses];
+
+export type Register2Data = {
+    body: PushSubscriptionRequest;
+    path?: never;
+    query?: never;
+    url: '/api/v1/users/me/push-subscriptions';
+};
+
+export type Register2Errors = {
+    400: ProblemDetails;
+    403: ProblemDetails;
+    404: ProblemDetails;
+    409: ProblemDetails;
+    429: ProblemDetails;
+};
+
+export type Register2Error = Register2Errors[keyof Register2Errors];
+
+export type Register2Responses = {
+    200: PushRegistration;
+    201: PushRegistration;
+};
+
+export type Register2Response = Register2Responses[keyof Register2Responses];
+
+export type TestData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/users/me/push-subscriptions/test';
+};
+
+export type TestErrors = {
+    403: ProblemDetails;
+    404: ProblemDetails;
+    429: ProblemDetails;
+};
+
+export type TestError = TestErrors[keyof TestErrors];
+
+export type TestResponses = {
+    202: unknown;
+};
+
+export type Remove2Data = {
+    body?: never;
+    path: {
+        /**
+         * Subscription id
+         */
+        subscription_id: string;
+    };
+    query?: never;
+    url: '/api/v1/users/me/push-subscriptions/{subscription_id}';
+};
+
+export type Remove2Errors = {
+    403: ProblemDetails;
+    404: ProblemDetails;
+};
+
+export type Remove2Error = Remove2Errors[keyof Remove2Errors];
+
+export type Remove2Responses = {
+    204: void;
+};
+
+export type Remove2Response = Remove2Responses[keyof Remove2Responses];
+
+export type List10Data = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/users/me/secret-storage';
+};
+
+export type List10Errors = {
+    401: ProblemDetails;
+};
+
+export type List10Error = List10Errors[keyof List10Errors];
+
+export type List10Responses = {
+    200: SecretStorageList;
+};
+
+export type List10Response = List10Responses[keyof List10Responses];
 
 export type DeletePasskeyData = {
     body?: never;
