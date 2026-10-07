@@ -28,6 +28,7 @@ jobs:
     if: ${{ vars.CI_ENABLED == 'true' }}
     uses: just-tavrn/.github/.github/workflows/js-ci.yml@main
     with:
+      runner: tavrn-heavy
       # The generated SDK types must match protocol/openapi.json; then SPDX headers, dependency licenses, typecheck,
       # Vitest (sdk, e2ee with the WebAssembly module of @tavrn/crypto, bot unit tests) and the npm tarballs.
       pre-test: scripts/check-generated.sh
