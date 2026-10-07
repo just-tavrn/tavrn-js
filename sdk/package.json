@@ -1,6 +1,6 @@
 {
   "name": "@tavrn/sdk",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "tavrn API client for web clients and bots, generated from the node's OpenAPI spec",
   "license": "Apache-2.0",
   "repository": {

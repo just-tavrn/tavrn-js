@@ -1,6 +1,6 @@
 {
   "name": "@tavrn/bot",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "tavrn bot runtime for Node.js: key file, bot device, end-to-end encryption, events, commands and federated installations",
   "license": "Apache-2.0",
   "repository": {
