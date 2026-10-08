@@ -972,6 +972,11 @@ export type ConnectCodeRequest = {
      */
     origin?: string | null;
     /**
+     * With `session_id` only: sealed unlock material for the app (base64url, 49–1024 bytes; FEDERATION.md §8 step
+     * 3), handed out once with the code. Required for an `unlock` session. Opaque to the node.
+     */
+    sealed_unlock?: string | null;
+    /**
      * App session of a native app (`POST /auth/connect/session`). Exactly one of `origin` and `session_id`.
      */
     session_id?: string | null;
@@ -995,6 +1000,11 @@ export type ConnectSessionRequest = {
      * "Desktop app").
      */
     device_name?: string | null;
+    /**
+     * `login` (default: sign the app in, no authentication) or `unlock` (sealed unlock material only, no code; needs
+     * the app's full session and binds the session to its user).
+     */
+    purpose?: string | null;
 };
 
 export type ConnectSessionResponse = {
@@ -1009,12 +1019,12 @@ export type ConnectSessionResponse = {
 };
 
 /**
- * State of an app session: `pending` (with the device name) until the user confirmed, then `ready` with the code
- * exactly once.
+ * State of an app session: `pending` (with the device name and purpose) until the user confirmed, then `ready`
+ * with the code and the sealed unlock material exactly once.
  */
 export type ConnectSessionStatus = {
     /**
-     * `ready`: the one-time code for `POST /auth/connect/token`.
+     * `ready` of a `login` session: the one-time code for `POST /auth/connect/token`.
      */
     code?: string | null;
     /**
@@ -1029,6 +1039,14 @@ export type ConnectSessionStatus = {
      * `ready`: the identity domain of this node.
      */
     node?: string | null;
+    /**
+     * `pending`: `login` or `unlock` (nodes that support sealed unlock material always send it).
+     */
+    purpose?: string | null;
+    /**
+     * `ready`: the sealed unlock material the page sent, if any (base64url; only the app can open it).
+     */
+    sealed_unlock?: string | null;
     /**
      * `pending` or `ready`.
      */
@@ -8274,6 +8292,10 @@ export type ConnectCodeError = ConnectCodeErrors[keyof ConnectCodeErrors];
 
 export type ConnectCodeResponses = {
     200: ConnectCodeResponse;
+    /**
+     * Unlock session: the sealed unlock material waits for the app's poll
+     */
+    204: void;
 };
 
 export type ConnectCodeResponse2 = ConnectCodeResponses[keyof ConnectCodeResponses];
@@ -8287,6 +8309,8 @@ export type CreateSessionData = {
 
 export type CreateSessionErrors = {
     400: ProblemDetails;
+    401: ProblemDetails;
+    403: ProblemDetails;
     429: ProblemDetails;
     503: ProblemDetails;
 };

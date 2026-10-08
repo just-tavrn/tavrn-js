@@ -164,4 +164,34 @@ describe("TavrnApi: app sessions of the connect flow (FEDERATION.md §8 step 3)"
     await expect(api.auth.pollConnectSession("a/b")).rejects.toMatchObject({ status: 410, code: "connect.session_expired" });
     expect(calls[1]!.url).toBe("http://localhost/api/v1/auth/connect/session/a%2Fb");
   });
+
+  it("sealed unlock material rides with the confirmation and comes back once with the code", async () => {
+    const sealed = "s".repeat(80);
+    const { impl, calls } = fetchMock([
+      { status: 200, body: { code: "c", expires_in: 120 } },
+      { status: 200, body: { status: "ready", code: "c", node: "home.example", sealed_unlock: sealed, expires_in: 119 } },
+    ]);
+    const api = new TavrnApi({ fetchImpl: impl, getToken: () => "session" });
+    await api.auth.connectCode({ session_id: "S".repeat(43), sealed_unlock: sealed });
+    expect(calls[0]!.body).toEqual({ session_id: "S".repeat(43), sealed_unlock: sealed });
+    expect(await api.auth.pollConnectSession("S".repeat(43))).toMatchObject({ code: "c", sealed_unlock: sealed });
+  });
+
+  it("an unlock session is created with the app's session and confirmed without a code (204)", async () => {
+    const { impl, calls } = fetchMock([
+      { status: 200, body: { session_id: "U".repeat(43), expires_in: 600 } },
+      { status: 200, body: { status: "pending", device_name: "Desktop app", purpose: "unlock", expires_in: 599 } },
+      { status: 204 },
+      { status: 200, body: { status: "ready", node: "home.example", sealed_unlock: "x".repeat(70), expires_in: 119 } },
+    ]);
+    const api = new TavrnApi({ fetchImpl: impl, getToken: () => "app-session" });
+    const created = await api.auth.createConnectSession({ code_challenge: "x".repeat(43), purpose: "unlock" });
+    expect(calls[0]).toMatchObject({ body: { code_challenge: "x".repeat(43), purpose: "unlock" }, auth: "Bearer app-session" });
+    expect((await api.auth.pollConnectSession(created.session_id)).purpose).toBe("unlock");
+    await expect(api.auth.connectUnlock({ session_id: created.session_id, sealed_unlock: "x".repeat(70) })).resolves.toBeUndefined();
+    expect(calls[2]).toMatchObject({ method: "POST", url: "http://localhost/api/v1/auth/connect/code", body: { session_id: "U".repeat(43), sealed_unlock: "x".repeat(70) } });
+    const ready = await api.auth.pollConnectSession(created.session_id);
+    expect(ready.code).toBeUndefined();
+    expect(ready.sealed_unlock).toHaveLength(70);
+  });
 });
