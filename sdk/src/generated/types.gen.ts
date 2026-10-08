@@ -3195,6 +3195,11 @@ export type NodeInfo = {
      * Legal pages and the notice form (protocol/LEGAL.md).
      */
     legal: LegalInfo;
+    /**
+     * Message retention of this node in days (`TAVRN_RETENTION_DAYS`, PROTOCOL.md §7f; 0 = messages are kept). Rooms
+     * can only shorten it.
+     */
+    message_retention_days: number;
     name: string;
     /**
      * Images up to this size (bytes) load as previews automatically where the user's `auto_preview`
