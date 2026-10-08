@@ -814,7 +814,11 @@ export class TavrnApi {
    * send them with `thread_id` (`conversations.send`, `messages.create`) and page them with `threads.messages`.
    */
   threads = {
-    /** Start a thread (from `root_message_id` or standalone) or, in a forum channel, a post with its first `message`. */
+    /**
+     * Start a thread (from `root_message_id` or standalone) or, in a forum channel, a post with its first `message`.
+     * With the node capability `threads.client_ids` pass `id` ({@link newUlid}) and sign the first message with it as
+     * `thread_id` (`400 thread.id_invalid`, `409 thread.id_taken`).
+     */
     create: (roomId: string, channelId: string, req: CreateThreadRequest) => this.post<Thread>(`/rooms/${roomId}/channels/${channelId}/threads`, req),
     list: (roomId: string, channelId: string, query?: ThreadListQuery) => this.get<ThreadList>(`/rooms/${roomId}/channels/${channelId}/threads`, query as Query),
     get: (threadId: string) => this.get<Thread>(`/threads/${encodeURIComponent(threadId)}`),
@@ -976,7 +980,11 @@ export class TavrnApi {
     vapid: () => this.get<VapidInfo>("/push/vapid"),
     /** The account's registered subscriptions (`current_device` marks this device's). */
     subscriptions: () => this.get<PushRegistration[]>("/users/me/push-subscriptions"),
-    /** Registers the browser's `PushSubscription.toJSON()` for this device (new, or taken over by endpoint). */
+    /**
+     * Registers the browser's `PushSubscription.toJSON()` for this device (new, or the account's one with the same
+     * endpoint). An endpoint of another account's live subscription is refused with `409 push.endpoint_taken`: the
+     * client then unsubscribes the browser and subscribes again (a new endpoint).
+     */
     subscribe: (subscription: PushSubscriptionRequest) => this.put<PushRegistration>("/users/me/push-subscriptions", subscription),
     unsubscribe: (subscriptionId: string) => this.del(`/users/me/push-subscriptions/${encodeURIComponent(subscriptionId)}`),
     /** Queues a test push to every subscription of the account (5 per 10 minutes). */

@@ -14,7 +14,7 @@ function fetchMock(body: unknown = {}) {
 describe("threads (PROTOCOL.md §7e)", () => {
   it("creates, lists, reads and changes threads", async () => {
     const { api, calls } = fetchMock();
-    await api.threads.create("R", "C", { title: "Plan", root_message_id: "M", message: { content: { type: "text", body: "hi" } } });
+    await api.threads.create("R", "C", { id: "01ARYZ6S41TSV4RRFFQ69G5FAV", title: "Plan", root_message_id: "M", message: { content: { type: "text", body: "hi" } } });
     await api.threads.list("R", "C", { archived: "all", sort: "created", tag: "T", before: "X", limit: 10 });
     await api.threads.get("TH");
     await api.threads.update("TH", { archived: true, locked: false });
@@ -26,7 +26,7 @@ describe("threads (PROTOCOL.md §7e)", () => {
       "PATCH https://n.example/api/v1/threads/TH",
       "DELETE https://n.example/api/v1/threads/TH",
     ]);
-    expect(calls[0]!.body).toEqual({ title: "Plan", root_message_id: "M", message: { content: { type: "text", body: "hi" } } });
+    expect(calls[0]!.body).toEqual({ id: "01ARYZ6S41TSV4RRFFQ69G5FAV", title: "Plan", root_message_id: "M", message: { content: { type: "text", body: "hi" } } });
     expect(calls[3]!.body).toEqual({ archived: true, locked: false });
   });
 
