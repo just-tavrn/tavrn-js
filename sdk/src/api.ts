@@ -539,11 +539,20 @@ export class TavrnApi {
      * session `session_id` of a native app (exactly one of them; full session).
      */
     connectCode: (req: ConnectCodeRequest) => this.post<ConnectCodeResponse>("/auth/connect/code", req),
-    /** App session of the connect flow (§8 step 3, `connect.app`): a native app without an https origin starts here. */
+    /**
+     * Confirms an `unlock` app session (§8 step 3, "Sealed unlock material") with the sealed PRF output of the page's
+     * passkey ceremony: no code, `204`. Only the session's own user may (`403 connect.user_mismatch`).
+     */
+    connectUnlock: (req: { session_id: string; sealed_unlock: string }) => this.post<void>("/auth/connect/code", req),
+    /**
+     * App session of the connect flow (§8 step 3, `connect.app`): a native app without an https origin starts here.
+     * `purpose: "unlock"` needs the app's own session (send it from a signed-in client).
+     */
     createConnectSession: (req: ConnectSessionRequest) => this.post<ConnectSessionResponse>("/auth/connect/session", req),
     /**
-     * Polls an app session: `pending` (with the device name) until the user confirmed on the node's page, then `ready`
-     * with the code exactly once; afterwards `410 connect.session_expired`, unknown ids `404 connect.session_invalid`.
+     * Polls an app session: `pending` (with the device name and, on nodes with sealed unlock material, the purpose)
+     * until the user confirmed on the node's page, then `ready` with the code and the sealed unlock material exactly
+     * once; afterwards `410 connect.session_expired`, unknown ids `404 connect.session_invalid`.
      */
     pollConnectSession: (sessionId: string) => this.get<ConnectSessionStatus>(`/auth/connect/session/${encodeURIComponent(sessionId)}`),
     /** Connect flow on the home node: code and PKCE verifier → session of a new device (no session needed). */
