@@ -128,3 +128,40 @@ describe("TavrnApi: keys and secret storage", () => {
     expect(calls[1]!.url).toBe("http://localhost/api/v1/auth/webauthn/credentials/x%2Fy");
   });
 });
+
+describe("TavrnApi: app sessions of the connect flow (FEDERATION.md §8 step 3)", () => {
+  it("creates a session, polls it and exchanges the code", async () => {
+    const { impl, calls } = fetchMock([
+      { status: 200, body: { session_id: "S".repeat(43), expires_in: 600 } },
+      { status: 200, body: { status: "pending", device_name: "Desktop app", expires_in: 598 } },
+      { status: 200, body: { status: "ready", code: "c0de", node: "home.example", expires_in: 119 } },
+      { status: 200, body: { status: "ok", access_token: "a" } },
+    ]);
+    const api = new TavrnApi({ fetchImpl: impl });
+    const created = await api.auth.createConnectSession({ code_challenge: "x".repeat(43), device_name: "Desktop app" });
+    expect(created.session_id).toHaveLength(43);
+    expect((await api.auth.pollConnectSession(created.session_id)).status).toBe("pending");
+    const ready = await api.auth.pollConnectSession(created.session_id);
+    expect(ready).toMatchObject({ status: "ready", code: "c0de", node: "home.example" });
+    await api.auth.connectToken({ code: ready.code!, code_verifier: "v".repeat(43) });
+    expect(calls.map((c) => [c.method, c.url])).toEqual([
+      ["POST", "http://localhost/api/v1/auth/connect/session"],
+      ["GET", `http://localhost/api/v1/auth/connect/session/${"S".repeat(43)}`],
+      ["GET", `http://localhost/api/v1/auth/connect/session/${"S".repeat(43)}`],
+      ["POST", "http://localhost/api/v1/auth/connect/token"],
+    ]);
+    expect(calls[0]!.body).toEqual({ code_challenge: "x".repeat(43), device_name: "Desktop app" });
+  });
+
+  it("the page confirms with the session id; an expired session is an error with its code", async () => {
+    const { impl, calls } = fetchMock([
+      { status: 200, body: { code: "c", expires_in: 120 } },
+      { status: 410, body: { type: "about:blank", title: "Gone", status: 410, code: "connect.session_expired" } },
+    ]);
+    const api = new TavrnApi({ fetchImpl: impl, getToken: () => "session" });
+    await api.auth.connectCode({ session_id: "S".repeat(43) });
+    expect(calls[0]).toMatchObject({ url: "http://localhost/api/v1/auth/connect/code", body: { session_id: "S".repeat(43) }, auth: "Bearer session" });
+    await expect(api.auth.pollConnectSession("a/b")).rejects.toMatchObject({ status: 410, code: "connect.session_expired" });
+    expect(calls[1]!.url).toBe("http://localhost/api/v1/auth/connect/session/a%2Fb");
+  });
+});
