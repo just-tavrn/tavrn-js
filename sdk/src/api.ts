@@ -123,6 +123,9 @@ import type {
   ConnectCodeRequest,
   ConnectCodeResponse,
   ConnectTokenRequest,
+  ConnectSessionRequest,
+  ConnectSessionResponse,
+  ConnectSessionStatus,
   FederationTokenResponse,
   FederatedSessionResponse,
   IndexEntry,
@@ -531,8 +534,18 @@ export class TavrnApi {
     checkAccountInvite: (code: string) => this.get<{ valid: boolean; note: string }>(`/account-invites/${encodeURIComponent(code)}`),
     /** On a target node: session for a user of another node from a federation token (FEDERATION.md §2.5). */
     federated: (token: string, deviceName?: string) => this.post<FederatedSessionResponse>("/auth/federated", { token, device_name: deviceName ?? null }),
-    /** Connect flow on the home node (FEDERATION.md §8): one-time code for the web client at `origin` (full session). */
+    /**
+     * Connect flow on the home node (FEDERATION.md §8): one-time code for the web client at `origin`, or for the app
+     * session `session_id` of a native app (exactly one of them; full session).
+     */
     connectCode: (req: ConnectCodeRequest) => this.post<ConnectCodeResponse>("/auth/connect/code", req),
+    /** App session of the connect flow (§8 step 3, `connect.app`): a native app without an https origin starts here. */
+    createConnectSession: (req: ConnectSessionRequest) => this.post<ConnectSessionResponse>("/auth/connect/session", req),
+    /**
+     * Polls an app session: `pending` (with the device name) until the user confirmed on the node's page, then `ready`
+     * with the code exactly once; afterwards `410 connect.session_expired`, unknown ids `404 connect.session_invalid`.
+     */
+    pollConnectSession: (sessionId: string) => this.get<ConnectSessionStatus>(`/auth/connect/session/${encodeURIComponent(sessionId)}`),
     /** Connect flow on the home node: code and PKCE verifier → session of a new device (no session needed). */
     connectToken: (req: ConnectTokenRequest) => this.post<AuthResponse>("/auth/connect/token", req),
   };
