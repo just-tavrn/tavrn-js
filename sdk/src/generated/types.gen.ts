@@ -3204,6 +3204,11 @@ export type NodeInfo = {
      * Voice policies of this node (protocol/VOICE.md).
      */
     voice: VoiceInfo;
+    /**
+     * WebAuthn relying party id (`TAVRN_WEBAUTHN_RP_ID`, default the identity domain): clients pass it
+     * as `rpId` on the assertions they build themselves (PROTOCOL.md §5a.4).
+     */
+    webauthn: WebauthnInfo;
 };
 
 /**
@@ -5988,6 +5993,15 @@ export type WebauthnCredential = {
     prf_supported: boolean;
 };
 
+/**
+ * The WebAuthn relying party id (`TAVRN_WEBAUTHN_RP_ID`, default the identity domain). It may be a parent
+ * domain of the web client's host (delegation); clients pass it as `rpId` on assertions they build
+ * themselves (the secret storage PRF, PROTOCOL.md §5a.4).
+ */
+export type WebauthnInfo = {
+    rp_id: string;
+};
+
 export type WebauthnLoginFinish = {
     challenge_id: string;
     device?: null | DeviceProof;
@@ -6162,6 +6176,10 @@ export type WellKnown = {
      * `<web>/connect`); `TAVRN_WEBAUTHN_ORIGIN`, default the public URL.
      */
     web: string;
+    /**
+     * WebAuthn relying party of this node's passkeys (PROTOCOL.md §5a.4).
+     */
+    webauthn: WebauthnInfo;
     /**
      * WebSocket URL (`wss://<public host>/api/v1/ws`).
      */
