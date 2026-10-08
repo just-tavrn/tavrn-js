@@ -958,17 +958,23 @@ export type ConformanceRoom = {
 
 export type ConnectCodeRequest = {
     /**
-     * `BASE64URL(SHA-256(code_verifier))` (PKCE, S256).
+     * `BASE64URL(SHA-256(code_verifier))` (PKCE, S256). Required with `origin`; with `session_id` optional and,
+     * if given, equal to the session's.
      */
-    code_challenge: string;
+    code_challenge?: string | null;
     /**
-     * Name of the new device the exchange creates (default: "Browser on <origin host>").
+     * Name of the new device the exchange creates (default: "Browser on <origin host>"); ignored with
+     * `session_id` (the session's name).
      */
     device_name?: string | null;
     /**
-     * Origin of the visiting web client, e.g. `https://visited.example`.
+     * Origin of the visiting web client, e.g. `https://visited.example`. Exactly one of `origin` and `session_id`.
      */
-    origin: string;
+    origin?: string | null;
+    /**
+     * App session of a native app (`POST /auth/connect/session`). Exactly one of `origin` and `session_id`.
+     */
+    session_id?: string | null;
 };
 
 export type ConnectCodeResponse = {
@@ -977,6 +983,56 @@ export type ConnectCodeResponse = {
      */
     code: string;
     expires_in: number;
+};
+
+export type ConnectSessionRequest = {
+    /**
+     * `BASE64URL(SHA-256(code_verifier))` (PKCE, S256); the app keeps the verifier for the exchange.
+     */
+    code_challenge: string;
+    /**
+     * Name of the device the exchange creates, shown on the confirmation page (at most 64 characters, default
+     * "Desktop app").
+     */
+    device_name?: string | null;
+};
+
+export type ConnectSessionResponse = {
+    /**
+     * Seconds until the session expires unconfirmed (600).
+     */
+    expires_in: number;
+    /**
+     * The app session (43 characters of base64url) for `/connect?session=…` and the polls.
+     */
+    session_id: string;
+};
+
+/**
+ * State of an app session: `pending` (with the device name) until the user confirmed, then `ready` with the code
+ * exactly once.
+ */
+export type ConnectSessionStatus = {
+    /**
+     * `ready`: the one-time code for `POST /auth/connect/token`.
+     */
+    code?: string | null;
+    /**
+     * `pending`: the name of the device the sign-in creates.
+     */
+    device_name?: string | null;
+    /**
+     * Seconds left: of the session (`pending`) or of the code (`ready`).
+     */
+    expires_in: number;
+    /**
+     * `ready`: the identity domain of this node.
+     */
+    node?: string | null;
+    /**
+     * `pending` or `ready`.
+     */
+    status: string;
 };
 
 export type ConnectTokenRequest = {
@@ -8204,6 +8260,7 @@ export type ConnectCodeErrors = {
     400: ProblemDetails;
     401: ProblemDetails;
     403: ProblemDetails;
+    410: ProblemDetails;
     429: ProblemDetails;
 };
 
@@ -8214,6 +8271,50 @@ export type ConnectCodeResponses = {
 };
 
 export type ConnectCodeResponse2 = ConnectCodeResponses[keyof ConnectCodeResponses];
+
+export type CreateSessionData = {
+    body: ConnectSessionRequest;
+    path?: never;
+    query?: never;
+    url: '/api/v1/auth/connect/session';
+};
+
+export type CreateSessionErrors = {
+    400: ProblemDetails;
+    429: ProblemDetails;
+    503: ProblemDetails;
+};
+
+export type CreateSessionError = CreateSessionErrors[keyof CreateSessionErrors];
+
+export type CreateSessionResponses = {
+    200: ConnectSessionResponse;
+};
+
+export type CreateSessionResponse = CreateSessionResponses[keyof CreateSessionResponses];
+
+export type PollSessionData = {
+    body?: never;
+    path: {
+        session_id: string;
+    };
+    query?: never;
+    url: '/api/v1/auth/connect/session/{session_id}';
+};
+
+export type PollSessionErrors = {
+    404: ProblemDetails;
+    410: ProblemDetails;
+    429: ProblemDetails;
+};
+
+export type PollSessionError = PollSessionErrors[keyof PollSessionErrors];
+
+export type PollSessionResponses = {
+    200: ConnectSessionStatus;
+};
+
+export type PollSessionResponse = PollSessionResponses[keyof PollSessionResponses];
 
 export type ConnectTokenData = {
     body: ConnectTokenRequest;
