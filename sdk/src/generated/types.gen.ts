@@ -5858,6 +5858,12 @@ export type VoiceLimits = {
      * Channel bitrate, capped by `TAVRN_VOICE_MAX_BITRATE_KBPS`.
      */
     audio_bitrate_kbps: number;
+    /**
+     * Opus in-band forward error correction: the node's media server negotiates it (`useinbandfec=1`), so
+     * publishers encode with it and a lost packet is partly recovered from the next one. DTX stays on, RED
+     * stays off (end-to-end encryption).
+     */
+    audio_fec: boolean;
     camera: VideoLimits;
     /**
      * Entitlement `camera.max_height` (pixels, 0 = only `camera.max_resolution`).
