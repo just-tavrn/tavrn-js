@@ -666,6 +666,10 @@ export type Callback = {
      */
     message?: string | null;
     /**
+     * `reply`: a thread of the conversation to answer in; defaults to the interaction's thread.
+     */
+    thread_id?: string | null;
+    /**
      * `reply`, `defer` or `error`.
      */
     type: string;
@@ -1517,6 +1521,11 @@ export type CreateRoomRequest = {
 };
 
 export type CreateThreadRequest = {
+    /**
+     * The thread id chosen by the client, so the first message's signature can cover `thread_id`: a ULID in its
+     * canonical form (uppercase) whose time is within 10 minutes of the node's clock. Without it the node picks one.
+     */
+    id?: string | null;
     message?: null | CreateMessageRequest;
     /**
      * Text and announcement channels: the channel message the thread starts from.
@@ -1997,6 +2006,10 @@ export type EphemeralReply = {
     device_id?: string | null;
     epoch?: number | null;
     interaction_id: string;
+    /**
+     * The thread the reply belongs to (null in the conversation itself).
+     */
+    thread_id?: string | null;
 };
 
 export type EphemeralRequest = {
@@ -2264,6 +2277,10 @@ export type FollowUp = {
     ephemeral?: boolean;
     epoch?: number | null;
     mentions?: Array<string>;
+    /**
+     * A thread of the conversation to write in; defaults to the interaction's thread.
+     */
+    thread_id?: string | null;
 };
 
 /**
@@ -2764,6 +2781,10 @@ export type InvokeRequest = {
      * The epoch of `args_ciphertext`.
      */
     epoch?: number | null;
+    /**
+     * The thread of the channel the command is invoked in (PROTOCOL.md §7e); answers go there.
+     */
+    thread_id?: string | null;
 };
 
 /**
@@ -4866,6 +4887,10 @@ export type SealedPayload = {
      * `crypto_box_seal` of the inner JSON `{ "content": {…}, "username"? }` to the inbox key, base64url.
      */
     sealed: string;
+    /**
+     * A thread of the channel to post into (routing metadata outside the box); required in forum channels.
+     */
+    thread_id?: string | null;
 };
 
 /**
@@ -6148,6 +6173,10 @@ export type WebhookPayload = {
      * A message of the same channel this one replies to.
      */
     reply_to?: string | null;
+    /**
+     * A thread of the channel to post into; required in forum channels (a post), which show no loose messages.
+     */
+    thread_id?: string | null;
     /**
      * Name shown for this message instead of the webhook's name.
      */

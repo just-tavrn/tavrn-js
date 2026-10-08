@@ -77,7 +77,7 @@ function context(crypto: CommandCrypto | null = null, fail?: (c: Call) => Error 
       calls.push(call);
       const err = fail?.(call);
       if (err) throw err;
-      return { interaction_id: "x", outcome: (call.body?.type as string) ?? "reply" } as T;
+      return { interaction_id: "x", outcome: (call.body?.type as string) ?? "reply", id: "01J9ZK3G5M8Q2W4E6R8T0Y2NEW" } as T;
     },
   };
   return { ctx, calls };
@@ -139,6 +139,59 @@ describe("commands of the bot runtime (APPLICATIONS.md §5)", () => {
       [FU, { content: { type: "text", body: "day 1" }, ephemeral: false, mentions: [] }],
       [FU, { content: { type: "text", body: "day 2" }, ephemeral: true, mentions: [] }],
     ]);
+  });
+
+  it("commands invoked in a thread know it; replies there go into it (the node's default), replyInThread too", async () => {
+    const router = new CommandRouter({ logger: silentLogger });
+    const THREAD = "01J9ZK3G5M8Q2W4E6R8T0Y2TH1";
+    const seen: (string | null)[] = [];
+    router.register("weather", async (i) => {
+      seen.push(i.threadId);
+      await i.replyInThread("in the thread");
+      await i.followUp("more", { threadId: "01J9ZK3G5M8Q2W4E6R8T0Y2TH2" });
+    });
+    const { ctx, calls } = context();
+    await router.handle(frame({ thread_id: THREAD }).data, ctx);
+    await router.handle(frame({ thread_id: undefined }).data, ctx);
+    expect(seen).toEqual([THREAD, null]);
+    expect(calls[0]).toEqual({ method: "POST", path: CB, body: { type: "reply", content: { type: "text", body: "in the thread" }, ephemeral: false, mentions: [] } });
+    expect(calls[1]).toEqual({ method: "POST", path: FU, body: { content: { type: "text", body: "more" }, ephemeral: false, mentions: [], thread_id: "01J9ZK3G5M8Q2W4E6R8T0Y2TH2" } });
+  });
+
+  it("replyInThread outside a thread starts a thread in the channel and answers there, follow-ups follow", async () => {
+    const router = new CommandRouter({ logger: silentLogger });
+    router.register("weather", async (i) => {
+      await i.replyInThread({ type: "text", body: "Forecast\nfor the week" });
+      await i.followUp("day 2");
+    });
+    const calls: Call[] = [];
+    const ctx: InvokeContext = {
+      ...context().ctx,
+      request: async <T>(method: string, path: string, body?: unknown) => {
+        calls.push({ method, path, body: body as Record<string, unknown> });
+        return (path.endsWith("/threads") ? { id: "01J9ZK3G5M8Q2W4E6R8T0Y2NEW" } : { outcome: "reply" }) as T;
+      },
+    };
+    await router.handle(frame().data, ctx);
+    expect(calls.map((c) => [c.path, c.body])).toEqual([
+      ["/rooms/01J9ZK3G5M8Q2W4E6R8T0Y2RM1/channels/" + CONV + "/threads", { title: "Forecast for the week" }],
+      [CB, { type: "reply", content: { type: "text", body: "Forecast\nfor the week" }, ephemeral: false, mentions: [], thread_id: "01J9ZK3G5M8Q2W4E6R8T0Y2NEW" }],
+      [FU, { content: { type: "text", body: "day 2" }, ephemeral: false, mentions: [], thread_id: "01J9ZK3G5M8Q2W4E6R8T0Y2NEW" }],
+    ]);
+  });
+
+  it("replyInThread needs a room channel (direct messages have no threads)", async () => {
+    const router = new CommandRouter({ logger: silentLogger });
+    const errors: unknown[] = [];
+    router.register("weather", async (i) => {
+      await i.replyInThread("x").catch((e: unknown) => errors.push(e));
+      await i.reply("plain");
+    });
+    const { ctx, calls } = context();
+    await router.handle(frame({ room_id: null, channel_id: null }).data, ctx);
+    expect(errors).toHaveLength(1);
+    expect((errors[0] as { code?: string }).code).toBe("not_member");
+    expect(calls.map((c) => c.path)).toEqual([CB]);
   });
 
   it("refuses a second first answer and follow-ups before the first answer", async () => {
@@ -238,6 +291,17 @@ describe("commands of the bot runtime (APPLICATIONS.md §5)", () => {
         { type: "reply", content: "CIPHERTEXT", epoch: 43, device_id: "01J9ZK3G5M8Q2W4E6R8T0Y2BD1", ephemeral: false, mentions: [] },
         { content: "CIPHERTEXT", epoch: 43, device_id: "01J9ZK3G5M8Q2W4E6R8T0Y2BD1", ephemeral: true, mentions: [] },
       ]);
+    });
+
+    it("replyInThread starts a thread with an encrypted title of the channel's group", async () => {
+      const router = new CommandRouter({ logger: silentLogger });
+      router.register("weather", (i) => i.replyInThread("Köln: 9 °C", { title: "Wetter" }).then(() => undefined));
+      const { crypto, log } = fakeCrypto(argsContent());
+      const { ctx, calls } = context(crypto);
+      await router.handle(encFrame(), ctx);
+      expect(log.encrypted).toEqual([{ type: "thread.title", body: "Wetter" }, { type: "text", body: "Köln: 9 °C" }]);
+      expect(calls[0]!.body).toEqual({ title: "CIPHERTEXT", title_epoch: 43 });
+      expect(calls[1]!.body.thread_id).toBe("01J9ZK3G5M8Q2W4E6R8T0Y2NEW");
     });
 
     it("refuses arguments of another command, stale or replayed arguments and bad signatures; joins when not a member", async () => {

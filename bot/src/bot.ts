@@ -20,6 +20,7 @@
 import { LocalKeyMismatchError, MlsError, ensureDevice, localStatus, mlsApiOf, openMlsManager, qualify, splitQualified, type Decrypted, type MlsManager, type PlainStatus } from "@tavrn/e2ee";
 import { FileKeyStore, StateDirInUseError } from "@tavrn/e2ee/node";
 import { TavrnApi, TavrnApiError, b64urlEncode, resolveNode, type Channel, type CommandDefinition, type CommandSet, type Message, type NodeEndpoints, type TavrnEvent, type UserKeys, type UserPrivate, type WellKnown } from "@tavrn/sdk";
+import { threadTitle } from "./threads";
 import { CommandRouter, type CommandCrypto, type CommandHandler, type InvokeContext, type ReplyContent } from "./commands";
 import { BotError } from "./errors";
 import { createKeyFile, defaultKeyFile, identityKeyOf, readKey } from "./keyfile";
@@ -123,12 +124,7 @@ export interface BotMessage {
   replyInThread(content: ReplyContent, opts?: SendOptions & { title?: string }): Promise<Message>;
 }
 
-/** A thread title from free text: one line, at most 100 characters, never empty (PROTOCOL.md §7e). */
-export function threadTitle(text: string): string {
-  const line = Array.from(text.replace(/\s+/g, " ").trim());
-  const title = line.length > 100 ? `${line.slice(0, 99).join("")}…` : line.join("");
-  return title || "Thread";
-}
+export { threadTitle };
 
 export interface SendOptions {
   /** Message id this one answers. */
