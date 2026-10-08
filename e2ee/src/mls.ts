@@ -211,6 +211,41 @@ export interface MlsDeps {
   backupDelayMs?: number;
   /** Clock (tests). */
   now?(): number;
+  /**
+   * Coordination with other tabs of the same browser profile (see `tabs.ts`, wired by `openMlsManager`): while
+   * another tab owns the state, every state-changing operation runs there; this manager reads from a copy.
+   */
+  tabs?: MlsTabLink;
+}
+
+/** Operations a tab forwards to the tab that owns the MLS state (everything that changes the client state). */
+export const FORWARDED_OPERATIONS = [
+  "ensureJoined",
+  "processWelcomes",
+  "catchUp",
+  "selfUpdate",
+  "removeLeaves",
+  "addMissingDevices",
+  "encrypt",
+  "encryptHistory",
+  "importHistoryKeys",
+  "publishInboxKey",
+  "setInboxWanted",
+  "flushBackups",
+  "restoreBackups",
+  "restoreBackup",
+  "createKeyPackages",
+] as const;
+export type ForwardedOperation = (typeof FORWARDED_OPERATIONS)[number];
+
+/** The manager's side of the tab coordination. */
+export interface MlsTabLink {
+  /** Whether this manager runs state-changing operations itself (it owns the state and has loaded it). */
+  local(): boolean;
+  /** Runs the operation in the owning tab; resolves once this tab's copy of the state is current. */
+  forward(operation: ForwardedOperation, args: unknown[]): Promise<unknown>;
+  /** Leaves the coordination (dispose). */
+  close(): void;
 }
 
 /** Conversations are named by their qualified id. */
@@ -279,13 +314,16 @@ export interface EncryptedEnvelope {
 }
 
 export class MlsError extends Error {
-  constructor(readonly code: "no_group" | "conflict" | "not_joined" | "invalid_id") {
+  /** `owner_unavailable`: the tab that owns the state did not answer in time (or left twice), see `tabs.ts`. */
+  constructor(readonly code: "no_group" | "conflict" | "not_joined" | "invalid_id" | "owner_unavailable") {
     super(code);
     this.name = "MlsError";
   }
 }
 
 const ROTATE_AFTER_MS = 7 * 24 * 3600 * 1000;
+/** Most KeyPackages {@link MlsManager.createKeyPackages} creates at once. */
+export const MAX_KEY_PACKAGES = 100;
 const MAX_TRIES = 3;
 /** A forced lookup of a user's devices reuses a result younger than this. */
 const KEY_REFETCH_MS = 2_000;
@@ -368,6 +406,102 @@ export class MlsManager {
     return this.deps.now?.() ?? Date.now();
   }
 
+  /** The forwarded call when another tab owns the state, otherwise null (run it here). */
+  private forwarded<T>(operation: ForwardedOperation, args: unknown[]): Promise<T> | null {
+    const tabs = this.deps.tabs;
+    return tabs && !tabs.local() ? (tabs.forward(operation, args) as Promise<T>) : null;
+  }
+
+  /**
+   * Tab coordination, in the tab that owns the state: runs an operation another tab forwarded. Only the operations
+   * of {@link FORWARDED_OPERATIONS}, with their arguments checked.
+   */
+  serveForwarded(operation: string, args: unknown[]): Promise<unknown> {
+    const str = (v: unknown): string => {
+      if (typeof v !== "string") throw new MlsError("invalid_id");
+      return v;
+    };
+    const strs = (v: unknown): string[] => {
+      if (!Array.isArray(v)) throw new MlsError("invalid_id");
+      return v.map(str);
+    };
+    const obj = (v: unknown): Record<string, unknown> => {
+      if (!v || typeof v !== "object" || Array.isArray(v)) throw new MlsError("invalid_id");
+      return v as Record<string, unknown>;
+    };
+    try {
+      const [a, b] = args;
+      switch (operation as ForwardedOperation) {
+        case "ensureJoined":
+          return this.ensureJoined(str(a), { canCreate: obj(b).canCreate === true });
+        case "processWelcomes":
+          return this.processWelcomes(str(a));
+        case "catchUp":
+          return this.catchUp(str(a));
+        case "selfUpdate":
+          return this.selfUpdate(str(a));
+        case "removeLeaves":
+          return this.removeLeaves(str(a), strs(b));
+        case "addMissingDevices":
+          return this.addMissingDevices(str(a), strs(b));
+        case "encrypt":
+          return this.encrypt(str(a), obj(b));
+        case "encryptHistory":
+          return this.encryptHistory(str(a), str(b));
+        case "importHistoryKeys": {
+          if (!Array.isArray(b) || !b.every((k) => Array.isArray(k) && typeof k[0] === "number" && k[1] instanceof Uint8Array)) throw new MlsError("invalid_id");
+          return this.importHistoryKeys(str(a), b as [number, Uint8Array][]);
+        }
+        case "publishInboxKey":
+          return this.publishInboxKey(str(a));
+        case "setInboxWanted":
+          this.setInboxWanted(str(a), b === true);
+          return Promise.resolve(undefined);
+        case "flushBackups":
+          return this.flushBackups();
+        case "restoreBackups":
+          return this.restoreBackups();
+        case "createKeyPackages":
+          if (typeof a !== "number") throw new MlsError("invalid_id");
+          return this.createKeyPackages(a);
+        case "restoreBackup": {
+          const q = str(a);
+          splitQualified(q);
+          return this.run(() => this.restoreOne(q));
+        }
+        default:
+          return Promise.reject(new MlsError("invalid_id"));
+      }
+    } catch (e) {
+      return Promise.reject(e);
+    }
+  }
+
+  /**
+   * Tab coordination: replaces the client state and the bookkeeping with the stored ones (the owning tab wrote
+   * them, or this tab takes the state over), after every earlier operation. `load` returns null to keep the
+   * current state; `then` runs inside the same step (before any later operation).
+   */
+  reloadState(load: () => Promise<{ client: Client; meta: MlsMeta } | null>, then?: () => void): Promise<void> {
+    return this.run(async () => {
+      if (this.disposed) return;
+      const next = await load();
+      if (next && !this.disposed) {
+        const old = this.client;
+        this.client = next.client;
+        old.free();
+        const meta = this.deps.meta as unknown as Record<string, unknown>;
+        for (const k of Object.keys(meta)) delete meta[k];
+        Object.assign(meta, normalizeMeta(next.meta, this.deps.homeDomain));
+        // Keys may have arrived with the new state: failed messages are tried again.
+        for (const [k, v] of [...this.decrypted]) if (!v.ok) this.decrypted.delete(k);
+      } else {
+        next?.client.free();
+      }
+      then?.();
+    });
+  }
+
   /** Runs `fn` after every earlier operation: the client is mutated by one operation at a time. */
   private run<T>(fn: () => Promise<T>): Promise<T> {
     const next = this.queue.then(fn, fn);
@@ -410,6 +544,8 @@ export class MlsManager {
    * exists and `canCreate` (the user may post). Returns `no_group` when there is nothing to join yet.
    */
   ensureJoined(q: string, opts: { canCreate: boolean }): Promise<"joined" | "no_group"> {
+    const remote = this.forwarded<"joined" | "no_group">("ensureJoined", [q, { canCreate: opts.canCreate }]);
+    if (remote) return remote;
     return this.run(async () => {
       const { domain } = splitQualified(q);
       if (!this.client.hasGroup(q)) await this.processWelcomesInner(domain);
@@ -480,6 +616,8 @@ export class MlsManager {
    * of that node's socket, or after connecting to it). Returns the qualified ids joined.
    */
   processWelcomes(domain: string): Promise<string[]> {
+    const remote = this.forwarded<string[]>("processWelcomes", [domain]);
+    if (remote) return remote;
     return this.run(() => this.processWelcomesInner(domain));
   }
 
@@ -520,6 +658,8 @@ export class MlsManager {
 
   /** Processes the handshake log from the local epoch (after `mls.commit`). No-op without a local group. */
   catchUp(q: string): Promise<void> {
+    const remote = this.forwarded<void>("catchUp", [q]);
+    if (remote) return remote;
     return this.run(() => this.catchUpInner(q));
   }
 
@@ -618,6 +758,13 @@ export class MlsManager {
    * key gets one. Channels without webhooks cost nothing (no derivation, no request).
    */
   setInboxWanted(q: string, wanted: boolean): void {
+    if (this.deps.tabs && !this.deps.tabs.local()) {
+      // Remembered here too (for a take-over); the owner publishes.
+      if (wanted) this.inboxWanted.add(q);
+      else this.inboxWanted.delete(q);
+      void this.deps.tabs.forward("setInboxWanted", [q, wanted]).catch(() => undefined);
+      return;
+    }
     if (!wanted) {
       this.inboxWanted.delete(q);
       return;
@@ -632,6 +779,8 @@ export class MlsManager {
    * session. False without a local group (the webhook then waits until a member publishes).
    */
   async publishInboxKey(q: string): Promise<boolean> {
+    const remote = this.forwarded<boolean>("publishInboxKey", [q]);
+    if (remote) return remote;
     if (!this.client.hasGroup(q)) return false;
     const ds = this.ds(q);
     if (!ds.api.publishInboxKey) return false;
@@ -659,6 +808,8 @@ export class MlsManager {
    * starts on a fresh frame key (ENCRYPTION.md §5a). `false` without a local group.
    */
   selfUpdate(q: string): Promise<boolean> {
+    const remote = this.forwarded<boolean>("selfUpdate", [q]);
+    if (remote) return remote;
     return this.run(async () => {
       if (!this.client.hasGroup(q)) return false;
       await this.catchUpInner(q);
@@ -678,6 +829,8 @@ export class MlsManager {
 
   /** `mls.remove_needed`: removes the listed leaves that are still in the group (callers check rights). */
   removeLeaves(q: string, identities: string[]): Promise<boolean> {
+    const remote = this.forwarded<boolean>("removeLeaves", [q, identities]);
+    if (remote) return remote;
     return this.run(async () => {
       if (!this.client.hasGroup(q)) return false;
       await this.catchUpInner(q);
@@ -702,6 +855,8 @@ export class MlsManager {
    * the ones attested on the members' home nodes. Returns the other members without any device.
    */
   addMissingDevices(q: string, members: string[]): Promise<string[]> {
+    const remote = this.forwarded<string[]>("addMissingDevices", [q, members]);
+    if (remote) return remote;
     return this.run(async () => {
       const waiting: string[] = [];
       if (!this.client.hasGroup(q)) return waiting;
@@ -736,6 +891,22 @@ export class MlsManager {
         if (added) this.deps.onEvent?.({ type: "added", conversationId: q, addresses: [...new Set(candidates.map((c) => splitIdentity(c.identity).address))] });
       }
       return waiting;
+    });
+  }
+
+  /**
+   * Creates up to `count` KeyPackages (base64url, at most {@link MAX_KEY_PACKAGES}) in this device's client state and
+   * persists it. `ensureDevice` tops up through it while a manager is open (its `keyPackages` option), so that the
+   * private keys end up in the state that is written from now on (the owning tab's).
+   */
+  createKeyPackages(count: number): Promise<string[]> {
+    const remote = this.forwarded<string[]>("createKeyPackages", [count]);
+    if (remote) return remote;
+    return this.run(async () => {
+      const n = Math.max(0, Math.min(MAX_KEY_PACKAGES, Math.floor(count)));
+      const out = Array.from({ length: n }, () => b64urlEncode(this.client.createKeyPackage()));
+      if (n) await this.persist();
+      return out;
     });
   }
 
@@ -775,6 +946,8 @@ export class MlsManager {
     } catch (e) {
       return Promise.reject(e);
     }
+    const remote = this.forwarded<{ content: string; epoch: number }>("encrypt", [conversationId, content]);
+    if (remote) return remote;
     return this.run(async () => {
       const q = conversationId;
       // Senders use the current epoch (§5.2): pick up commits whose events may still be on the way.
@@ -850,7 +1023,7 @@ export class MlsManager {
     }
     if (this.backupTried.has(q)) return false;
     this.backupTried.add(q);
-    await this.run(() => this.restoreOne(q)).catch(() => undefined);
+    await (this.forwarded<void>("restoreBackup", [q]) ?? this.run(() => this.restoreOne(q))).catch(() => undefined);
     return true;
   }
 
@@ -1350,6 +1523,8 @@ export class MlsManager {
 
   /** Uploads the backups of conversations with new epoch keys (merge with the stored blob, If-Match). */
   flushBackups(): Promise<void> {
+    const remote = this.forwarded<void>("flushBackups", []);
+    if (remote) return remote;
     return this.run(async () => {
       for (const c of this.deps.meta.pendingBackups ?? []) this.dirty.add(c);
       for (const c of [...this.dirty]) {
@@ -1407,6 +1582,8 @@ export class MlsManager {
 
   /** New device (§8 step 3): imports every backup of the account once. */
   restoreBackups(): Promise<number> {
+    const remote = this.forwarded<number>("restoreBackups", []);
+    if (remote) return remote;
     return this.run(async () => {
       if (this.deps.meta.restored) return 0;
       const { items } = await this.deps.api.backupList();
@@ -1452,6 +1629,8 @@ export class MlsManager {
    * epoch, after catching up, without rotating: only current members can read it.
    */
   encryptHistory(q: string, json: string): Promise<{ content: string; epoch: number }> {
+    const remote = this.forwarded<{ content: string; epoch: number }>("encryptHistory", [q, json]);
+    if (remote) return remote;
     return this.run(async () => {
       await this.catchUpInner(q).catch(() => undefined);
       if (!this.client.hasGroup(q)) throw new MlsError("not_joined");
@@ -1475,6 +1654,8 @@ export class MlsManager {
    * ones. Returns the number of new keys.
    */
   importHistoryKeys(q: string, keys: [number, Uint8Array][]): Promise<number> {
+    const remote = this.forwarded<number>("importHistoryKeys", [q, keys]);
+    if (remote) return remote;
     return this.run(async () => {
       const known = new Set(this.client.knownEpochs(q));
       let n = 0;
@@ -1497,6 +1678,7 @@ export class MlsManager {
   /** Stops timers and frees the client (sign-out, identity change). */
   dispose(): void {
     this.disposed = true;
+    this.deps.tabs?.close();
     if (this.backupTimer) clearTimeout(this.backupTimer);
     this.decrypted.clear();
     this.plainChecked.clear();

@@ -46,6 +46,7 @@ export {
 export * from "./mls";
 export * from "./cleanup";
 export { META, PINS, VERIFIED, openMlsManager, reloadOwnIdentity, type OpenMlsOptions } from "./session";
+export { TAB_TIMEOUT_MS, TabCoordinator, type TabChannel, type TabHost, type TabLockManager, type TabOptions } from "./tabs";
 export * from "./content";
 export * from "./embeds";
 export * from "./sealed";

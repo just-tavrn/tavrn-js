@@ -33,6 +33,12 @@ export interface E2eeContext {
   store: KeyStore;
   /** `client` in the params of secret storage entries (default `tavrn-web`). */
   clientName?: string;
+  /**
+   * `ensureDevice`: creates `count` KeyPackages (base64url) in the client state of the open session manager
+   * (`MlsManager.createKeyPackages`, which also runs in the tab that owns the state), so that no second copy of the
+   * state is written next to it. Omitted or null: they are created in the stored state.
+   */
+  keyPackages?: (count: number) => Promise<string[] | null>;
 }
 
 export { E2eeError, type E2eeErrorCode } from "./errors";
@@ -150,8 +156,11 @@ export async function ensureDevice(ctx: E2eeContext): Promise<void> {
     }
     const { count } = await ctx.api.keys.countKeyPackages(ctx.deviceId);
     if (count < KEY_PACKAGE_MIN) {
-      const packages = Array.from({ length: KEY_PACKAGE_BATCH - count }, () => b64urlEncode(client.createKeyPackage()));
-      await saveClient(store, client);
+      let packages = (await ctx.keyPackages?.(KEY_PACKAGE_BATCH - count)) ?? null;
+      if (!packages) {
+        packages = Array.from({ length: KEY_PACKAGE_BATCH - count }, () => b64urlEncode(client.createKeyPackage()));
+        await saveClient(store, client);
+      }
       await ctx.api.keys.uploadKeyPackages(ctx.deviceId, { key_packages: packages });
     }
   } finally {
