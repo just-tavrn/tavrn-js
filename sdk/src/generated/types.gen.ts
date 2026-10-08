@@ -2381,6 +2381,11 @@ export type GlobalSettings = {
      */
     push_text?: boolean;
     /**
+     * Web push for new reports (MODERATION.md §1.5) to the room moderators and node admins who receive them (default
+     * on). Left out of the document while on.
+     */
+    reports?: boolean;
+    /**
      * Play a sound for notifications (client side).
      */
     sound?: boolean;
@@ -4611,6 +4616,11 @@ export type Room = {
      * public | invite
      */
     join_mode: string;
+    /**
+     * Messages of the room's channels are deleted after this many days (null = the node's value; a room can only
+     * shorten it; pinned messages and the welcome channel are exempt, PROTOCOL.md §7f).
+     */
+    message_retention_days?: number | null;
     name: string;
     /**
      * "No bots" zone (APPLICATIONS.md §3.5): no bot can be in the room.
@@ -5413,6 +5423,10 @@ export type UpdateMeRequest = {
      * Linked accounts (at most 10); replaces the list. The node derives every URL itself.
      */
     links?: Array<ProfileLinkInput> | null;
+    /**
+     * The language of the node's mails: a language tag such as `de` or `pt-BR` (stored lowercase), `""` = English.
+     */
+    locale?: string | null;
 };
 
 export type UpdateMemberRequest = {
@@ -5479,6 +5493,11 @@ export type UpdateRoomRequest = {
      */
     discoverable?: boolean | null;
     join_mode?: string | null;
+    /**
+     * Delete messages after this many days (1–36500; 0 = use the node's value, PROTOCOL.md §7f). Effective is the
+     * shorter non-zero of this and the node's `TAVRN_RETENTION_DAYS`: a room can only shorten.
+     */
+    message_retention_days?: number | null;
     name?: string | null;
     /**
      * "No bots" zone (APPLICATIONS.md §3.5): setting it removes every bot from the room and refuses new
@@ -5724,6 +5743,11 @@ export type UserPrivate = User & {
      * `false` for accounts that sign in only with SSO (no password, APPLICATIONS.md §8.3).
      */
     has_password?: boolean;
+    /**
+     * `GET /users/me` and `PATCH /users/me` of local users: the language of the node's mails (a lowercase language
+     * tag such as `de`; null = English). Clients send theirs when it changes.
+     */
+    locale?: string | null;
     notification_settings?: null | StoredNotificationSettings;
 };
 

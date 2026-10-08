@@ -202,6 +202,19 @@ describe("notification settings", () => {
     expect(JSON.parse(calls[1]!.init.body as string)).toEqual(settings);
   });
 
+  it("the report push switch and the mail language travel with the settings and the account", async () => {
+    const settings = { global: { mode: "all" as const, sound: true, browser: false, reports: false }, rooms: {}, channels: {} };
+    const me = { id: "u1", username: "a", locale: "de" };
+    const { impl, calls } = fetchMock([{ status: 200, body: settings }, { status: 200, body: me }]);
+    const api = new TavrnApi({ baseUrl: "https://n.example", fetchImpl: impl });
+    await api.users.putNotificationSettings(settings);
+    expect(JSON.parse(calls[0]!.init.body as string).global.reports).toBe(false);
+    const updated = await api.users.updateMe({ locale: "de" });
+    expect(calls[1]!.init.method).toBe("PATCH");
+    expect(JSON.parse(calls[1]!.init.body as string)).toEqual({ locale: "de" });
+    expect(updated.locale).toBe("de");
+  });
+
   it("web push: VAPID key, subscribe, list, unsubscribe and the test push", async () => {
     const registration = { id: "s1", device_id: "d1", push_service: "https://push.example", current_device: true, created_at: "2026-10-07T00:00:00.000Z", failures: 0 };
     const { impl, calls } = fetchMock([

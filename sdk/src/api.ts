@@ -231,8 +231,11 @@ export type NotificationMode = "all" | "mentions" | "nothing";
  * are the ids on the node hosting them.
  */
 export interface NotificationSettings {
-  /** `push_text`: web pushes of unencrypted conversations carry a text preview (PROTOCOL.md §6d; default off). */
-  global: { mode: NotificationMode; sound: boolean; browser: boolean; push_text?: boolean };
+  /**
+   * `push_text`: web pushes of unencrypted conversations carry a text preview (PROTOCOL.md §6d; default off).
+   * `reports`: web pushes of new reports for moderators and node admins (PROTOCOL.md §6c; default on, absent = on).
+   */
+  global: { mode: NotificationMode; sound: boolean; browser: boolean; push_text?: boolean; reports?: boolean };
   rooms: Record<string, { mode?: NotificationMode | null; muted_until?: string | null; suppress_everyone?: boolean | null }>;
   channels: Record<string, { mode?: NotificationMode | null; muted_until?: string | null }>;
 }
