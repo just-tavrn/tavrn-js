@@ -146,4 +146,6 @@ There is no recovery key and no secret storage for bots; the key file is the bac
 against in-memory nodes (`test/fake-node.ts`): the session manager across several nodes, two parties end to
 end with the in-memory and the file store (setup, join, messages, ephemeral events, plaintext signatures,
 backup restore on a new device, restart from the state directory), the account flows, the `KeyStore` contract
-and the file store's guarantees (encryption at rest, permissions, atomic and serialized writes, tampering).
+and the file store's guarantees (encryption at rest, permissions, atomic and serialized writes, tampering), and the
+tab coordination with an in-memory lock manager and BroadcastChannel (`test/fake-tabs.ts`: election, forwarding,
+errors, timeouts, hand-over, fallback; several tabs of one account on one state, with a control case without it).
