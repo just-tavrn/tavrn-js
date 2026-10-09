@@ -109,6 +109,20 @@ describe("TavrnApi", () => {
     expect([calls[7]!.url, calls[7]!.init.method]).toEqual(["https://n.example/api/v1/rooms/R1/categories/C1", "PATCH"]);
   });
 
+  it("clears a channel's own overrides one by one (\"Reset to category\", layered overrides)", async () => {
+    const { impl, calls } = fetchMock([{ status: 200, body: [] }]);
+    const api = new TavrnApi({ baseUrl: "https://n.example", fetchImpl: impl });
+    await api.channels.clearOverrides("R1", [
+      { target_type: "channel", target_id: "C1", subject_type: "role", subject_id: "r0" },
+      { target_type: "channel", target_id: "C1", subject_type: "member", subject_id: "u1" },
+    ]);
+    expect(calls.map((c) => [c.init.method, c.url])).toEqual([
+      ["PUT", "https://n.example/api/v1/rooms/R1/overrides"],
+      ["PUT", "https://n.example/api/v1/rooms/R1/overrides"],
+    ]);
+    expect(JSON.parse(calls[1]!.init.body as string)).toEqual({ target_type: "channel", target_id: "C1", subject_type: "member", subject_id: "u1", allow: "0", deny: "0", upload_allow: [], upload_deny: [] });
+  });
+
   it("sends ephemeral events and reads the whiteboard session", async () => {
     const { impl, calls } = fetchMock([{ status: 200, body: { session: null } }, { status: 200, body: { session: { owner: "a@n" } } }]);
     const api = new TavrnApi({ baseUrl: "https://n.example", getToken: () => "tok", fetchImpl: impl });
