@@ -34,7 +34,7 @@
     "example": "vite-node examples/echo-weather/index.ts"
   },
   "dependencies": {
-    "@tavrn/crypto": "file:/home/baton/tavrn-split/tavrn-crypto/.claude/worktrees/shares-v2/pkg",
+    "@tavrn/crypto": "file:/home/baton/tavrn-split/tavrn-crypto/pkg",
     "@tavrn/e2ee": "workspace:*",
     "@tavrn/sdk": "workspace:*"
   },
