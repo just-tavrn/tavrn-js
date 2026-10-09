@@ -10453,6 +10453,7 @@ export type PublicImageData = {
 
 export type PublicImageErrors = {
     404: ProblemDetails;
+    429: ProblemDetails;
 };
 
 export type PublicImageError = PublicImageErrors[keyof PublicImageErrors];
@@ -11486,6 +11487,12 @@ export type UpdateChannelData = {
     url: '/api/v1/rooms/{room_id}/channels/{channel_id}';
 };
 
+export type UpdateChannelErrors = {
+    403: ProblemDetails;
+};
+
+export type UpdateChannelError = UpdateChannelErrors[keyof UpdateChannelErrors];
+
 export type UpdateChannelResponses = {
     200: Channel;
 };
@@ -11523,6 +11530,7 @@ export type List5Errors = {
     400: ProblemDetails;
     403: ProblemDetails;
     404: ProblemDetails;
+    429: ProblemDetails;
 };
 
 export type List5Error = List5Errors[keyof List5Errors];
@@ -11714,6 +11722,7 @@ export type UploadErrors = {
     403: ProblemDetails;
     409: ProblemDetails;
     413: ProblemDetails;
+    429: ProblemDetails;
     502: ProblemDetails;
 };
 
@@ -13095,6 +13104,7 @@ export type PurgeData = {
 
 export type PurgeErrors = {
     403: ProblemDetails;
+    429: ProblemDetails;
 };
 
 export type PurgeError = PurgeErrors[keyof PurgeErrors];
@@ -13162,6 +13172,7 @@ export type PutRoomSettingData = {
 export type PutRoomSettingErrors = {
     403: ProblemDetails;
     404: ProblemDetails;
+    429: ProblemDetails;
 };
 
 export type PutRoomSettingError = PutRoomSettingErrors[keyof PutRoomSettingErrors];
@@ -13668,6 +13679,7 @@ export type PublicSoundAudioData = {
 
 export type PublicSoundAudioErrors = {
     404: ProblemDetails;
+    429: ProblemDetails;
     502: ProblemDetails;
 };
 
