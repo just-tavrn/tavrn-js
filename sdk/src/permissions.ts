@@ -42,6 +42,7 @@ export const Permission = {
   READ_HISTORY: 1n << 34n,
   MANAGE_APPLICATIONS: 1n << 35n,
   MANAGE_THREADS: 1n << 36n,
+  RESTORE_HISTORY: 1n << 37n,
   ADMINISTRATOR: 1n << 62n,
 } as const;
 
@@ -73,6 +74,7 @@ export const EVERYONE_RESTRICTED: bigint = [
   Permission.MANAGE_NICKNAMES,
   Permission.MANAGE_APPLICATIONS,
   Permission.MANAGE_THREADS,
+  Permission.RESTORE_HISTORY,
   Permission.PURGE,
 ].reduce((a, b) => a | b, 0n);
 
@@ -116,6 +118,7 @@ export const PERMISSION_LABELS: { name: PermissionName; label: string; group: st
   { name: "PURGE", label: "Bulk delete", group: "Moderation" },
   { name: "VIEW_AUDIT_LOG", label: "View audit log", group: "Moderation" },
   { name: "MANAGE_NICKNAMES", label: "Manage nicknames", group: "Moderation" },
+  { name: "RESTORE_HISTORY", label: "Restore history after a key reset", group: "Moderation" },
   { name: "CONNECT", label: "Connect", group: "Voice" },
   { name: "SPEAK", label: "Speak", group: "Voice" },
   { name: "STREAM", label: "Share screen", group: "Voice" },

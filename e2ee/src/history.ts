@@ -76,6 +76,18 @@ export function epochsToShare(p: HistoryPolicy, known: number[], current: number
 }
 
 /**
+ * Epochs to share automatically with a member whose key was reset (ENCRYPTION.md §7b "History after a key reset"):
+ * the device's known epochs older than the current one, from the oldest epoch with content after the reset
+ * (`fromEpoch`, null: nothing since the reset) and never below `minEpoch` (the reset epoch + 1). Everything older is
+ * restored only by an approved request.
+ */
+export function epochsSinceReset(known: number[], current: number, fromEpoch: number | null, minEpoch: number | null): number[] {
+  if (fromEpoch === null) return [];
+  const lower = Math.max(fromEpoch, minEpoch ?? fromEpoch);
+  return [...new Set(known)].filter((e) => Number.isSafeInteger(e) && e >= lower && e < current).sort((a, b) => a - b);
+}
+
+/**
  * Splits ascending epochs into shares of at most `max` epochs whose range (`last - first + 1`) stays within
  * {@link MAX_EPOCHS_PER_SHARE}.
  */
@@ -231,7 +243,25 @@ export interface HistoryApi {
   shares(conversationId: string): Promise<HistoryShareList>;
   ack(conversationId: string, shareId: string): Promise<unknown>;
   pending(conversationId: string): Promise<HistoryPendingList>;
-  messages(conversationId: string, query: { limit?: number; after?: string; epoch?: number }): Promise<Message[]>;
+  messages(conversationId: string, query: { limit?: number; after?: string; before?: string; epoch?: number }): Promise<Message[]>;
+}
+
+/** Channel kinds whose content is messages (others, such as files channels, keep records, FILES.md §8.7). */
+const MESSAGE_KINDS = new Set(["text", "announcement", "forum"]);
+
+/** One encrypted channel of a restore request (`HistoryRequest.channels`), times in milliseconds. */
+export interface RestoreChannel {
+  kind: string;
+  /** The requester's normal window start; null = everything. */
+  windowStart: number | null;
+}
+
+/** What this device can restore in one channel: the epochs it would send and how many of the window it lacks. */
+export interface RestorePlan {
+  epochs: number[];
+  /** Epochs of the window this device does not hold (or cannot tell: `unknown`). */
+  missing: number;
+  unknown: boolean;
 }
 
 export interface HistorySyncDeps {
@@ -243,6 +273,18 @@ export interface HistorySyncDeps {
   api(domain: string): HistoryApi;
   /** Is `address` online (presence)? This user counts as online. */
   isOnline(address: string): boolean;
+  /**
+   * The time of `address`'s last identity reset from its keys document (`identity_reset_at`, ENCRYPTION.md §2.3),
+   * null if none: with nodes that do not report `key_reset_at`, a recipient reset after its join gets automatic shares
+   * only from the reset on.
+   */
+  resetAt?(address: string): Promise<number | null>;
+  /**
+   * The oldest epoch of a non-message channel's encrypted content after `sinceMs` (files channels: `GET
+   * records?since=`, FILES.md §8.7); null when there is none. Without it such channels are restored only for a window
+   * without start.
+   */
+  firstEpoch?(conversation: string, kind: string, sinceMs: number): Promise<number | null>;
   /** Something went wrong with a share; never carries keys or payloads. */
   onLog?(event: "share_rejected" | "share_failed" | "keys_rejected", conversation: string): void;
   backoffMs?: number;
@@ -301,6 +343,7 @@ export class HistorySync {
         return a !== entry.user && (a === this.deps.address || this.deps.isOnline(a));
       });
       const delay = sharerDelay(self, candidates, !!this.preferred.get(q)?.has(entry.user), this.deps.backoffMs ?? SHARER_BACKOFF_MS);
+      const reset = await this.resetOf(entry);
       const go = async () => {
         this.timers.delete(key);
         if (this.disposed) return;
@@ -310,7 +353,8 @@ export class HistorySync {
         }
         this.shared.add(key);
         try {
-          await this.shareWith(q, entry.user, Date.parse(entry.since), policy);
+          if (reset) await this.shareSinceReset(q, entry.user, reset.at, reset.minEpoch);
+          else await this.shareWith(q, entry.user, Date.parse(entry.since), policy);
         } catch {
           this.deps.onLog?.("share_failed", q);
         }
@@ -318,6 +362,89 @@ export class HistorySync {
       if (delay === 0) await go();
       else this.timers.set(key, (this.deps.setTimer ?? setTimeout)(() => void go(), delay));
     }
+  }
+
+  /**
+   * The key reset of a waiting member: from the node (`key_reset_at`, `min_epoch`) or, with nodes that do not report
+   * it, from the member's keys document when the reset is later than the pending mark's `since`.
+   */
+  private async resetOf(entry: { user: string; since: string; key_reset_at?: string | null; min_epoch?: number | null }): Promise<{ at: number; minEpoch: number | null } | null> {
+    if (entry.key_reset_at) {
+      const at = Date.parse(entry.key_reset_at);
+      if (Number.isFinite(at)) return { at, minEpoch: entry.min_epoch ?? null };
+    }
+    const at = this.deps.resetAt ? await this.deps.resetAt(entry.user).catch(() => null) : null;
+    const since = Date.parse(entry.since);
+    return at !== null && Number.isFinite(at) && (!Number.isFinite(since) || at > since) ? { at, minEpoch: null } : null;
+  }
+
+  /**
+   * Automatic shares for a member whose key was reset: only epochs since the reset (ENCRYPTION.md §7b "History after a
+   * key reset"); without `minEpoch` from the node nothing up to the epoch of the newest message before the reset, and
+   * nothing at all when that cannot be read.
+   */
+  async shareSinceReset(q: string, to: string, resetAtMs: number, minEpoch: number | null): Promise<number> {
+    const { api, id } = this.api(q);
+    const mls = this.deps.mls;
+    const current = mls.epoch(q);
+    if (current === null) return 0;
+    const after = await api.messages(id, { after: ulidFloor(resetAtMs), limit: 20 });
+    const since = after.filter((m) => m.encrypted && typeof m.epoch === "number").map((m) => m.epoch as number);
+    let lower = minEpoch;
+    if (lower === null) {
+      const before = await api.messages(id, { before: ulidFloor(resetAtMs), limit: 1 });
+      const last = before.find((m) => m.encrypted && typeof m.epoch === "number");
+      lower = last ? (last.epoch as number) + 1 : 0;
+    }
+    const epochs = epochsSinceReset(mls.knownEpochs(q), current, since.length ? Math.min(...since) : null, lower);
+    return this.sendChunks(q, to, epochs);
+  }
+
+  /** The oldest epoch with encrypted content after `startMs` (null start: from the beginning). */
+  private async firstEpoch(q: string, channel: RestoreChannel): Promise<number | null | undefined> {
+    const { api, id } = this.api(q);
+    if (MESSAGE_KINDS.has(channel.kind)) {
+      const page = await api.messages(id, { after: ulidFloor(channel.windowStart ?? 0), limit: 20 });
+      const epochs = page.filter((m) => m.encrypted && typeof m.epoch === "number").map((m) => m.epoch as number);
+      return epochs.length ? Math.min(...epochs) : null;
+    }
+    if (channel.windowStart === null) return 0;
+    // Another kind with a window start: only its own listing knows (undefined = cannot tell).
+    return this.deps.firstEpoch ? this.deps.firstEpoch(q, channel.kind, channel.windowStart) : undefined;
+  }
+
+  /**
+   * What this device can restore of a requester's window in `q` (ENCRYPTION.md §7b): every epoch it holds from the
+   * window's oldest content up to the epoch before the current one, and how many of those it lacks.
+   */
+  async restorePlan(q: string, channel: RestoreChannel): Promise<RestorePlan> {
+    const current = this.deps.mls.epoch(q);
+    if (current === null || !this.deps.mls.hasGroup(q)) return { epochs: [], missing: 0, unknown: true };
+    const from = await this.firstEpoch(q, channel);
+    if (from === undefined) return { epochs: [], missing: 0, unknown: true };
+    if (from === null) return { epochs: [], missing: 0, unknown: false };
+    const epochs = [...new Set(this.deps.mls.knownEpochs(q))].filter((e) => Number.isSafeInteger(e) && e >= from && e < current).sort((a, b) => a - b);
+    return { epochs, missing: Math.max(0, current - from - epochs.length), unknown: false };
+  }
+
+  /**
+   * After approving a restore request: sends the keys of the requester's window in `q` from this device (restore
+   * shares, which the node accepts only from members with `restore_history` while the restore is valid). Nothing is
+   * sent while no device of the requester is in the group.
+   */
+  async restore(q: string, to: string, channel: RestoreChannel): Promise<RestorePlan & { sent: number; skipped: boolean }> {
+    if (this.disposed || !this.deps.mls.hasGroup(q)) return { epochs: [], missing: 0, unknown: true, sent: 0, skipped: true };
+    await this.deps.mls.catchUp(q).catch(() => undefined);
+    // A device of the requester attested under its current key (old leaves from before the reset do not count).
+    const attested = await this.deps.mls.verifiedDevices(to, true).catch(() => null);
+    const present = this.deps.mls.roster(q).some((i) => {
+      const { address, deviceId } = splitIdentity(i);
+      return address === to && (!attested || attested.has(deviceId));
+    });
+    if (!present) return { epochs: [], missing: 0, unknown: true, sent: 0, skipped: true };
+    const plan = await this.restorePlan(q, channel);
+    const sent = plan.epochs.length ? await this.sendChunks(q, to, plan.epochs) : 0;
+    return { ...plan, sent, skipped: false };
   }
 
   /** Sends the keys of the policy's window to `to` (chunked); an empty share if there is nothing to send. */
@@ -335,6 +462,13 @@ export class HistorySync {
       fromEpoch = epochs.length ? Math.min(...epochs) : null;
     }
     const epochs = epochsToShare(policy, mls.knownEpochs(q), current, fromEpoch);
+    return this.sendChunks(q, to, epochs);
+  }
+
+  /** Encrypts and posts `epochs` for `to` in chunks; one empty share when there are none (it clears a pending mark). */
+  private async sendChunks(q: string, to: string, epochs: number[]): Promise<number> {
+    const { api, id } = this.api(q);
+    const mls = this.deps.mls;
     const chunks = epochs.length ? chunkEpochs(epochs) : [[]];
     let sent = 0;
     for (const chunk of chunks) {

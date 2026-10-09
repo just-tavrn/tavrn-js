@@ -184,6 +184,7 @@ import type { CreatedWebhook, CreateWebhookRequest, PutSubscriptionRequest, Subs
 import type { DeviceNonce, DeviceProof, PendingRemovalList, ReauthRequest, ReauthToken, RetiredDeviceRequest } from "./generated/types.gen";
 import type { GroupMapDocument, GroupMapUpdate, LogoutResponse, OidcIdentity, OidcStartRequest, OidcStartResponse, OidcTokenResponse } from "./generated/types.gen";
 import type { CreateHistoryShareRequest, HistoryPendingList, HistoryShareCreated, HistoryShareList } from "./generated/types.gen";
+import type { ApproveHistoryRequest, HistoryRequest, HistoryRequestList, MyHistoryState } from "./generated/types.gen";
 import type { InboxKey, PublishInboxKeyRequest } from "./generated/types.gen";
 import type { BackendInfo, BackendRequest, BackendTest, DeleteResult, FileEntry, FileEntryDetail, FileList, FilesInfo, UpdateEntryRequest } from "./generated/types.gen";
 import type { AdminApplication, AdminApplicationUpdate, ApplicationBlock, ApplicationBlockRequest, InstallIndexEntry, InstallRequest, Installation, PublicApplication } from "./generated/types.gen";
@@ -767,6 +768,23 @@ export class TavrnApi {
     shares: (conversationId: string) => this.get<HistoryShareList>(`/conversations/${conversationId}/history-keys`),
     ack: (conversationId: string, shareId: string) => this.del(`/conversations/${conversationId}/history-keys/${encodeURIComponent(shareId)}`),
     pending: (conversationId: string) => this.get<HistoryPendingList>(`/conversations/${conversationId}/history-pending`),
+  };
+
+  /**
+   * History restore after a key reset (ENCRYPTION.md §7b "History after a key reset"): a member whose key was reset
+   * asks for its history; members with `restore_history` approve (then share the keys from their device) or deny.
+   */
+  historyRequests = {
+    create: (roomId: string, message?: string) => this.post<HistoryRequest>(`/rooms/${roomId}/history-requests`, message ? { message } : {}),
+    /** The requester's own state in the room: its key reset, an approved restore and its latest request. */
+    mine: (roomId: string) => this.get<MyHistoryState>(`/rooms/${roomId}/history-requests/mine`),
+    cancel: (roomId: string, requestId: string) => this.del(`/rooms/${roomId}/history-requests/${encodeURIComponent(requestId)}`),
+    /** Open requests with the channels each would restore (`restore_history`). */
+    list: (roomId: string) => this.get<HistoryRequestList>(`/rooms/${roomId}/history-requests`),
+    approve: (roomId: string, requestId: string, req: ApproveHistoryRequest = {}) =>
+      this.post<HistoryRequest>(`/rooms/${roomId}/history-requests/${encodeURIComponent(requestId)}/approve`, req),
+    deny: (roomId: string, requestId: string, reason: string) =>
+      this.post<HistoryRequest>(`/rooms/${roomId}/history-requests/${encodeURIComponent(requestId)}/deny`, { reason }),
   };
 
   /** Encrypted history backups on the home node (ENCRYPTION.md §7). */

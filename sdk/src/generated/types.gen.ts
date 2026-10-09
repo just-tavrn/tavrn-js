@@ -338,6 +338,13 @@ export type ApplicationBlockRequest = {
     reason?: string | null;
 };
 
+export type ApproveHistoryRequest = {
+    /**
+     * The approving device does not hold every key of the requester's window.
+     */
+    partial?: boolean;
+};
+
 export type Attachment = {
     /**
      * The file was deleted by attachment retention: clients show "file expired", downloads answer 410.
@@ -1433,6 +1440,13 @@ export type CreateGroupRequest = {
     group_info: string;
 };
 
+export type CreateHistoryRequest = {
+    /**
+     * A note for the moderators (at most 500 characters).
+     */
+    message?: string | null;
+};
+
 export type CreateHistoryShareRequest = {
     /**
      * The key list, encrypted like message content under the current epoch (ENCRYPTION.md §7b), base64url;
@@ -1794,6 +1808,13 @@ export type DelistedEntry = {
      * Null when the whole node is delisted.
      */
     room_id?: string | null;
+};
+
+export type DenyHistoryRequest = {
+    /**
+     * Why (1–500 characters); in the audit log and shown to the requester.
+     */
+    reason?: string | null;
 };
 
 export type DeviceInfo = {
@@ -2579,13 +2600,84 @@ export type HistoryPendingList = {
 
 export type HistoryPendingMember = {
     /**
-     * The membership's `joined_at` (start of the policy window).
+     * After a key reset of the member (ENCRYPTION.md §7b "History after a key reset"): the reset time; null otherwise.
+     */
+    key_reset_at?: string | null;
+    /**
+     * After a key reset: the lowest epoch an automatic share may carry (reset epoch + 1); null without a
+     * pre-reset range.
+     */
+    min_epoch?: number | null;
+    /**
+     * Start of the automatic window: the membership's `joined_at`, after a key reset its `key_reset_at`.
      */
     since: string;
     /**
      * Member address.
      */
     user: string;
+};
+
+export type HistoryRequest = {
+    /**
+     * For members with `restore_history`: the encrypted channels the requester may view (else empty).
+     */
+    channels: Array<HistoryRequestChannel>;
+    created_at: string;
+    decided_at?: string | null;
+    /**
+     * Address of the member who decided.
+     */
+    decided_by?: string | null;
+    display_name: string;
+    id: string;
+    /**
+     * The requester's membership start.
+     */
+    joined_at: string;
+    /**
+     * The requester's current key reset (null once the membership ended or nothing is reset).
+     */
+    key_reset_at?: string | null;
+    message: string;
+    /**
+     * The approving device did not hold every key of the window.
+     */
+    partial: boolean;
+    /**
+     * Reason of a denial.
+     */
+    reason?: string | null;
+    room_id: string;
+    /**
+     * `open`, `approved`, `denied` or `cancelled`.
+     */
+    status: string;
+    /**
+     * Requester address.
+     */
+    user: string;
+};
+
+export type HistoryRequestChannel = {
+    channel_id: string;
+    /**
+     * The channel's kind (`text`, `announcement`, `forum`, `files`).
+     */
+    kind: string;
+    /**
+     * The group epoch at the requester's key reset; keys up to it are the pre-reset range. Null: no group then.
+     */
+    reset_epoch?: number | null;
+    /**
+     * The requester's normal window start in this channel (policy and `read_history` from `joined_at`); null =
+     * everything.
+     */
+    window_start?: string | null;
+};
+
+export type HistoryRequestList = {
+    items: Array<HistoryRequest>;
 };
 
 export type HistoryShare = {
@@ -3235,6 +3327,18 @@ export type MyEntitlements = {
      * Every key with its effective value for the requester (and the room, if given).
      */
     values: BTreeMap;
+};
+
+export type MyHistoryState = {
+    /**
+     * The membership's key reset (null: none).
+     */
+    key_reset_at?: string | null;
+    request?: null | HistoryRequest;
+    /**
+     * When a restore of the membership was approved (null: none).
+     */
+    restored_at?: string | null;
 };
 
 /**
@@ -4711,6 +4815,10 @@ export type Room = {
      */
     discoverable: boolean;
     /**
+     * History restore after a key reset (ENCRYPTION.md §7b): `request` (members may ask, default) or `off`.
+     */
+    history_restore: string;
+    /**
      * Path of the icon on this node (the animated variant if there is one), null without icon.
      */
     icon?: string | null;
@@ -5621,6 +5729,11 @@ export type UpdateRoomRequest = {
      * a room to `invite` removes it from the directory.
      */
     discoverable?: boolean | null;
+    /**
+     * History restore after a key reset (ENCRYPTION.md §7b): `request` (members may ask, default) or `off`.
+     * Owner or `manage_room`; never a bot.
+     */
+    history_restore?: string | null;
     join_mode?: string | null;
     /**
      * Delete messages after this many days (1–36500; 0 = use the node's value, PROTOCOL.md §7f). Effective is the
@@ -12252,6 +12365,146 @@ export type FollowedThreadsResponses = {
 
 export type FollowedThreadsResponse = FollowedThreadsResponses[keyof FollowedThreadsResponses];
 
+export type List7Data = {
+    body?: never;
+    path: {
+        room_id: string;
+    };
+    query?: never;
+    url: '/api/v1/rooms/{room_id}/history-requests';
+};
+
+export type List7Errors = {
+    403: ProblemDetails;
+    404: ProblemDetails;
+};
+
+export type List7Error = List7Errors[keyof List7Errors];
+
+export type List7Responses = {
+    200: HistoryRequestList;
+};
+
+export type List7Response = List7Responses[keyof List7Responses];
+
+export type Create5Data = {
+    body: CreateHistoryRequest;
+    path: {
+        room_id: string;
+    };
+    query?: never;
+    url: '/api/v1/rooms/{room_id}/history-requests';
+};
+
+export type Create5Errors = {
+    400: ProblemDetails;
+    403: ProblemDetails;
+    409: ProblemDetails;
+    429: ProblemDetails;
+};
+
+export type Create5Error = Create5Errors[keyof Create5Errors];
+
+export type Create5Responses = {
+    201: HistoryRequest;
+};
+
+export type Create5Response = Create5Responses[keyof Create5Responses];
+
+export type MineData = {
+    body?: never;
+    path: {
+        room_id: string;
+    };
+    query?: never;
+    url: '/api/v1/rooms/{room_id}/history-requests/mine';
+};
+
+export type MineErrors = {
+    403: ProblemDetails;
+    404: ProblemDetails;
+};
+
+export type MineError = MineErrors[keyof MineErrors];
+
+export type MineResponses = {
+    200: MyHistoryState;
+};
+
+export type MineResponse = MineResponses[keyof MineResponses];
+
+export type CancelData = {
+    body?: never;
+    path: {
+        room_id: string;
+        request_id: string;
+    };
+    query?: never;
+    url: '/api/v1/rooms/{room_id}/history-requests/{request_id}';
+};
+
+export type CancelErrors = {
+    403: ProblemDetails;
+    404: ProblemDetails;
+};
+
+export type CancelError = CancelErrors[keyof CancelErrors];
+
+export type CancelResponses = {
+    204: void;
+};
+
+export type CancelResponse = CancelResponses[keyof CancelResponses];
+
+export type ApproveData = {
+    body: ApproveHistoryRequest;
+    path: {
+        room_id: string;
+        request_id: string;
+    };
+    query?: never;
+    url: '/api/v1/rooms/{room_id}/history-requests/{request_id}/approve';
+};
+
+export type ApproveErrors = {
+    403: ProblemDetails;
+    404: ProblemDetails;
+    409: ProblemDetails;
+};
+
+export type ApproveError = ApproveErrors[keyof ApproveErrors];
+
+export type ApproveResponses = {
+    200: HistoryRequest;
+};
+
+export type ApproveResponse = ApproveResponses[keyof ApproveResponses];
+
+export type DenyData = {
+    body: DenyHistoryRequest;
+    path: {
+        room_id: string;
+        request_id: string;
+    };
+    query?: never;
+    url: '/api/v1/rooms/{room_id}/history-requests/{request_id}/deny';
+};
+
+export type DenyErrors = {
+    400: ProblemDetails;
+    403: ProblemDetails;
+    404: ProblemDetails;
+    409: ProblemDetails;
+};
+
+export type DenyError = DenyErrors[keyof DenyErrors];
+
+export type DenyResponses = {
+    200: HistoryRequest;
+};
+
+export type DenyResponse = DenyResponses[keyof DenyResponses];
+
 export type DeleteRoomIconData = {
     body?: never;
     path: {
@@ -14005,18 +14258,18 @@ export type ExportMeResponses = {
     200: unknown;
 };
 
-export type List7Data = {
+export type List8Data = {
     body?: never;
     path?: never;
     query?: never;
     url: '/api/v1/users/me/friends';
 };
 
-export type List7Responses = {
+export type List8Responses = {
     200: FriendList;
 };
 
-export type List7Response = List7Responses[keyof List7Responses];
+export type List8Response = List8Responses[keyof List8Responses];
 
 export type SendRequestData = {
     body: FriendRequestBody;
@@ -14222,24 +14475,24 @@ export type Rotate2Responses = {
 
 export type Rotate2Response = Rotate2Responses[keyof Rotate2Responses];
 
-export type List8Data = {
+export type List9Data = {
     body?: never;
     path?: never;
     query?: never;
     url: '/api/v1/users/me/invites';
 };
 
-export type List8Errors = {
+export type List9Errors = {
     403: ProblemDetails;
 };
 
-export type List8Error = List8Errors[keyof List8Errors];
+export type List9Error = List9Errors[keyof List9Errors];
 
-export type List8Responses = {
+export type List9Responses = {
     200: UserInviteList;
 };
 
-export type List8Response = List8Responses[keyof List8Responses];
+export type List9Response = List9Responses[keyof List9Responses];
 
 export type DismissData = {
     body?: never;
@@ -14390,24 +14643,24 @@ export type PutMineResponses = {
 
 export type PutMineResponse = PutMineResponses[keyof PutMineResponses];
 
-export type List9Data = {
+export type List10Data = {
     body?: never;
     path?: never;
     query?: never;
     url: '/api/v1/users/me/push-subscriptions';
 };
 
-export type List9Errors = {
+export type List10Errors = {
     403: ProblemDetails;
 };
 
-export type List9Error = List9Errors[keyof List9Errors];
+export type List10Error = List10Errors[keyof List10Errors];
 
-export type List9Responses = {
+export type List10Responses = {
     200: Array<PushRegistration>;
 };
 
-export type List9Response = List9Responses[keyof List9Responses];
+export type List10Response = List10Responses[keyof List10Responses];
 
 export type Register2Data = {
     body: PushSubscriptionRequest;
@@ -14477,24 +14730,24 @@ export type Remove2Responses = {
 
 export type Remove2Response = Remove2Responses[keyof Remove2Responses];
 
-export type List10Data = {
+export type List11Data = {
     body?: never;
     path?: never;
     query?: never;
     url: '/api/v1/users/me/secret-storage';
 };
 
-export type List10Errors = {
+export type List11Errors = {
     401: ProblemDetails;
 };
 
-export type List10Error = List10Errors[keyof List10Errors];
+export type List11Error = List11Errors[keyof List11Errors];
 
-export type List10Responses = {
+export type List11Responses = {
     200: SecretStorageList;
 };
 
-export type List10Response = List10Responses[keyof List10Responses];
+export type List11Response = List11Responses[keyof List11Responses];
 
 export type DeletePasskeyData = {
     body?: never;
