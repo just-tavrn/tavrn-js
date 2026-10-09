@@ -416,3 +416,40 @@ describe("performance", () => {
     expect(hits.length).toBe(50);
   });
 });
+
+describe("entries of encrypted files channels (SEARCH.md §3.6)", () => {
+  const FILES = "n.example/01J9ZK3G5M8Q2W4E6R8T0Y2VF0";
+  const entry = (name: string, folder: string, category: string, opts: Partial<IndexedMessage> = {}): IndexedMessage =>
+    msg(`${name}\n${folder}`, {
+      conversation: FILES,
+      room: "R1",
+      file: { kind: "file", name, folder, mime: category === "images" ? "image/png" : "application/pdf", category, size: 1234, thumbnail: category === "images", parent: "P1" },
+      ...opts,
+    });
+
+  it("finds entries by name and folder, returns the file part and filters by category, uploader and date", async () => {
+    const { index, backend } = await fresh();
+    const photo = entry("Holiday beach.png", "Trips/2026", "images", { author: "bob@t.local", ts: NOW - 5 * DAY });
+    const plan = entry("Quarterly plan.pdf", "Board", "documents");
+    await index.add([photo, plan, msg("the beach was great")]);
+    const hits = await index.search("beach", { kind: "files" });
+    expect(hits.map((h) => h.id)).toEqual([photo.id]);
+    expect(hits[0]!.file).toEqual(photo.file);
+    expect(hits[0]!.room).toBe("R1");
+    expect((await index.search("trips")).map((h) => h.id)).toEqual([photo.id]);
+    expect((await index.search("beach", { kind: "messages" })).map((h) => h.file)).toEqual([undefined]);
+    expect((await index.search("", { category: "documents" })).map((h) => h.id)).toEqual([plan.id]);
+    expect((await index.search("", { author: "bob@t.local", kind: "files" })).map((h) => h.id)).toEqual([photo.id]);
+    expect((await index.search("", { after: NOW - DAY, kind: "files" })).map((h) => h.id)).toEqual([plan.id]);
+    // Removing a deleted entry; nothing readable in the backend.
+    await index.remove(FILES, [photo.id]);
+    expect(await index.search("beach", { kind: "files" })).toEqual([]);
+    await index.flush();
+    for (const s of ["docs", "postings", "meta"] as const) {
+      for (const k of await backend.keys(s)) {
+        const text = new TextDecoder().decode((await backend.get(s, k))!);
+        expect(text).not.toMatch(/Quarterly|Board|documents|pdf/);
+      }
+    }
+  });
+});

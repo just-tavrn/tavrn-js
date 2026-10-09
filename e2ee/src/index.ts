@@ -53,6 +53,7 @@ export * from "./sealed";
 export * from "./commands";
 export * from "./plaintext";
 export * from "./history";
+export * from "./files";
 export * from "./search";
 export {
   IDENTITY_SEED,
