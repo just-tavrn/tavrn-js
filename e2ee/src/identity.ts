@@ -134,8 +134,14 @@ export async function syncIdentity(
   if (!store.isUnlocked()) throw new E2eeError("locked");
   const keys = doc ?? (await api.keys.get(username));
   const published = keys.identity_public_key ?? null;
-  if (!published || published === (await ownIdentityPublicKey(store))) return "current";
-  const seed = await resolveIdentity(api, keys, derivedIdentityKey(store), (blob) => withMasterSecret(store, (m) => unwrapIdentityKey(m, blob, address)));
+  const own = await ownIdentityPublicKey(store);
+  if (!published || published === own) return "current";
+  const derived = derivedIdentityKey(store);
+  // Forward only: a device that already follows a rotated key accepts a newer key only when the chain leads to it
+  // from that key. Otherwise the home node could roll the device back to an older generation (whose key may be the
+  // compromised one the rotation retired) by serving the old chain and blob again.
+  if (own !== derived && !chainReaches(keys.continuity, own, published)) throw new E2eeError("identity_mismatch");
+  const seed = await resolveIdentity(api, keys, derived, (blob) => withMasterSecret(store, (m) => unwrapIdentityKey(m, blob, address)));
   if (!seed) {
     await store.deleteSecret(IDENTITY_SEED);
     return "rotated";

@@ -270,6 +270,11 @@ export type Decrypted =
   | { ok: true; content: Record<string, unknown>; retired?: true; sealedBy?: SealedBy; webhookName?: string }
   | { ok: false; reason: DecryptFailure };
 
+/** `type` of an encrypted thread title (PROTOCOL.md §7e). */
+const THREAD_TITLE_TYPE = "thread.title";
+/** Content types that are never a message or an event: history shares (§7b) travel only through their own route. */
+const NOT_CONTENT_TYPES = new Set(["history_keys"]);
+
 /** Longest thread title in characters (PROTOCOL.md §7e). */
 export const THREAD_TITLE_MAX = 100;
 
@@ -966,16 +971,27 @@ export class MlsManager {
     });
   }
 
-  /** Decrypts and verifies an encrypted envelope; the result is cached for the session (not persisted). */
-  async decrypt(conversationId: string, m: EncryptedEnvelope): Promise<Decrypted> {
+  /**
+   * Decrypts and verifies an encrypted envelope; the result is cached for the session (not persisted). Content of
+   * another purpose in the same format (a thread title, a history share) is `invalid` here: the node could otherwise
+   * serve it as a message of its author, since format and AAD are the same (§5.2, §7b).
+   */
+  decrypt(conversationId: string, m: EncryptedEnvelope): Promise<Decrypted> {
+    return this.decryptEnvelope(conversationId, m, "message");
+  }
+
+  private async decryptEnvelope(conversationId: string, m: EncryptedEnvelope, purpose: "message" | "title"): Promise<Decrypted> {
     const sealed = m.webhook ? sealedContent(m.content) : null;
-    if (sealed) return this.decryptSealed(conversationId, m, sealed);
+    if (sealed) return purpose === "message" ? this.decryptSealed(conversationId, m, sealed) : { ok: false, reason: "invalid" };
     if (typeof m.content !== "string" || !m.device_id) return { ok: false, reason: "invalid" };
-    const cacheKey = `${conversationId}|${m.id}|${m.content}`;
+    const cacheKey = `${purpose}|${conversationId}|${m.id}|${m.content}`;
     const cached = this.decrypted.get(cacheKey);
     if (cached) return cached;
     const sentAt = m.created_at ? Date.parse(m.created_at) : NaN;
-    const result = await this.decryptUncached(conversationId, m.id, m.author, m.device_id, m.epoch ?? null, m.content, Number.isFinite(sentAt) ? sentAt : null);
+    let result = await this.decryptUncached(conversationId, m.id, m.author, m.device_id, m.epoch ?? null, m.content, Number.isFinite(sentAt) ? sentAt : null);
+    if (result.ok && (purpose === "title") !== (result.content.type === THREAD_TITLE_TYPE)) result = { ok: false, reason: "invalid" };
+    if (result.ok && NOT_CONTENT_TYPES.has(String(result.content.type))) result = { ok: false, reason: "invalid" };
+    if (!result.ok && result.reason === "invalid") this.forgetNonce(conversationId, m.content, m.id);
     // Missing keys may arrive later (catch-up, backup): only final results are cached.
     if (result.ok || result.reason !== "missing_key") this.decrypted.set(cacheKey, result);
     return result;
@@ -1047,7 +1063,7 @@ export class MlsManager {
     conversationId: string,
     t: { id: string; title: string; title_epoch?: number | null; title_author: string; title_device_id?: string | null; created_at?: string | null },
   ): Promise<{ ok: true; title: string } | { ok: false; reason: DecryptFailure }> {
-    const r = await this.decrypt(conversationId, { id: `thread-title:${t.id}`, author: t.title_author, device_id: t.title_device_id ?? null, epoch: t.title_epoch ?? null, content: t.title, created_at: t.created_at ?? null });
+    const r = await this.decryptEnvelope(conversationId, { id: `thread-title:${t.id}`, author: t.title_author, device_id: t.title_device_id ?? null, epoch: t.title_epoch ?? null, content: t.title, created_at: t.created_at ?? null }, "title");
     if (!r.ok) return r;
     const body = r.content.body;
     if (r.content.type !== "thread.title" || typeof body !== "string" || !body.trim() || Array.from(body).length > THREAD_TITLE_MAX) return { ok: false, reason: "invalid" };
@@ -1058,7 +1074,7 @@ export class MlsManager {
   peek(conversationId: string, m: EncryptedEnvelope): Decrypted | undefined {
     const sealed = m.webhook ? sealedContent(m.content) : null;
     if (sealed) return this.decrypted.get(`${conversationId}|${m.id}|${sealed.sealed}`);
-    return this.decrypted.get(`${conversationId}|${m.id}|${String(m.content)}`);
+    return this.decrypted.get(`message|${conversationId}|${m.id}|${String(m.content)}`);
   }
 
   /**
@@ -1083,7 +1099,11 @@ export class MlsManager {
     if (!header) return { ok: false, reason: "invalid" };
     const replayKey = `${conversationId}|${header.epoch}|${header.nonce}`;
     if (this.ephemeralNonces.has(replayKey)) return { ok: false, reason: "replay" };
-    const result = await this.decryptUncached(conversationId, `eph:${replayKey}`, author, deviceId, header.epoch, content);
+    let result = await this.decryptUncached(conversationId, `eph:${replayKey}`, author, deviceId, header.epoch, content);
+    if (result.ok && (result.content.type === THREAD_TITLE_TYPE || NOT_CONTENT_TYPES.has(String(result.content.type)))) {
+      this.nonces.delete(replayKey);
+      return { ok: false, reason: "invalid" };
+    }
     if (result.ok) {
       this.ephemeralNonces.add(replayKey);
       // A bounded window: the oldest nonces are forgotten first (Set keeps insertion order).
@@ -1095,6 +1115,13 @@ export class MlsManager {
       this.nonces.delete(replayKey);
     }
     return result;
+  }
+
+  /** A ciphertext refused for its purpose does not count as seen: the genuine use of it is not a replay. */
+  private forgetNonce(q: string, content: string, id: string) {
+    const h = contentHeader(content);
+    const key = h ? `${q}|${h.epoch}|${h.nonce}` : null;
+    if (key && this.nonces.get(key) === id) this.nonces.delete(key);
   }
 
   private async decryptUncached(conversationId: string, id: string, author: string, deviceId: string, epoch: number | null, content: string, sentAt: number | null = null): Promise<Decrypted> {
@@ -1649,6 +1676,35 @@ export class MlsManager {
   }
 
   /**
+   * Whether a candidate content key of `epoch` opens `sample` (a stored message of that epoch) **and** the plaintext
+   * carries a valid signature of the sample author's attested device (§7b step 4, §5.2). The AES-GCM tag alone can be
+   * produced by anyone who knows the key, so a sharer colluding with the node could otherwise "prove" a key of its
+   * choice with a message the node made up. Uses a throwaway client; nothing is stored or cached.
+   */
+  async sampleProvesKey(q: string, epoch: number, key: Uint8Array, sample: { author: string; device_id: string; content: string }): Promise<boolean> {
+    let deviceKey: Uint8Array | undefined;
+    try {
+      deviceKey = (await this.verifiedDevices(sample.author))?.get(sample.device_id) ?? (await this.verifiedDevices(sample.author, true))?.get(sample.device_id) ?? this.retiredDevice(sample.author, sample.device_id)?.key;
+    } catch {
+      deviceKey = undefined;
+    }
+    if (!deviceKey) return false;
+    let probe: Client | null = null;
+    try {
+      probe = Client.create(sample.author, sample.device_id);
+      probe.importEpochKey(q, epoch, key);
+      const header = contentHeader(sample.content);
+      if (!header || header.epoch !== epoch) return false;
+      probe.decryptContent(q, sample.author, sample.device_id, sample.content, deviceKey);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      probe?.free();
+    }
+  }
+
+  /**
    * Stores accepted history keys (validated by the caller) in the client state, exactly like own epoch keys:
    * persisted in the encrypted key store and included in the history backup. Keys never overwrite known
    * ones. Returns the number of new keys.
@@ -1668,7 +1724,7 @@ export class MlsManager {
       if (n === 0) return 0;
       await this.persist();
       // Messages that failed with a missing key are decrypted again.
-      for (const [k, v] of [...this.decrypted]) if (!v.ok && k.startsWith(`${q}|`)) this.decrypted.delete(k);
+      for (const [k, v] of [...this.decrypted]) if (!v.ok && [`${q}|`, `message|${q}|`, `title|${q}|`].some((p) => k.startsWith(p))) this.decrypted.delete(k);
       this.markDirty(q);
       this.deps.onEvent?.({ type: "epoch", conversationId: q });
       return n;

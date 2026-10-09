@@ -264,6 +264,47 @@ describe("HistorySync", () => {
     expect(shares.map((s) => s.id).sort()).toEqual(["p2", "p3", "p4"]);
   });
 
+  it("drops a planted key whose sample message is not signed by the claimed author's device (node and sharer collude)", async () => {
+    const { device, sync, post, shares, messages } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    const mallory = device("mallory", DEV.m);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    const old = await post(alice, "geheim");
+    await mallory.mls.ensureJoined(CONV, { canCreate: false });
+    await bob.mls.ensureJoined(CONV, { canCreate: false });
+    await alice.mls.catchUp(CONV);
+    await mallory.mls.catchUp(CONV);
+
+    // Mallory shares a key of her choice for epoch 0; the node serves a "message of Alice" made under that key.
+    // Anyone who knows the key can produce the AES-GCM tag; only Alice's device can produce the signature inside.
+    const planted = new Uint8Array(32).fill(7);
+    const json = new TextEncoder().encode('{"type":"text","body":"fake"}');
+    const str16 = (x: string) => {
+      const b = new TextEncoder().encode(x);
+      return [b.length >> 8, b.length & 0xff, ...b];
+    };
+    const aad = new Uint8Array([1, ...str16(CONV), 0, 0, 0, 0, 0, 0, 0, 0, ...str16(alice.address), ...str16(DEV.a)]);
+    const nonce = new Uint8Array(12).fill(3);
+    const k = await crypto.subtle.importKey("raw", planted, "AES-GCM", false, ["encrypt"]);
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce, additionalData: aad }, k, new Uint8Array([...new Uint8Array(64).fill(1), ...json])));
+    const forgedContent = b64urlEncode(new Uint8Array([1, 0, 0, 0, 0, 0, 0, 0, 0, ...nonce, ...ct]));
+    messages.unshift({ ...old, id: "01J9ZK3G5M8Q2W4E6R8T0Y2VF0", content: forgedContent } as Message);
+    const enc = await mallory.mls.encryptHistory(CONV, encodeHistoryPayload(CONV, bob.address, [[0, planted]]));
+    shares.push({ id: "q1", to: bob.address, from_user: mallory.address, from_device: DEV.m, epoch_from: 0, epoch_to: 0, ciphertext: enc.content, created_at: "" });
+
+    const log: string[] = [];
+    expect(await sync(bob, undefined, log).receive(CONV)).toBe(0);
+    expect(bob.mls.knownEpochs(CONV)).not.toContain(0);
+    expect(log).toContain("keys_rejected");
+    // The real key still gets in later (a planted one would have blocked it for good: keys are never overwritten).
+    const real = await alice.mls.encryptHistory(CONV, encodeHistoryPayload(CONV, bob.address, alice.mls.exportEpochKeys(CONV, [0])));
+    messages.shift();
+    shares.push({ id: "q2", to: bob.address, from_user: alice.address, from_device: DEV.a, epoch_from: 0, epoch_to: 0, ciphertext: real.content, created_at: "" });
+    expect(await sync(bob).receive(CONV)).toBe(1);
+    expect(await bob.mls.decrypt(CONV, old)).toEqual({ ok: true, content: { type: "text", body: "geheim" } });
+  });
+
   it("checks keys against messages of other authors first", () => {
     const msgs = [
       { author: "mallory@t.local", device_id: "D1", epoch: 4, content: "x", encrypted: true },
