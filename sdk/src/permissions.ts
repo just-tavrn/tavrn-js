@@ -79,6 +79,55 @@ export const EVERYONE_RESTRICTED: bigint = [
 ].reduce((a, b) => a | b, 0n);
 
 /**
+ * The bits an override (category or channel) may carry (protocol/permissions.md "Channel-scoped bits"). Room-level
+ * bits are granted through roles only; the node refuses others with `permissions.not_channel_scoped`, and the
+ * evaluation ignores them in overrides. Same value as `permissions::CHANNEL_SCOPED` of the node.
+ */
+export const CHANNEL_SCOPED: bigint = [
+  Permission.VIEW_CHANNEL,
+  Permission.SEND_MESSAGES,
+  Permission.MANAGE_MESSAGES,
+  Permission.ATTACH_FILES,
+  Permission.ADD_REACTIONS,
+  Permission.MENTION_EVERYONE,
+  Permission.CREATE_THREADS,
+  Permission.MANAGE_CHANNELS,
+  Permission.MANAGE_ROLES,
+  Permission.CONNECT,
+  Permission.SPEAK,
+  Permission.STREAM,
+  Permission.MUTE_MEMBERS,
+  Permission.MOVE_MEMBERS,
+  Permission.USE_SOUNDBOARD,
+  Permission.PIN_MESSAGES,
+  Permission.USE_CAMERA,
+  Permission.USE_WHITEBOARD,
+  Permission.MANAGE_WHITEBOARD,
+  Permission.MANAGE_WEBHOOKS,
+  Permission.PRIORITY_SPEAKER,
+  Permission.USE_EXTERNAL_EMOJIS,
+  Permission.USE_EXTERNAL_SOUNDS,
+  Permission.MANAGE_FILES,
+  Permission.READ_HISTORY,
+  Permission.MANAGE_THREADS,
+].reduce((a, b) => a | b, 0n);
+
+/** Is this permission (a bit or its name) one that overrides may carry? */
+export function isChannelScoped(permission: bigint | PermissionName): boolean {
+  const bit = typeof permission === "bigint" ? permission : Permission[permission];
+  return (CHANNEL_SCOPED & bit) === bit;
+}
+
+/** The channel-scoped bits in the groups and order of the override editors (clients localize `group`). */
+export const CHANNEL_SCOPED_GROUPS: readonly { group: "general" | "text" | "voice" | "files" | "management"; permissions: readonly PermissionName[] }[] = [
+  { group: "general", permissions: ["VIEW_CHANNEL", "READ_HISTORY", "ADD_REACTIONS", "USE_EXTERNAL_EMOJIS", "MENTION_EVERYONE"] },
+  { group: "text", permissions: ["SEND_MESSAGES", "CREATE_THREADS", "PIN_MESSAGES", "MANAGE_MESSAGES", "MANAGE_THREADS"] },
+  { group: "voice", permissions: ["CONNECT", "SPEAK", "STREAM", "USE_CAMERA", "USE_SOUNDBOARD", "USE_EXTERNAL_SOUNDS", "PRIORITY_SPEAKER", "MUTE_MEMBERS", "MOVE_MEMBERS", "USE_WHITEBOARD", "MANAGE_WHITEBOARD"] },
+  { group: "files", permissions: ["ATTACH_FILES", "MANAGE_FILES"] },
+  { group: "management", permissions: ["MANAGE_CHANNELS", "MANAGE_ROLES", "MANAGE_WEBHOOKS"] },
+];
+
+/**
  * Removed from the effective permissions in system channels (the welcome channel is read-only for everyone,
  * protocol/permissions.md "System channels").
  */
@@ -171,9 +220,10 @@ export interface PermissionInput {
   everyone_role_id: string;
   everyone_permissions: bigint | string | number;
   member_roles: [string, bigint | string | number][];
+  /** Overrides of the channel's category (empty without a category): the first layer on top of the roles. */
   category_overrides: OverrideInput[];
+  /** The channel's own overrides: the second layer, on top of the category's. */
   channel_overrides: OverrideInput[];
-  sync_with_category: boolean;
   timed_out: boolean;
   /** Account kind; every kind except `user` gets the bot branch (APPLICATIONS.md §2.4). Default `user`. */
   kind?: string;
@@ -287,8 +337,9 @@ function computeMemberPermissions(input: PermissionInput): bigint {
   const memberRoles: [string, bigint][] = input.member_roles.map(([id, p]) => [id, big(p)]);
   const base = roomLevelPermissions(false, big(input.everyone_permissions), memberRoles);
   if (hasPermission(base, Permission.ADMINISTRATOR)) return ALL_PERMISSIONS;
-  const overrides = input.sync_with_category ? input.category_overrides : input.channel_overrides;
-  let perms = applyOverrides(base, overrides, input, memberRoles);
+  // Layered (protocol/permissions.md "Evaluation"): the category's overrides, then the channel's own on top.
+  const category = applyOverrides(base, input.category_overrides, input.everyone_role_id, input.user_id, memberRoles);
+  let perms = applyOverrides(category, input.channel_overrides, input.everyone_role_id, input.user_id, memberRoles);
   // No override can hide a system channel: as if view_channel and read_history were never denied.
   if (input.system_channel) perms |= SYSTEM_CHANNEL_FORCED;
   if (!hasPermission(perms, Permission.VIEW_CHANNEL)) return 0n;
@@ -296,9 +347,11 @@ function computeMemberPermissions(input: PermissionInput): bigint {
   return perms;
 }
 
-function applyOverrides(perms: bigint, overrides: OverrideInput[], input: PermissionInput, memberRoles: [string, bigint][]): bigint {
-  const everyone = overrides.find((o) => o.subject_type === "role" && o.subject_id === input.everyone_role_id);
-  if (everyone) perms = (perms & ~big(everyone.deny)) | big(everyone.allow);
+/** One layer of overrides: `@everyone`, then all role overrides (denies, then allows), then the member's own. */
+function applyOverrides(perms: bigint, overrides: OverrideInput[], everyoneRoleId: string, userId: string, memberRoles: [string, bigint][]): bigint {
+  const apply = (p: bigint, allow: bigint, deny: bigint) => (p & ~(deny & CHANNEL_SCOPED)) | (allow & CHANNEL_SCOPED);
+  const everyone = overrides.find((o) => o.subject_type === "role" && o.subject_id === everyoneRoleId);
+  if (everyone) perms = apply(perms, big(everyone.allow), big(everyone.deny));
   let allow = 0n;
   let deny = 0n;
   for (const o of overrides) {
@@ -307,8 +360,40 @@ function applyOverrides(perms: bigint, overrides: OverrideInput[], input: Permis
       deny |= big(o.deny);
     }
   }
-  perms = (perms & ~deny) | allow;
-  const member = overrides.find((o) => o.subject_type === "member" && o.subject_id === input.user_id);
-  if (member) perms = (perms & ~big(member.deny)) | big(member.allow);
+  perms = apply(perms, allow, deny);
+  const member = overrides.find((o) => o.subject_type === "member" && o.subject_id === userId);
+  if (member) perms = apply(perms, big(member.allow), big(member.deny));
   return perms;
+}
+
+/** Whose value an override editor shows behind a neutral bit. */
+export interface InheritedInput {
+  everyone_role_id: string;
+  everyone_permissions: bigint | string | number;
+  /** The room's roles without `@everyone`: (role id, permissions). */
+  roles: [string, bigint | string | number][];
+  /** The override's subject: a role, or a member with the ids of their roles. */
+  subject: { type: "role"; id: string } | { type: "member"; id: string; roles: string[] };
+  /** `null` in the category editor (only the roles are below); in the channel editor the category's overrides. */
+  category_overrides: OverrideInput[] | null;
+}
+
+/**
+ * The value a bit has for an override's subject when the override leaves it neutral ("–"), and which layer decides
+ * it: the role base (`@everyone` plus the subject's role, or the member's roles) and, in the channel editor, the
+ * category's overrides on top (protocol/permissions.md "Evaluation"). `source` is `category` when one of the
+ * category's overrides that apply to the subject allows or denies the bit.
+ */
+export function inheritedOverrideValue(input: InheritedInput, bit: bigint): { allowed: boolean; source: "role" | "category" } {
+  const roleIds = input.subject.type === "member" ? input.subject.roles : input.subject.id === input.everyone_role_id ? [] : [input.subject.id];
+  const memberRoles: [string, bigint][] = input.roles.filter(([id]) => roleIds.includes(id)).map(([id, p]) => [id, big(p)]);
+  const base = roomLevelPermissions(false, big(input.everyone_permissions), memberRoles);
+  if (hasPermission(base, Permission.ADMINISTRATOR)) return { allowed: true, source: "role" };
+  const userId = input.subject.type === "member" ? input.subject.id : "";
+  const overrides = input.category_overrides ?? [];
+  const applies = (o: OverrideInput) =>
+    o.subject_type === "role" ? o.subject_id === input.everyone_role_id || roleIds.includes(o.subject_id) : o.subject_id === userId;
+  const touched = overrides.some((o) => applies(o) && ((big(o.allow) | big(o.deny)) & bit & CHANNEL_SCOPED) !== 0n);
+  const perms = applyOverrides(base, overrides, input.everyone_role_id, userId, memberRoles);
+  return { allowed: hasPermission(perms, bit), source: touched ? "category" : "role" };
 }

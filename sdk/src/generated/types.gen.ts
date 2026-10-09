@@ -802,7 +802,6 @@ export type Channel = {
     position: number;
     room_id: string;
     slowmode_secs: number;
-    sync_with_category: boolean;
     /**
      * Set on default channels (`general`, `voice`) so that clients localize the name; NULL after a rename.
      */
@@ -5662,6 +5661,12 @@ export type UpdateChannelRequest = {
     no_bots?: boolean | null;
     position?: number | null;
     slowmode_secs?: number | null;
+    /**
+     * Deprecated and ignored (protocol permissions.md "Changes", 2026-10-09): overrides are layered, a channel
+     * always inherits its category's overrides underneath its own. Accepted for one release, then unknown.
+     *
+     * @deprecated
+     */
     sync_with_category?: boolean | null;
     /**
      * Forum channels: the complete new tag list (at most 20; entries without `id` are new tags). Audit-logged.
@@ -13099,6 +13104,14 @@ export type SetOverrideData = {
     query?: never;
     url: '/api/v1/rooms/{room_id}/overrides';
 };
+
+export type SetOverrideErrors = {
+    400: ProblemDetails;
+    403: ProblemDetails;
+    404: ProblemDetails;
+};
+
+export type SetOverrideError = SetOverrideErrors[keyof SetOverrideErrors];
 
 export type SetOverrideResponses = {
     200: Array<PermissionOverride>;

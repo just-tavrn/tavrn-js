@@ -4,13 +4,17 @@ import { describe, expect, it } from "vitest";
 import {
   ALL_PERMISSIONS,
   BOT_ALWAYS,
+  CHANNEL_SCOPED,
+  CHANNEL_SCOPED_GROUPS,
   EVERYONE_RESTRICTED,
   Permission,
   SCOPE_NAMES,
   capBot,
   computePermissions,
   hasPermission,
+  inheritedOverrideValue,
   isBotKind,
+  isChannelScoped,
   isEveryoneRestricted,
   noBotsEffective,
   parsePermissions,
@@ -100,5 +104,67 @@ describe("EVERYONE_RESTRICTED", () => {
   it("keeps the everyday bits grantable", () => {
     for (const bit of [Permission.VIEW_CHANNEL, Permission.SEND_MESSAGES, Permission.CONNECT, Permission.SPEAK, Permission.CREATE_INVITES, Permission.ADD_REACTIONS]) expect(isEveryoneRestricted(bit)).toBe(false);
     for (const bit of [Permission.ADMINISTRATOR, Permission.MANAGE_ROLES, Permission.BAN_MEMBERS, Permission.MOVE_MEMBERS]) expect(isEveryoneRestricted(bit)).toBe(true);
+  });
+});
+
+describe("CHANNEL_SCOPED (layered overrides)", () => {
+  it("lists exactly the channel-scoped bits of protocol/permissions.md and matches the node", () => {
+    const doc = readFileSync(new URL("../../protocol/permissions.md", import.meta.url), "utf8");
+    const section = doc.split("## Channel-scoped bits")[1]!.split("\n## ")[0]!;
+    const bits = [...section.matchAll(/^\| (\d+) \| `/gm)].map((m) => BigInt(m[1]!));
+    expect(bits.reduce((acc, b) => acc | (1n << b), 0n)).toBe(CHANNEL_SCOPED);
+    // Same value as permissions::CHANNEL_SCOPED of the node.
+    expect(CHANNEL_SCOPED.toString()).toBe("103049789951");
+    expect(isChannelScoped("VIEW_CHANNEL")).toBe(true);
+    expect(isChannelScoped("MANAGE_ROLES")).toBe(true);
+    for (const room of ["ADMINISTRATOR", "MANAGE_ROOM", "KICK_MEMBERS", "PURGE", "CHANGE_NICKNAME", "MANAGE_APPLICATIONS"] as const) expect(isChannelScoped(room)).toBe(false);
+  });
+
+  it("the editor groups cover every scoped bit exactly once", () => {
+    const names = CHANNEL_SCOPED_GROUPS.flatMap((g) => g.permissions);
+    expect(new Set(names).size).toBe(names.length);
+    expect(names.reduce((acc, n) => acc | Permission[n], 0n)).toBe(CHANNEL_SCOPED);
+    expect(CHANNEL_SCOPED_GROUPS.map((g) => g.group)).toEqual(["general", "text", "voice", "files", "management"]);
+  });
+
+  it("ignores room-level bits inside overrides", () => {
+    const input: PermissionInput = {
+      user_id: "u1", is_owner: false, everyone_role_id: "r0", everyone_permissions: Permission.VIEW_CHANNEL,
+      member_roles: [], timed_out: false, category_overrides: [],
+      channel_overrides: [{ subject_type: "role", subject_id: "r0", allow: Permission.KICK_MEMBERS | Permission.SEND_MESSAGES, deny: 0n }],
+    };
+    expect(computePermissions(input)).toBe(Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES);
+  });
+});
+
+describe("inheritedOverrideValue (what a neutral override shows in the editors)", () => {
+  const base = { everyone_role_id: "r0", everyone_permissions: Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES, roles: [["r1", Permission.ATTACH_FILES]] as [string, bigint][] };
+
+  it("in the category editor the role base decides", () => {
+    expect(inheritedOverrideValue({ ...base, subject: { type: "role", id: "r0" }, category_overrides: null }, Permission.SEND_MESSAGES)).toEqual({ allowed: true, source: "role" });
+    expect(inheritedOverrideValue({ ...base, subject: { type: "role", id: "r1" }, category_overrides: null }, Permission.ATTACH_FILES)).toEqual({ allowed: true, source: "role" });
+    expect(inheritedOverrideValue({ ...base, subject: { type: "role", id: "r0" }, category_overrides: null }, Permission.ATTACH_FILES)).toEqual({ allowed: false, source: "role" });
+  });
+
+  it("in the channel editor a category override that touches the bit decides", () => {
+    const category_overrides = [
+      { subject_type: "role" as const, subject_id: "r0", allow: 0n, deny: Permission.SEND_MESSAGES },
+      { subject_type: "role" as const, subject_id: "r1", allow: Permission.SEND_MESSAGES, deny: 0n },
+    ];
+    expect(inheritedOverrideValue({ ...base, subject: { type: "role", id: "r0" }, category_overrides }, Permission.SEND_MESSAGES)).toEqual({ allowed: false, source: "category" });
+    // A role sees @everyone's category override underneath its own.
+    expect(inheritedOverrideValue({ ...base, subject: { type: "role", id: "r1" }, category_overrides }, Permission.SEND_MESSAGES)).toEqual({ allowed: true, source: "category" });
+    expect(inheritedOverrideValue({ ...base, subject: { type: "role", id: "r0" }, category_overrides }, Permission.VIEW_CHANNEL)).toEqual({ allowed: true, source: "role" });
+  });
+
+  it("a member subject inherits from @everyone and the member's roles", () => {
+    const category_overrides = [{ subject_type: "member" as const, subject_id: "u1", allow: 0n, deny: Permission.VIEW_CHANNEL }];
+    expect(inheritedOverrideValue({ ...base, subject: { type: "member", id: "u1", roles: ["r1"] }, category_overrides }, Permission.VIEW_CHANNEL)).toEqual({ allowed: false, source: "category" });
+    expect(inheritedOverrideValue({ ...base, subject: { type: "member", id: "u1", roles: ["r1"] }, category_overrides: [] }, Permission.ATTACH_FILES)).toEqual({ allowed: true, source: "role" });
+  });
+
+  it("administrator on the role base means allowed", () => {
+    const admin = { ...base, roles: [["r1", Permission.ADMINISTRATOR]] as [string, bigint][] };
+    expect(inheritedOverrideValue({ ...admin, subject: { type: "role", id: "r1" }, category_overrides: [{ subject_type: "role", subject_id: "r1", allow: 0n, deny: Permission.SEND_MESSAGES }] }, Permission.SEND_MESSAGES)).toEqual({ allowed: true, source: "role" });
   });
 });
