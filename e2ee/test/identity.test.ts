@@ -152,6 +152,61 @@ describe("rotation (account flows)", () => {
     [k0, k1, mallory, foreign, master].forEach((x) => x.free());
   });
 
+  it("never follows the published key back to an older generation (rollback by the node)", async () => {
+    const { ctx, user } = account();
+    const a = ctx(new MemoryKeyStore(), DEV_A);
+    await setupAccount(a, RecoveryKey.generate());
+    const k0 = user().identity;
+    await rotateIdentity({ api: a.api, username: a.username, address: a.address, store: a.store, now: () => Date.parse(AT) });
+    const firstChain = [...user().continuity!];
+    const firstBlob = user().blob;
+    const k1 = user().identity;
+    await rotateIdentity({ api: a.api, username: a.username, address: a.address, store: a.store, now: () => Date.parse(AT) + 1000 });
+    const k2 = user().identity;
+    expect(await ownIdentityPublicKey(a.store)).toBe(k2);
+    // The node (or whoever stole generation 1, the reason for the second rotation) serves the state of generation 1
+    // again: a valid chain from the derived key and the old blob. The device must not go back to k1.
+    user().identity = k1;
+    user().continuity = firstChain;
+    user().blob = firstBlob;
+    await expect(syncIdentity(a.api, a.store, a.username, a.address)).rejects.toEqual(new E2eeError("identity_mismatch"));
+    expect(await ownIdentityPublicKey(a.store)).toBe(k2);
+    // ... nor back to the derived generation 0 with an empty chain.
+    user().identity = k0;
+    user().continuity = [];
+    user().blob = undefined;
+    await expect(syncIdentity(a.api, a.store, a.username, a.address)).rejects.toEqual(new E2eeError("identity_mismatch"));
+    expect(await ownIdentityPublicKey(a.store)).toBe(k2);
+  });
+
+  it("does not roll a locked device back to an older generation when it unlocks", async () => {
+    const { ctx, user } = account();
+    const recovery = RecoveryKey.generate();
+    const words = recovery.toWords();
+    const a = ctx(new MemoryKeyStore(), DEV_A);
+    await setupAccount(a, recovery);
+    await rotateIdentity({ api: a.api, username: a.username, address: a.address, store: a.store, now: () => Date.parse(AT) });
+    const firstChain = [...user().continuity!];
+    const firstBlob = user().blob;
+    const k1 = user().identity;
+    await rotateIdentity({ api: a.api, username: a.username, address: a.address, store: a.store, now: () => Date.parse(AT) + 1000 });
+    const k2 = user().identity;
+    const [fullChain, fullBlob] = [[...user().continuity!], user().blob];
+    // Lock on close: the next start unlocks with the recovery key while the node serves generation 1 again.
+    a.store.lock();
+    user().identity = k1;
+    user().continuity = firstChain;
+    user().blob = firstBlob;
+    await expect(unlockWithRecoveryKey(a, words)).rejects.toEqual(new E2eeError("identity_mismatch"));
+    // The node serves the current state again: the device unlocks and is still on k2.
+    user().identity = k2;
+    user().continuity = fullChain;
+    user().blob = fullBlob;
+    a.store.lock();
+    await unlockWithRecoveryKey(a, words);
+    expect(await ownIdentityPublicKey(a.store)).toBe(k2);
+  });
+
   it("stops when a listed device does not verify under the current key", async () => {
     const { ctx, user } = account();
     const a = ctx(new MemoryKeyStore(), DEV_A);
