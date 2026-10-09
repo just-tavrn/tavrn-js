@@ -43,7 +43,7 @@ describe("computePermissions", () => {
     // Same bits as the Rust constant: administrator, room/role/channel management, audit log, kick, ban,
     // timeout, emojis, whiteboard management, webhooks, files, move, mute, manage messages, manage nicknames,
     // applications, purge.
-    expect(EVERYONE_RESTRICTED.toString()).toBe("4611686130924452740");
+    expect(EVERYONE_RESTRICTED.toString()).toBe("4611686268363406212");
     expect(isEveryoneRestricted("MANAGE_APPLICATIONS")).toBe(true);
     expect(isEveryoneRestricted("ADMINISTRATOR")).toBe(true);
     expect(isEveryoneRestricted("MANAGE_WHITEBOARD")).toBe(true);
@@ -70,12 +70,13 @@ describe("manage_applications (bit 35)", () => {
 });
 
 describe("bot inputs (APPLICATIONS.md §2.4)", () => {
-  it("scope masks never contain administrator and cover every other bit", () => {
+  it("scope masks never contain administrator or restore_history and cover every other bit", () => {
     expect(scopeMask([])).toBe(BOT_ALWAYS);
     expect(scopeMask(["nonsense"])).toBe(BOT_ALWAYS);
     const all = scopeMask(SCOPE_NAMES);
     expect(hasPermission(all, Permission.ADMINISTRATOR)).toBe(false);
-    expect(all | Permission.ADMINISTRATOR).toBe(ALL_PERMISSIONS);
+    expect(hasPermission(all, Permission.RESTORE_HISTORY)).toBe(false);
+    expect(all | Permission.ADMINISTRATOR | Permission.RESTORE_HISTORY).toBe(ALL_PERMISSIONS);
   });
 
   it("caps bots only and fails closed for unknown kinds", () => {
