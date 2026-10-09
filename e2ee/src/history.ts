@@ -7,7 +7,7 @@
  * `{type: "history_keys", v: 1, conversation, to, epochs: [[epoch, key], …]}` encrypted and signed like
  * message content (§5.2) under the conversation's **current** epoch, posted to `…/history-keys` of the node
  * hosting the conversation. The recipient verifies the signature against an attested device in the group,
- * checks every key against a stored message of its epoch (no poisoned keys) and keeps accepted keys only
+ * checks every key against a stored message of its epoch, signed by its author's attested device (no poisoned keys) and keeps accepted keys only
  * in the key store (the MLS client state, which is also what the history backup carries).
  *
  * The pure parts (policy, windows, chunking, sharer election, payload codec, key check) are exported for
@@ -394,7 +394,7 @@ export class HistorySync {
         for (const [epoch, key] of keys) {
           if (known.has(epoch)) continue;
           const sample = pickSample(await api.messages(id, { epoch, limit: 10 }).catch(() => []), epoch, share.from_user);
-          if (sample && (await epochKeyOpens(key, q, sample))) accepted.push([epoch, key]);
+          if (sample && (await epochKeyOpens(key, q, sample)) && (await mls.sampleProvesKey(q, epoch, key, sample))) accepted.push([epoch, key]);
           else dropped++;
         }
         total += await mls.importHistoryKeys(q, accepted);

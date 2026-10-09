@@ -1676,6 +1676,35 @@ export class MlsManager {
   }
 
   /**
+   * Whether a candidate content key of `epoch` opens `sample` (a stored message of that epoch) **and** the plaintext
+   * carries a valid signature of the sample author's attested device (§7b step 4, §5.2). The AES-GCM tag alone can be
+   * produced by anyone who knows the key, so a sharer colluding with the node could otherwise "prove" a key of its
+   * choice with a message the node made up. Uses a throwaway client; nothing is stored or cached.
+   */
+  async sampleProvesKey(q: string, epoch: number, key: Uint8Array, sample: { author: string; device_id: string; content: string }): Promise<boolean> {
+    let deviceKey: Uint8Array | undefined;
+    try {
+      deviceKey = (await this.verifiedDevices(sample.author))?.get(sample.device_id) ?? (await this.verifiedDevices(sample.author, true))?.get(sample.device_id) ?? this.retiredDevice(sample.author, sample.device_id)?.key;
+    } catch {
+      deviceKey = undefined;
+    }
+    if (!deviceKey) return false;
+    let probe: Client | null = null;
+    try {
+      probe = Client.create(sample.author, sample.device_id);
+      probe.importEpochKey(q, epoch, key);
+      const header = contentHeader(sample.content);
+      if (!header || header.epoch !== epoch) return false;
+      probe.decryptContent(q, sample.author, sample.device_id, sample.content, deviceKey);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      probe?.free();
+    }
+  }
+
+  /**
    * Stores accepted history keys (validated by the caller) in the client state, exactly like own epoch keys:
    * persisted in the encrypted key store and included in the history backup. Keys never overwrite known
    * ones. Returns the number of new keys.
