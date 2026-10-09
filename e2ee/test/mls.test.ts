@@ -805,6 +805,74 @@ describe("threads (PROTOCOL.md §7e)", () => {
   });
 });
 
+describe("content of one purpose is never accepted for another (ENCRYPTION.md §5.2, §7b)", () => {
+  it("a thread title or a history share served as a message or an ephemeral event is invalid", async () => {
+    const { device } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    await bob.mls.ensureJoined(CONV, { canCreate: true });
+    await alice.mls.catchUp(CONV);
+    // A thread title has the same format and AAD as a message of its author: a node could post it as a message.
+    const t = await alice.mls.encryptThreadTitle(CONV, "Plans");
+    expect(await bob.mls.decrypt(CONV, { id: "m-title", author: alice.address, device_id: DEV.a, epoch: t.title_epoch, content: t.title })).toEqual({ ok: false, reason: "invalid" });
+    // A history share (keys of past epochs for another member) must never become message content either.
+    const share = await alice.mls.encryptHistory(CONV, JSON.stringify({ type: "history_keys", v: 1, conversation: CONV, to: "carol@t.local", epochs: [[0, b64urlEncode(new Uint8Array(32))]] }));
+    expect(await bob.mls.decrypt(CONV, { id: "m-share", author: alice.address, device_id: DEV.a, epoch: share.epoch, content: share.content })).toEqual({ ok: false, reason: "invalid" });
+    expect(await bob.mls.decryptEphemeral(CONV, alice.address, DEV.a, share.content)).toEqual({ ok: false, reason: "invalid" });
+    // The genuine paths still work.
+    expect((await bob.mls.decryptThreadTitle(CONV, { id: "T9", title: t.title, title_epoch: t.title_epoch, title_author: alice.address, title_device_id: DEV.a })).ok).toBe(true);
+    expect((await bob.mls.decryptHistory(CONV, "S1", alice.address, DEV.a, share.content)).ok).toBe(true);
+    const m = await send(alice, CONV, "hello", "m-ok");
+    expect((await bob.mls.decrypt(CONV, m)).ok).toBe(true);
+  });
+});
+
+describe("proposed protocol changes (security review 2026-10-09, kept skipped until the protocol decides)", () => {
+  // PROPOSAL (format extension, needs ENCRYPTION.md §5.2): the content signature covers conversation, epoch, author
+  // and device, but not the envelope's thread_id, reply_to or the message id, so a node can move an encrypted reply
+  // into another thread or point it at another message (plaintext signatures, FEDERATION.md §10.3, cover both).
+  // Fix: senders put `ctx: { thread_id, reply_to }` into the signed JSON; receivers compare it with the envelope
+  // when present and show a mismatch as invalid. Skipped: changes what senders write.
+  it.skip("a reply moved into another thread by the node is not shown as part of it", async () => {
+    const { device } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    await bob.mls.ensureJoined(CONV, { canCreate: true });
+    await alice.mls.catchUp(CONV);
+    const reply = { ...(await send(bob, CONV, "only for thread 1", "t1")), thread_id: "01J9ZK3G5M8Q2W4E6R8T0Y2VT1" };
+    // The node serves the same message (same id) under another thread to a member who never saw the original.
+    const moved = { ...reply, thread_id: "01J9ZK3G5M8Q2W4E6R8T0Y2VT2" };
+    expect(await alice.mls.decrypt(CONV, moved)).toEqual({ ok: false, reason: "invalid" });
+  });
+
+  // PROPOSAL (client policy, ENCRYPTION.md §3.3 "re-pinned only after the notice was shown"): a changed identity key
+  // of a contact is re-pinned at once with `changed`, and devices attested under the new key count immediately: the
+  // ghost check passes them and DMs add them by Welcome before the user saw or acknowledged the warning. A home node
+  // that swaps a user's key can thus place its own device in that user's DMs. Fix: while `changed` is unacknowledged,
+  // addMissingDevices skips that user's new devices and ghostCheck reports their leaves (reason `key_changed`).
+  // Skipped: owner decision (DMs with a contact who reset wait for the acknowledgement).
+  it.skip("devices under an unacknowledged changed key are not added to a DM", async () => {
+    const { node, device, masters } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    expect(await alice.mls.addMissingDevices(CONV, [alice.address, bob.address])).toEqual([]);
+    // Bob's node swaps his identity key and publishes a device of its own.
+    const fake = MasterSecret.generate();
+    masters.set(bob.address, fake);
+    const ghost = Client.create(bob.address, DEV.d);
+    const rec = node.users.get("bob")!;
+    rec.identity = b64urlEncode(fake.identityPublicKey());
+    rec.devices.set(DEV.d, { pk: b64urlEncode(ghost.devicePublicKey), sig: b64urlEncode(fake.attestDevice(bob.address, DEV.d, ghost.devicePublicKey)) });
+    rec.kps.set(DEV.d, [b64urlEncode(ghost.createKeyPackage())]);
+    alice.mls.identityChanged(bob.address);
+    await alice.mls.addMissingDevices(CONV, [alice.address, bob.address]);
+    expect(alice.mls.roster(CONV)).not.toContain(`${bob.address}/${DEV.d}`);
+  });
+});
+
 describe("qualified ids and stored meta data", () => {
   it("checks embeds: the sender refuses invalid ones, receivers drop invalid ones (APPLICATIONS.md §6.4)", async () => {
     const { device } = setup();
