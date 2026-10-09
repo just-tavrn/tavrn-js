@@ -7,7 +7,7 @@
 const ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 /** A ULID of `now` (milliseconds since the epoch) with random bits from `crypto.getRandomValues`. */
-export function newUlid(now: number = Date.now(), random: (bytes: Uint8Array) => void = (b) => crypto.getRandomValues(b)): string {
+export function newUlid(now: number = Date.now(), random: (bytes: Uint8Array<ArrayBuffer>) => void = (b) => crypto.getRandomValues(b)): string {
   if (!Number.isSafeInteger(now) || now < 0 || now > 2 ** 48 - 1) throw new RangeError("ULID time: 0 to 2^48 - 1 milliseconds");
   let time = "";
   let t = now;
