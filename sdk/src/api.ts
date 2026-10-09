@@ -73,6 +73,7 @@ import type {
   KeyPackageCount,
   KeyPackagesRequest,
   DeviceKeyRequest,
+  ShareKeyRequest,
   PreAuthResponse,
   PutSecretStorage,
   ReadState,
@@ -737,6 +738,8 @@ export class TavrnApi {
     /** The wrapped current identity key of the own account (404 at generation 0). */
     identityBlob: () => this.get<IdentityBlob>("/users/me/identity/blob"),
     putDeviceKey: (deviceId: string, req: DeviceKeyRequest) => this.put<void>(`/users/me/devices/${encodeURIComponent(deviceId)}/key`, req),
+    /** The share key of a device attested before share keys existed, once (ENCRYPTION.md §3.1, `history.shares2`). */
+    putShareKey: (deviceId: string, req: ShareKeyRequest) => this.put<void>(`/users/me/devices/${encodeURIComponent(deviceId)}/share-key`, req),
     uploadKeyPackages: (deviceId: string, req: KeyPackagesRequest) => this.post<KeyPackageCount>(`/users/me/devices/${encodeURIComponent(deviceId)}/key-packages`, req),
     countKeyPackages: (deviceId: string) => this.get<KeyPackageCount>(`/users/me/devices/${encodeURIComponent(deviceId)}/key-packages`),
     /** One KeyPackage per attested device of `username` (single use, ENCRYPTION.md §3.2). */

@@ -830,7 +830,7 @@ export class Bot {
       ? {
           hasGroup: (q) => mls.hasGroup(q),
           decrypt: (q, envelope) => mls.decrypt(q, envelope),
-          encrypt: (q, content) => mls.encrypt(q, content),
+          encrypt: (q, content, opts) => mls.encrypt(q, content, opts),
           join: (q) => void this.track(this.join(q, false)),
         }
       : null;
