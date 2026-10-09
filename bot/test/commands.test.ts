@@ -251,7 +251,7 @@ describe("commands of the bot runtime (APPLICATIONS.md §5)", () => {
       return { type: "command.args", command: `${APP_REF}/${CMD}`, nonce: "AAAAAAAAAAAAAAAAAAAAAA", issued_at: new Date(Date.now() - 1000).toISOString(), args: { city: "Köln" }, ...over };
     }
     function fakeCrypto(content: unknown, opts: { member?: boolean; fail?: Decrypted } = {}) {
-      const log: { decrypted: EncryptedEnvelope[]; encrypted: unknown[]; joined: string[] } = { decrypted: [], encrypted: [], joined: [] };
+      const log: { decrypted: EncryptedEnvelope[]; encrypted: unknown[]; opts: unknown[]; joined: string[] } = { decrypted: [], encrypted: [], opts: [], joined: [] };
       const crypto: CommandCrypto = {
         hasGroup: () => opts.member ?? true,
         decrypt: async (q, env) => {
@@ -259,8 +259,9 @@ describe("commands of the bot runtime (APPLICATIONS.md §5)", () => {
           log.decrypted.push(env);
           return opts.fail ?? { ok: true, content: content as Record<string, unknown> };
         },
-        encrypt: async (_q, c) => {
+        encrypt: async (_q, c, o) => {
           log.encrypted.push(c);
+          log.opts.push(o);
           return { content: "CIPHERTEXT", epoch: 43 };
         },
         join: (q) => log.joined.push(q),
@@ -287,6 +288,9 @@ describe("commands of the bot runtime (APPLICATIONS.md §5)", () => {
         { type: "text", body: "Köln: 9 °C" },
         { type: "text", body: "more" },
       ]);
+      // Every answer signs the interaction and the thread it goes to (APPLICATIONS.md §5.7, ENCRYPTION.md §5.2).
+      const signed = { thread_id: null, reply_to: null, interaction: "01J9ZK3G5M8Q2W4E6R8T0Y2IN1" };
+      expect(log.opts).toEqual([{ ctx: signed }, { ctx: signed }]);
       expect(calls.map((c) => c.body)).toEqual([
         { type: "reply", content: "CIPHERTEXT", epoch: 43, device_id: "01J9ZK3G5M8Q2W4E6R8T0Y2BD1", ephemeral: false, mentions: [] },
         { content: "CIPHERTEXT", epoch: 43, device_id: "01J9ZK3G5M8Q2W4E6R8T0Y2BD1", ephemeral: true, mentions: [] },
@@ -302,6 +306,8 @@ describe("commands of the bot runtime (APPLICATIONS.md §5)", () => {
       expect(log.encrypted).toEqual([{ type: "thread.title", body: "Wetter" }, { type: "text", body: "Köln: 9 °C" }]);
       expect(calls[0]!.body).toEqual({ title: "CIPHERTEXT", title_epoch: 43 });
       expect(calls[1]!.body.thread_id).toBe("01J9ZK3G5M8Q2W4E6R8T0Y2NEW");
+      // The answer is bound to the new thread and the interaction.
+      expect(log.opts[1]).toEqual({ ctx: { thread_id: "01J9ZK3G5M8Q2W4E6R8T0Y2NEW", reply_to: null, interaction: "01J9ZK3G5M8Q2W4E6R8T0Y2IN1" } });
     });
 
     it("refuses arguments of another command, stale or replayed arguments and bad signatures; joins when not a member", async () => {

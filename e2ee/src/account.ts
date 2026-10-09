@@ -131,6 +131,9 @@ function withMaster<T>(store: KeyStore, fn: (m: MasterSecret) => T): T {
   return withMasterSecret(store, fn);
 }
 
+/** Devices (`address/device id`) whose share key this session published or asked the node for: asked once. */
+const sharePublished = new Set<string>();
+
 /**
  * Makes this device usable for encryption: follows a rotation of the identity key done on another device (§9a),
  * creates its MLS client (device key) if needed, attests it with the current identity key (§3.1) and keeps at least
@@ -149,10 +152,20 @@ export async function ensureDevice(ctx: E2eeContext): Promise<void> {
     const devicePublicKey = client.devicePublicKey;
     if (!store.isUnlocked()) throw new E2eeError("locked");
     const signature = await withIdentityKey(store, (k) => k.attestDevice(ctx.address, ctx.deviceId, devicePublicKey));
+    // The device's share key goes with the device key (ENCRYPTION.md §3.1); a device attested without one publishes it
+    // once (best effort: nodes without `history.shares2` do not know the route, shares then stay format 1).
+    const shareKey = client.shareKey();
+    const share = { share_public_key: b64urlEncode(shareKey.publicKey), share_key_signature: b64urlEncode(shareKey.signature) };
+    shareKey.free();
     try {
-      await ctx.api.keys.putDeviceKey(ctx.deviceId, { device_public_key: b64urlEncode(devicePublicKey), identity_signature: b64urlEncode(signature) });
+      await ctx.api.keys.putDeviceKey(ctx.deviceId, { device_public_key: b64urlEncode(devicePublicKey), identity_signature: b64urlEncode(signature), ...share });
     } catch (e) {
       if (code(e) !== "e2ee.device_key_exists") throw e;
+      if (!sharePublished.has(`${ctx.address}/${ctx.deviceId}`)) {
+        // Asked once per session, also when it fails (a node without the route); the next start asks again.
+        sharePublished.add(`${ctx.address}/${ctx.deviceId}`);
+        await ctx.api.keys.putShareKey(ctx.deviceId, share).catch(() => undefined);
+      }
     }
     const { count } = await ctx.api.keys.countKeyPackages(ctx.deviceId);
     if (count < KEY_PACKAGE_MIN) {

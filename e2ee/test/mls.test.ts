@@ -805,6 +805,73 @@ describe("threads (PROTOCOL.md §7e)", () => {
   });
 });
 
+describe("signed context of thread titles (ENCRYPTION.md §5.2)", () => {
+  const T1 = "01J9ZK3G5M8Q2W4E6R8T0Y2VT1";
+  const T2 = "01J9ZK3G5M8Q2W4E6R8T0Y2VT2";
+
+  it("a title bound to its thread is not shown on another thread; titles without ctx stay readable", async () => {
+    const { device } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    await bob.mls.ensureJoined(CONV, { canCreate: true });
+    await alice.mls.catchUp(CONV);
+    const t = await alice.mls.encryptThreadTitle(CONV, "Release plan", T1);
+    const thread = { id: T1, title: t.title, title_epoch: t.title_epoch, title_author: alice.address, title_device_id: DEV.a };
+    // The node serves the title on another thread (before the genuine one was seen: otherwise it is a replay anyway).
+    expect(await bob.mls.decryptThreadTitle(CONV, { ...thread, id: T2 })).toEqual({ ok: false, reason: "envelope_mismatch" });
+    expect(await bob.mls.decryptThreadTitle(CONV, { ...thread, id: T2 })).toEqual({ ok: false, reason: "envelope_mismatch" });
+    // The genuine thread still shows it afterwards (no replay, no cached failure).
+    expect(await bob.mls.decryptThreadTitle(CONV, thread)).toEqual({ ok: true, title: "Release plan" });
+    // An older client's title (no ctx) is accepted.
+    const old = await alice.mls.encryptThreadTitle(CONV, "Old style");
+    expect(await bob.mls.decryptThreadTitle(CONV, { ...thread, id: T2, title: old.title, title_epoch: old.title_epoch })).toEqual({ ok: true, title: "Old style" });
+  });
+
+  it("a malformed title context is a mismatch", async () => {
+    const { device } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    await bob.mls.ensureJoined(CONV, { canCreate: true });
+    await alice.mls.catchUp(CONV);
+    for (const [i, ctx] of ([{ thread_id: 5 }, { thread_id: T1, reply_to: null }, {}, "T1", null] as unknown[]).entries()) {
+      const { content, epoch } = await alice.mls.encrypt(CONV, { type: "thread.title", body: "x", ctx } as Record<string, unknown>);
+      const thread = { id: T1, title: content, title_epoch: epoch, title_author: alice.address, title_device_id: DEV.a, created_at: `c${i}` };
+      expect(await bob.mls.decryptThreadTitle(CONV, thread), JSON.stringify(ctx)).toEqual({ ok: false, reason: "envelope_mismatch" });
+    }
+  });
+});
+
+describe("signed context of application answers (ENCRYPTION.md §5.2, APPLICATIONS.md §5.7)", () => {
+  const I1 = "01J9ZK3G5M8Q2W4E6R8T0Y2VI1";
+  const I2 = "01J9ZK3G5M8Q2W4E6R8T0Y2VI2";
+
+  it("an answer bound to its interaction is not shown as the answer to another one", async () => {
+    const { device } = setup();
+    const alice = device("alice", DEV.a);
+    const bot = device("bot", DEV.b);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    await bot.mls.ensureJoined(CONV, { canCreate: true });
+    await alice.mls.catchUp(CONV);
+    const sealed = await bot.mls.encrypt(CONV, { type: "text", body: "12 °C" }, { ctx: { thread_id: null, reply_to: null, interaction: I1 } });
+    const answer = { id: "a1", author: bot.address, device_id: DEV.b, ...sealed, thread_id: null, reply_to_id: null, interaction: { id: I1 } };
+    expect(await alice.mls.decrypt(CONV, answer)).toEqual({ ok: true, content: { type: "text", body: "12 °C" } });
+    expect(await alice.mls.decrypt(CONV, { ...answer, interaction: { id: I2 } })).toEqual({ ok: false, reason: "envelope_mismatch" });
+    // Presented as an ordinary message (the node dropped the interaction): a mismatch as well.
+    expect(await alice.mls.decrypt(CONV, { ...answer, interaction: null })).toEqual({ ok: false, reason: "envelope_mismatch" });
+    // A caller that does not know the envelope's interaction does not compare it.
+    const { interaction: _i, ...bare } = answer;
+    expect((await alice.mls.decrypt(CONV, bare)).ok).toBe(true);
+    // Answers of older bots: ctx without `interaction`, or no ctx at all, are accepted.
+    const older = await bot.mls.encrypt(CONV, { type: "text", body: "older" }, { ctx: { thread_id: null, reply_to: null } });
+    expect((await alice.mls.decrypt(CONV, { id: "a2", author: bot.address, device_id: DEV.b, ...older, thread_id: null, reply_to_id: null, interaction: { id: I2 } })).ok).toBe(true);
+    // A malformed interaction is a mismatch.
+    const bad = await bot.mls.encrypt(CONV, { type: "text", body: "x", ctx: { thread_id: null, reply_to: null, interaction: 7 } } as Record<string, unknown>);
+    expect(await alice.mls.decrypt(CONV, { id: "a3", author: bot.address, device_id: DEV.b, ...bad, thread_id: null, reply_to_id: null, interaction: { id: I1 } })).toEqual({ ok: false, reason: "envelope_mismatch" });
+  });
+});
+
 describe("content of one purpose is never accepted for another (ENCRYPTION.md §5.2, §7b)", () => {
   it("a thread title or a history share served as a message or an ephemeral event is invalid", async () => {
     const { device } = setup();

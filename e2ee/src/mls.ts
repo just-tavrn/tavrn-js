@@ -18,7 +18,18 @@
  * delivery services of several nodes; persistence is injected too ({@link MlsDeps}, or `openMlsManager`
  * for a `KeyStore`).
  */
-import { Client, contentEpoch, safetyNumber, verifyDeviceAttestation, verifyPayload, verifyPayloadMatches, verifyPlaintext, type CommitOutput } from "@tavrn/crypto";
+import {
+  Client,
+  contentEpoch,
+  decryptContentWithKey,
+  safetyNumber,
+  verifyDeviceAttestation,
+  verifyDeviceShareKey,
+  verifyPayload,
+  verifyPayloadMatches,
+  verifyPlaintext,
+  type CommitOutput,
+} from "@tavrn/crypto";
 import {
   TavrnApiError,
   b64urlDecode,
@@ -323,12 +334,19 @@ export interface EncryptedEnvelope {
    */
   thread_id?: string | null;
   reply_to_id?: string | null;
+  /**
+   * The interaction an application's answer belongs to (`interaction.id` of a stored message, the `interaction_id` of
+   * an ephemeral reply; null = none), compared with `ctx.interaction` (APPLICATIONS.md §5.7); `undefined`: unknown.
+   */
+  interaction?: { id: string } | null;
 }
 
 /** The envelope fields a message's content signs as `ctx` (ENCRYPTION.md §5.2, "Signed context"). */
 export interface MessageContext {
   thread_id: string | null;
   reply_to: string | null;
+  /** Answers of applications: the interaction they answer (APPLICATIONS.md §5.7). */
+  interaction?: string;
 }
 
 /** Options of {@link MlsManager.encrypt}. */
@@ -347,14 +365,28 @@ export interface EncryptOptions {
 
 const ENVELOPE_MISMATCH: Decrypted = Object.freeze({ ok: false, reason: "envelope_mismatch" }) as Decrypted;
 
-/** The `ctx` of a content object: null when it is not exactly `{ thread_id, reply_to }` of strings or nulls. */
+/**
+ * The `ctx` of a content object: null when it is not exactly `{ thread_id, reply_to }` of strings or nulls, plus the
+ * string `interaction` on answers of applications.
+ */
 function parseContext(v: unknown): MessageContext | null {
   if (!v || typeof v !== "object" || Array.isArray(v)) return null;
   const o = v as Record<string, unknown>;
   const keys = Object.keys(o);
   const ok = (x: unknown) => x === null || typeof x === "string";
-  if (keys.length !== 2 || !("thread_id" in o) || !("reply_to" in o) || !ok(o.thread_id) || !ok(o.reply_to)) return null;
-  return { thread_id: o.thread_id as string | null, reply_to: o.reply_to as string | null };
+  const withInteraction = "interaction" in o;
+  if (withInteraction && typeof o.interaction !== "string") return null;
+  if (keys.length !== (withInteraction ? 3 : 2) || !("thread_id" in o) || !("reply_to" in o) || !ok(o.thread_id) || !ok(o.reply_to)) return null;
+  const ctx: MessageContext = { thread_id: o.thread_id as string | null, reply_to: o.reply_to as string | null };
+  if (withInteraction) ctx.interaction = o.interaction as string;
+  return ctx;
+}
+
+/** The `ctx` of a thread title: `thread_id` when it is exactly `{ thread_id: string }`, null otherwise (§5.2). */
+function parseTitleContext(v: unknown): string | null {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const o = v as Record<string, unknown>;
+  return Object.keys(o).length === 1 && typeof o.thread_id === "string" ? o.thread_id : null;
 }
 
 export class MlsError extends Error {
@@ -443,6 +475,8 @@ export class MlsManager {
   private readonly keyCache = new Map<string, { at: number; pending: boolean; devices: Promise<Map<string, Uint8Array> | null> }>();
   /** Retired devices per address (verified like active ones, filled by the same lookup): key and deletion time. */
   private readonly retiredKeys = new Map<string, Map<string, { key: Uint8Array; deletedAt: number }>>();
+  /** Verified share keys per address and device (ENCRYPTION.md §3.1), filled by the device lookup. */
+  private readonly shareKeyMap = new Map<string, Map<string, Uint8Array>>();
   /** `kind` of every user whose keys were looked up (from the user's home node, APPLICATIONS.md §3.5). */
   private readonly kinds = new Map<string, string>();
   private readonly decrypted = new Map<string, Decrypted>();
@@ -524,8 +558,12 @@ export class MlsManager {
           return this.addMissingDevices(str(a), strs(b));
         case "encrypt":
           return this.encrypt(str(a), obj(b), encryptOptions(args[2]));
-        case "encryptHistory":
-          return this.encryptHistory(str(a), str(b));
+        case "encryptHistory": {
+          const keys = args[2];
+          if (keys === undefined) return this.encryptHistory(str(a), str(b));
+          if (!keys || typeof keys !== "object" || Array.isArray(keys) || !Object.values(keys).every((k) => k instanceof Uint8Array)) throw new MlsError("invalid_id");
+          return this.encryptHistory(str(a), str(b), keys as Record<string, Uint8Array>);
+        }
         case "importHistoryKeys": {
           if (!Array.isArray(b) || !b.every((k) => Array.isArray(k) && typeof k[0] === "number" && k[1] instanceof Uint8Array)) throw new MlsError("invalid_id");
           return this.importHistoryKeys(str(a), b as [number, Uint8Array][]);
@@ -1052,7 +1090,8 @@ export class MlsManager {
         }
         if (!this.client.hasGroup(q)) throw new MlsError("not_joined");
       }
-      const json = opts.ctx ? { ...content, ctx: { thread_id: opts.ctx.thread_id, reply_to: opts.ctx.reply_to } } : content;
+      const ctx = opts.ctx && { thread_id: opts.ctx.thread_id, reply_to: opts.ctx.reply_to, ...(opts.ctx.interaction !== undefined ? { interaction: opts.ctx.interaction } : {}) };
+      const json = ctx ? { ...content, ctx } : content;
       const ciphertext = this.client.encryptContent(q, JSON.stringify(json));
       return { content: ciphertext, epoch: this.client.currentEpoch(q) };
     });
@@ -1114,6 +1153,8 @@ export class MlsManager {
     if (ctx === "malformed") return ENVELOPE_MISMATCH;
     if (m.thread_id !== undefined && (m.thread_id ?? null) !== ctx.thread_id) return ENVELOPE_MISMATCH;
     if (m.reply_to_id !== undefined && (m.reply_to_id ?? null) !== ctx.reply_to) return ENVELOPE_MISMATCH;
+    // Answers of applications: the interaction they were sent for (an older bot's answer carries none).
+    if (ctx.interaction !== undefined && m.interaction !== undefined && (m.interaction?.id ?? null) !== ctx.interaction) return ENVELOPE_MISMATCH;
     return r;
   }
 
@@ -1165,12 +1206,14 @@ export class MlsManager {
 
   /**
    * Encrypts a thread title for an encrypted channel (PROTOCOL.md §7e): content format 1 of
-   * `{ "type": "thread.title", "body" }` under the current epoch, sent as `title` with `title_epoch`.
+   * `{ "type": "thread.title", "body", "ctx"?: { "thread_id" } }` under the current epoch, sent as `title` with
+   * `title_epoch`. With `threadId` (a rename, or a new thread whose id the client chose) the title is bound to its
+   * thread (ENCRYPTION.md §5.2).
    */
-  async encryptThreadTitle(conversationId: string, title: string): Promise<{ title: string; title_epoch: number }> {
+  async encryptThreadTitle(conversationId: string, title: string, threadId?: string): Promise<{ title: string; title_epoch: number }> {
     const body = title.trim();
     if (!body || Array.from(body).length > THREAD_TITLE_MAX) throw new RangeError(`thread title: 1 to ${THREAD_TITLE_MAX} characters`);
-    const { content, epoch } = await this.encrypt(conversationId, { type: "thread.title", body });
+    const { content, epoch } = await this.encrypt(conversationId, { type: "thread.title", body, ...(threadId ? { ctx: { thread_id: threadId } } : {}) });
     return { title: content, title_epoch: epoch };
   }
 
@@ -1185,6 +1228,12 @@ export class MlsManager {
   ): Promise<{ ok: true; title: string } | { ok: false; reason: DecryptFailure }> {
     const r = await this.decryptEnvelope(conversationId, { id: `thread-title:${t.id}`, author: t.title_author, device_id: t.title_device_id ?? null, epoch: t.title_epoch ?? null, content: t.title, created_at: t.created_at ?? null }, "title");
     if (!r.ok) return r;
+    // §5.2: a title bound to another thread (or with a malformed context) is a mismatch; one without ctx is accepted.
+    if ("ctx" in r.content && parseTitleContext(r.content.ctx) !== t.id) {
+      // Not this thread's title: the genuine thread's use of the ciphertext is no replay.
+      this.forgetNonce(conversationId, t.title, `thread-title:${t.id}`);
+      return { ok: false, reason: "envelope_mismatch" };
+    }
     const body = r.content.body;
     if (r.content.type !== "thread.title" || typeof body !== "string" || !body.trim() || Array.from(body).length > THREAD_TITLE_MAX) return { ok: false, reason: "invalid" };
     return { ok: true, title: body.trim() };
@@ -1508,14 +1557,22 @@ export class MlsManager {
     const identityKey = b64urlDecode(trusted);
     // Keys before the current one on the valid chain: retired devices attested under them stay verifiable (§3.3).
     const previous = keys.continuity?.length ? chainKeys(keys.continuity, trusted) : null;
+    const shareKeys = new Map<string, Uint8Array>();
     for (const d of keys.devices) {
       try {
         const pk = b64urlDecode(d.device_public_key);
-        if (verifyDeviceAttestation(address, d.device_id, pk, b64urlDecode(d.identity_signature), identityKey)) out.set(d.device_id, pk);
+        if (!verifyDeviceAttestation(address, d.device_id, pk, b64urlDecode(d.identity_signature), identityKey)) continue;
+        out.set(d.device_id, pk);
+        // §3.1: a share key counts only with a valid signature of the attested device key.
+        if (d.share_public_key && d.share_key_signature) {
+          const share = b64urlDecode(d.share_public_key);
+          if (verifyDeviceShareKey(d.device_id, pk, share, b64urlDecode(d.share_key_signature))) shareKeys.set(d.device_id, share);
+        }
       } catch {
         /* malformed entry: not verified */
       }
     }
+    this.shareKeyMap.set(address, shareKeys);
     // Retired devices (§2.3): verified under the same pinned key; only used for history (§5.2).
     const retired = new Map<string, { key: Uint8Array; deletedAt: number }>();
     for (const d of keys.retired ?? []) {
@@ -1531,6 +1588,25 @@ export class MlsManager {
     }
     this.retiredKeys.set(address, retired);
     return out;
+  }
+
+  /**
+   * The verified share keys of `address`'s attested devices (device id → X25519 public key, ENCRYPTION.md §3.1) from
+   * the device lookup ({@link verifiedDevices}); devices without one (or with an invalid signature) are missing.
+   */
+  async verifiedShareKeys(address: string, refresh = false): Promise<Map<string, Uint8Array>> {
+    await this.verifiedDevices(address, refresh);
+    return new Map(this.shareKeyMap.get(address) ?? []);
+  }
+
+  /** This device's share public key (ENCRYPTION.md §3.1). */
+  ownShareKey(): Uint8Array {
+    const k = this.client.shareKey();
+    try {
+      return k.publicKey;
+    } finally {
+      k.free();
+    }
   }
 
   /**
@@ -1783,11 +1859,13 @@ export class MlsManager {
   }
 
   /**
-   * Encrypts a history share payload (canonical JSON) like message content under the group's current
-   * epoch, after catching up, without rotating: only current members can read it.
+   * Encrypts a history share payload (canonical JSON) like message content under the group's current epoch, after
+   * catching up, without rotating. Format 1 (no `shareKeys`): under the epoch's content key, so every current member
+   * could read it. Format 2 (`shareKeys`: device id → verified share public key of each recipient device, ENCRYPTION.md
+   * §7b): under a fresh key, sealed to every given device in `boxes`; the key never leaves this call.
    */
-  encryptHistory(q: string, json: string): Promise<{ content: string; epoch: number }> {
-    const remote = this.forwarded<{ content: string; epoch: number }>("encryptHistory", [q, json]);
+  encryptHistory(q: string, json: string, shareKeys?: Record<string, Uint8Array>): Promise<{ content: string; epoch: number; boxes?: Record<string, string> }> {
+    const remote = this.forwarded<{ content: string; epoch: number; boxes?: Record<string, string> }>("encryptHistory", shareKeys ? [q, json, shareKeys] : [q, json]);
     if (remote) return remote;
     return this.run(async () => {
       try {
@@ -1796,7 +1874,16 @@ export class MlsManager {
         throw new MlsError("catch_up_failed");
       }
       if (!this.client.hasGroup(q)) throw new MlsError("not_joined");
-      return { content: this.client.encryptContent(q, json), epoch: this.client.currentEpoch(q) };
+      if (!shareKeys) return { content: this.client.encryptContent(q, json), epoch: this.client.currentEpoch(q) };
+      const devices = Object.entries(shareKeys);
+      const share = this.client.encryptShare(q, json, devices.map(([, pk]) => pk));
+      try {
+        const sealed = share.boxes;
+        const boxes = Object.fromEntries(devices.map(([deviceId], i) => [deviceId, b64urlEncode(sealed[i]!)]));
+        return { content: share.content, epoch: share.epoch, boxes };
+      } finally {
+        share.free();
+      }
     });
   }
 
@@ -1804,10 +1891,37 @@ export class MlsManager {
    * Decrypts a history share sent by `author`/`deviceId` and verifies the device signature against the
    * author's attested device (pinned identity key). Nothing is cached (shares never enter the message cache).
    */
-  async decryptHistory(q: string, shareId: string, author: string, deviceId: string, content: string): Promise<Decrypted> {
+  async decryptHistory(q: string, shareId: string, author: string, deviceId: string, content: string, box?: string): Promise<Decrypted> {
     const header = contentHeader(content);
     if (!header) return { ok: false, reason: "invalid" };
-    return this.decryptUncached(q, `history:${shareId}`, author, deviceId, header.epoch, content);
+    if (box === undefined) return this.decryptUncached(q, `history:${shareId}`, author, deviceId, header.epoch, content);
+    // Format 2 (§7b): the box must open with this device's share key; its key replaces the epoch's content key.
+    let deviceKey: Uint8Array | undefined;
+    try {
+      deviceKey = (await this.verifiedDevices(author))?.get(deviceId) ?? (await this.verifiedDevices(author, true))?.get(deviceId);
+    } catch {
+      deviceKey = undefined;
+    }
+    if (!deviceKey) return { ok: false, reason: "unknown_device" };
+    if (this.client.hasGroup(q)) {
+      const leaf = this.client.roster(q).find((e) => e.identity === `${author}/${deviceId}`);
+      if (leaf && !sameBytes(leaf.signatureKey, deviceKey)) return { ok: false, reason: "unknown_device" };
+    }
+    let key: Uint8Array;
+    try {
+      key = this.client.openShareBox(b64urlDecode(box));
+    } catch {
+      return { ok: false, reason: "invalid" };
+    }
+    try {
+      const parsed: unknown = JSON.parse(decryptContentWithKey(key, q, author, deviceId, content, deviceKey));
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { ok: false, reason: "invalid" };
+      return { ok: true, content: parsed as Record<string, unknown> };
+    } catch (e) {
+      return { ok: false, reason: cryptoCode(e) === "bad_signature" ? "bad_signature" : "invalid" };
+    } finally {
+      key.fill(0);
+    }
   }
 
   /**

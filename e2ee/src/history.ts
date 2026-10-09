@@ -4,9 +4,10 @@
  *
  * Members hand the content keys of past epochs to a member who joined later, as far as the channel's policy
  * allows. A share is never a chat message: it is the canonical JSON payload
- * `{type: "history_keys", v: 1, conversation, to, epochs: [[epoch, key], …]}` encrypted and signed like
- * message content (§5.2) under the conversation's **current** epoch, posted to `…/history-keys` of the node
- * hosting the conversation. The recipient verifies the signature against an attested device in the group,
+ * `{type: "history_keys", v, conversation, to, epochs: [[epoch, key], …]}` encrypted and signed like
+ * message content (§5.2), posted to `…/history-keys` of the node hosting the conversation. Format 2 (node capability
+ * `history.shares2`): under a fresh key sealed to the verified share key of every device of the recipient, so only
+ * those devices can read it; format 1 (fallback, to be removed): under the conversation's **current** epoch. The recipient verifies the signature against an attested device in the group,
  * checks every key against a stored message of its epoch, signed by its author's attested device (no poisoned keys) and keeps accepted keys only
  * in the key store (the MLS client state, which is also what the history backup carries).
  *
@@ -17,6 +18,8 @@ import { b64urlDecode, b64urlEncode, jcs, type HistoryPendingList, type HistoryS
 import { splitIdentity, splitQualified, type MlsManager } from "./mls";
 
 export const HISTORY_KEYS_TYPE = "history_keys";
+/** Boxes per format 2 share accepted by nodes (devices of the recipient). */
+export const MAX_SHARE_BOXES = 20;
 /** Epochs per share accepted by nodes (`epoch_to - epoch_from + 1`). */
 export const MAX_EPOCHS_PER_SHARE = 1000;
 /** Epochs per share sent by this client: keeps a share well below the node's 64 KiB limit. */
@@ -119,7 +122,8 @@ export function sharerDelay(self: string, candidates: string[], preferred = fals
 
 export interface HistoryPayload {
   type: typeof HISTORY_KEYS_TYPE;
-  v: 1;
+  /** Share format: 1 (under the epoch key) or 2 (sealed per recipient device). */
+  v: 1 | 2;
   /** Qualified conversation id. */
   conversation: string;
   /** Recipient address. */
@@ -129,8 +133,8 @@ export interface HistoryPayload {
 }
 
 /** The canonical JSON of a share payload (the bytes the device signature covers). */
-export function encodeHistoryPayload(conversation: string, to: string, keys: [number, Uint8Array][]): string {
-  const payload: HistoryPayload = { type: HISTORY_KEYS_TYPE, v: 1, conversation, to, epochs: keys.map(([e, k]) => [e, b64urlEncode(k)]) };
+export function encodeHistoryPayload(conversation: string, to: string, keys: [number, Uint8Array][], v: 1 | 2 = 1): string {
+  const payload: HistoryPayload = { type: HISTORY_KEYS_TYPE, v, conversation, to, epochs: keys.map(([e, k]) => [e, b64urlEncode(k)]) };
   return jcs(payload);
 }
 
@@ -141,11 +145,11 @@ export function encodeHistoryPayload(conversation: string, to: string, keys: [nu
  */
 export function parseHistoryPayload(
   content: Record<string, unknown>,
-  expected: { conversation: string; to: string; epochFrom: number; epochTo: number },
+  expected: { conversation: string; to: string; epochFrom: number; epochTo: number; v?: 1 | 2 },
 ): [number, Uint8Array][] | null {
   const keys = new Set(Object.keys(content));
   if (keys.size !== 5 || !["type", "v", "conversation", "to", "epochs"].every((k) => keys.has(k))) return null;
-  if (content.type !== HISTORY_KEYS_TYPE || content.v !== 1) return null;
+  if (content.type !== HISTORY_KEYS_TYPE || content.v !== (expected.v ?? 1)) return null;
   if (content.conversation !== expected.conversation || content.to !== expected.to) return null;
   if (!Array.isArray(content.epochs) || content.epochs.length > MAX_EPOCHS_PER_SHARE) return null;
   const out: [number, Uint8Array][] = [];
@@ -291,6 +295,11 @@ export interface HistorySyncDeps {
    * without start.
    */
   firstEpoch?(conversation: string, kind: string, sinceMs: number): Promise<number | null>;
+  /**
+   * Whether node `domain` announces `history.shares2` (ENCRYPTION.md §7b "Format v2"); without it (or false) shares
+   * go out in format 1.
+   */
+  shares2?(domain: string): boolean | Promise<boolean>;
   /** Something went wrong with a share; never carries keys or payloads. */
   onLog?(event: "share_rejected" | "share_failed" | "keys_rejected", conversation: string): void;
   backoffMs?: number;
@@ -471,24 +480,43 @@ export class HistorySync {
     return this.sendChunks(q, to, epochs);
   }
 
+  /**
+   * The share keys to seal a format 2 share to (ENCRYPTION.md §7b "Sharing" step 0): when the hosting node announces
+   * `history.shares2` and every attested device of `to` in the current roster has a verified share key, device id →
+   * share key; otherwise null (format 1). Leaves of `to` that are not attested (old leaves after a key reset) cannot
+   * receive keys anyway and do not count.
+   */
+  private async shareKeysFor(q: string, to: string): Promise<Record<string, Uint8Array> | null> {
+    if (!(await this.deps.shares2?.(splitQualified(q).domain))) return null;
+    const mls = this.deps.mls;
+    await mls.catchUp(q).catch(() => undefined);
+    const attested = await mls.verifiedDevices(to).catch(() => null);
+    const keys = await mls.verifiedShareKeys(to).catch(() => null);
+    if (!attested || !keys) return null;
+    const devices = [...new Set(mls.roster(q).map(splitIdentity).filter((i) => i.address === to && attested.has(i.deviceId)).map((i) => i.deviceId))];
+    if (!devices.length || devices.length > MAX_SHARE_BOXES || !devices.every((d) => keys.has(d))) return null;
+    return Object.fromEntries(devices.map((d) => [d, keys.get(d)!]));
+  }
+
   /** Encrypts and posts `epochs` for `to` in chunks; one empty share when there are none (it clears a pending mark). */
   private async sendChunks(q: string, to: string, epochs: number[]): Promise<number> {
     const { api, id } = this.api(q);
     const mls = this.deps.mls;
     const chunks = epochs.length ? chunkEpochs(epochs) : [[]];
+    const shareKeys = await this.shareKeysFor(q, to);
     let sent = 0;
     for (const chunk of chunks) {
       const keys = mls.exportEpochKeys(q, chunk);
       let json: string;
       try {
-        json = encodeHistoryPayload(q, to, keys);
+        json = encodeHistoryPayload(q, to, keys, shareKeys ? 2 : 1);
       } finally {
         for (const [, k] of keys) k.fill(0);
       }
-      const { content, epoch } = await mls.encryptHistory(q, json);
+      const { content, epoch, boxes } = await mls.encryptHistory(q, json, shareKeys ?? undefined);
       const from = chunk[0] ?? epoch;
       const last = chunk[chunk.length - 1] ?? epoch;
-      await api.share(id, { to_user: to, epoch_from: from, epoch_to: last, ciphertext: content });
+      await api.share(id, { to_user: to, epoch_from: from, epoch_to: last, ciphertext: content, ...(boxes ? { v: 2, boxes } : {}) });
       sent += keys.length;
     }
     return sent;
@@ -516,13 +544,23 @@ export class HistorySync {
         this.reject(q, share.id);
         continue;
       }
-      const dec = await mls.decryptHistory(q, share.id, share.from_user, share.from_device, share.ciphertext);
+      // Format 2 (§7b): only with this device's own box; its key takes the place of the epoch key.
+      const v = share.v === 2 ? 2 : 1;
+      if (share.v !== undefined && share.v !== 1 && share.v !== 2) {
+        this.reject(q, share.id);
+        continue;
+      }
+      if (v === 2 && !share.box) {
+        this.reject(q, share.id);
+        continue;
+      }
+      const dec = await mls.decryptHistory(q, share.id, share.from_user, share.from_device, share.ciphertext, v === 2 ? share.box! : undefined);
       if (!dec.ok) {
         // A key that is still missing may arrive with the catch-up: try again later.
         if (dec.reason !== "missing_key") this.reject(q, share.id);
         continue;
       }
-      const keys = parseHistoryPayload(dec.content, { conversation: q, to: this.deps.address, epochFrom: share.epoch_from, epochTo: share.epoch_to });
+      const keys = parseHistoryPayload(dec.content, { conversation: q, to: this.deps.address, epochFrom: share.epoch_from, epochTo: share.epoch_to, v });
       if (!keys) {
         this.reject(q, share.id);
         continue;
