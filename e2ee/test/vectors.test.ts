@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MPL-2.0
 // The new entries of the protocol's reference values (protocol/testvectors/encryption.json) through @tavrn/e2ee: the
 // local storage key, a message with the signed context (ENCRYPTION.md §5.2) and a history share (§7b) read by the
-// session manager against a node that publishes the vectors' identity and device, and the sealed unlock material.
+// session manager against a node that publishes the vectors' identity and device, the device share key and a history
+// share v2 (§3.1, §7b), and the sealed unlock material.
 import { readFileSync } from "node:fs";
 import { beforeAll, describe, expect, it } from "vitest";
-import { Client, MasterSecret, inboxPublicKey } from "@tavrn/crypto";
+import { Client, MasterSecret, decryptContentWithKey, deviceShareSecretKey, inboxPublicKey, openShareBox } from "@tavrn/crypto";
 import { b64urlDecode, b64urlEncode } from "@tavrn/sdk";
 import { ensureCrypto } from "../src/wasm";
 import { localStorageKey } from "../src/keystore";
@@ -23,7 +24,8 @@ async function reader(): Promise<MlsManager> {
   const att = V.device_attestation;
   const alice = MasterSecret.fromBytes(b64urlDecode(V.keys.master_secret));
   node.addUser("alice", alice);
-  node.users.get("alice")!.devices.set(att.device_id, { pk: att.device_public_key, sig: att.signature });
+  const share = V.device_share_key;
+  node.users.get("alice")!.devices.set(att.device_id, { pk: att.device_public_key, sig: att.signature, spk: share.share_public_key, ssig: share.signature });
   const bobMaster = MasterSecret.generate();
   node.addUser("bob", bobMaster);
   const mls = new MlsManager({
@@ -70,6 +72,21 @@ describe("encryption.json in @tavrn/e2ee", () => {
     expect(await mls.decryptHistory(v.conversation, "s1", v.author, v.device_id, v.ciphertext)).toEqual({ ok: true, content: JSON.parse(v.payload) });
     // Served as a message (to a device that has not seen it as a share) it is refused for its purpose.
     expect(await (await reader()).decrypt(v.conversation, { id: "s1", author: v.author, device_id: v.device_id, epoch: v.epoch, content: v.ciphertext })).toEqual({ ok: false, reason: "invalid" });
+  });
+
+  it("device share key: verified with the attested device key before use (ENCRYPTION.md §3.1)", async () => {
+    const mls = await reader();
+    const keys = await mls.verifiedShareKeys("alice@node.example");
+    expect(b64urlEncode(keys.get(V.device_share_key.device_id)!)).toBe(V.device_share_key.share_public_key);
+  });
+
+  it("history share v2: the box opens with the recipient's share secret, the key opens the share", () => {
+    const v = V.history_share_v2;
+    const secret = deviceShareSecretKey(b64urlDecode(v.recipient_device_secret_key));
+    const key = openShareBox(secret, b64urlDecode(v.box));
+    expect(b64urlEncode(key)).toBe(v.share_key);
+    expect(decryptContentWithKey(key, v.conversation, v.author, v.device_id, v.ciphertext, b64urlDecode(V.device_attestation.device_public_key))).toBe(v.payload);
+    expect(JSON.parse(v.payload)).toMatchObject({ type: "history_keys", v: 2 });
   });
 
   it("sealed unlock material opens with the app's seed", () => {

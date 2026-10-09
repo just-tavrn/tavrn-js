@@ -64,6 +64,26 @@ describe.each(kinds)("account flows (%s store)", (_kind, makeStore) => {
     expect(user().kps.get(DEV_A)).toHaveLength(20);
   });
 
+  it("publishes the device's share key with the device key, and once later for a device attested without one", async () => {
+    const { ctx, user, node } = account();
+    await setupAccount(ctx, RecoveryKey.generate());
+    const client = (await loadClient(ctx.store))!;
+    const share = client.shareKey();
+    // Published together with the device key; the node checked the signature (ENCRYPTION.md §3.1).
+    expect(user().devices.get(DEV_A)!.spk).toBe(b64urlEncode(share.publicKey));
+    expect(user().devices.get(DEV_A)!.ssig).toBe(b64urlEncode(share.signature));
+    expect(node.shareKeyPuts).toBe(0);
+    // A device attested before share keys existed: the next ensureDevice publishes it once.
+    delete user().devices.get(DEV_A)!.spk;
+    delete user().devices.get(DEV_A)!.ssig;
+    await ensureDevice(ctx);
+    expect(user().devices.get(DEV_A)!.spk).toBe(b64urlEncode(share.publicKey));
+    await ensureDevice(ctx);
+    expect(node.shareKeyPuts).toBe(1);
+    share.free();
+    client.free();
+  });
+
   it("proves the stored device for a login and reports a replaced device instead of dropping it silently", async () => {
     const { ctx } = account();
     await setupAccount(ctx, RecoveryKey.generate());
