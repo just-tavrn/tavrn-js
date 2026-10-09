@@ -435,7 +435,13 @@ export class HistorySync {
   async restore(q: string, to: string, channel: RestoreChannel): Promise<RestorePlan & { sent: number; skipped: boolean }> {
     if (this.disposed || !this.deps.mls.hasGroup(q)) return { epochs: [], missing: 0, unknown: true, sent: 0, skipped: true };
     await this.deps.mls.catchUp(q).catch(() => undefined);
-    if (!this.deps.mls.roster(q).some((i) => splitIdentity(i).address === to)) return { epochs: [], missing: 0, unknown: true, sent: 0, skipped: true };
+    // A device of the requester attested under its current key (old leaves from before the reset do not count).
+    const attested = await this.deps.mls.verifiedDevices(to, true).catch(() => null);
+    const present = this.deps.mls.roster(q).some((i) => {
+      const { address, deviceId } = splitIdentity(i);
+      return address === to && (!attested || attested.has(deviceId));
+    });
+    if (!present) return { epochs: [], missing: 0, unknown: true, sent: 0, skipped: true };
     const plan = await this.restorePlan(q, channel);
     const sent = plan.epochs.length ? await this.sendChunks(q, to, plan.epochs) : 0;
     return { ...plan, sent, skipped: false };
