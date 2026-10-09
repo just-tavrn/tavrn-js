@@ -625,6 +625,9 @@ export class TavrnApi {
     users: (query?: { q?: string; limit?: number; after?: string }) => this.get<AdminUser[]>("/admin/users", query),
     updateUser: (userId: string, req: UpdateUserRequest) => this.patch<AdminUser>(`/admin/users/${userId}`, req),
     purgeUser: (userId: string, req: PurgeUserRequest) => this.post<PurgeUserResponse>(`/admin/users/${userId}/purge`, req),
+    /** Corrects a user's date of birth on request; `null` removes it (the user is asked again). PROTOCOL.md §5e. */
+    setDateOfBirth: (userId: string, dateOfBirth: string | null) =>
+      this.put<void>(`/admin/users/${encodeURIComponent(userId)}/date-of-birth`, { date_of_birth: dateOfBirth }),
     invites: () => this.get<AccountInvite[]>("/admin/invites"),
     createInvite: (req: CreateAccountInviteRequest) => this.post<AccountInvite>("/admin/invites", req),
     deleteInvite: (code: string) => this.del(`/admin/invites/${encodeURIComponent(code)}`),
@@ -947,6 +950,11 @@ export class TavrnApi {
   users = {
     me: () => this.get<UserPrivate>("/users/me"),
     updateMe: (req: UpdateMeRequest) => this.patch<UserPrivate>("/users/me", req),
+    /**
+     * Adds the date of birth (`YYYY-MM-DD`) to an account that has none yet (PROTOCOL.md §5e): the answer to
+     * `age.status_required`. Set once; `age.date_of_birth_set` afterwards, `age.below_minimum` below the node's minimum.
+     */
+    setDateOfBirth: (dateOfBirth: string) => this.put<UserPrivate>("/users/me/date-of-birth", { date_of_birth: dateOfBirth }),
     devices: () => this.get<DeviceInfo[]>("/users/me/devices"),
     deleteDevice: (deviceId: string) => this.del(`/users/me/devices/${deviceId}`),
     /** Attests a deleted own device again as retired, from its MLS leaf key (ENCRYPTION.md §5.2). */
