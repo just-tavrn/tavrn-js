@@ -1170,7 +1170,17 @@ export class TavrnApi {
     createCategory: (roomId: string, req: CreateCategoryRequest) => this.post<Category>(`/rooms/${roomId}/categories`, req),
     updateCategory: (roomId: string, categoryId: string, req: UpdateCategoryRequest) => this.patch<Category>(`/rooms/${roomId}/categories/${categoryId}`, req),
     deleteCategory: (roomId: string, categoryId: string) => this.del(`/rooms/${roomId}/categories/${categoryId}`),
+    /** Set an override (channel-scoped bits only, `permissions.not_channel_scoped`); allow = deny = "0" removes it. */
     setOverride: (roomId: string, req: SetOverrideRequest) => this.put<PermissionOverride[]>(`/rooms/${roomId}/overrides`, req),
+    /**
+     * Removes these overrides (allow, deny and the upload categories set to nothing), one request each: "Reset to
+     * category" of a channel clears the channel's own overrides, so the category's apply (layered overrides).
+     */
+    clearOverrides: async (roomId: string, overrides: readonly Pick<PermissionOverride, "target_type" | "target_id" | "subject_type" | "subject_id">[]) => {
+      for (const o of overrides) {
+        await this.channels.setOverride(roomId, { target_type: o.target_type, target_id: o.target_id, subject_type: o.subject_type, subject_id: o.subject_id, allow: "0", deny: "0", upload_allow: [], upload_deny: [] });
+      }
+    },
   };
 
   roles = {
