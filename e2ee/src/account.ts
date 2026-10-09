@@ -164,7 +164,9 @@ export async function ensureDevice(ctx: E2eeContext): Promise<void> {
       if (!sharePublished.has(`${ctx.address}/${ctx.deviceId}`)) {
         // Asked once per session, also when it fails (a node without the route); the next start asks again.
         sharePublished.add(`${ctx.address}/${ctx.deviceId}`);
-        await ctx.api.keys.putShareKey(ctx.deviceId, share).catch(() => undefined);
+        await Promise.resolve()
+          .then(() => ctx.api.keys.putShareKey(ctx.deviceId, share))
+          .catch(() => undefined);
       }
     }
     const { count } = await ctx.api.keys.countKeyPackages(ctx.deviceId);
