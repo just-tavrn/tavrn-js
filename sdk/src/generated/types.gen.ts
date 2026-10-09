@@ -131,6 +131,13 @@ export type AdminApplicationUpdate = {
     disabled: boolean;
 };
 
+export type AdminDateOfBirthRequest = {
+    /**
+     * `YYYY-MM-DD` between 1900-01-01 and today; null removes it (the user is asked again at the next request).
+     */
+    date_of_birth?: string | null;
+};
+
 export type AdminOverview = {
     blob_bytes: number;
     capabilities: Array<string>;
@@ -195,6 +202,38 @@ export type AdminUser = User & {
     email?: string | null;
     email_verified: boolean;
     room_creation_grant?: number | null;
+};
+
+/**
+ * `age` of `GET /node` and `/.well-known/tavrn` (PROTOCOL.md §5e).
+ */
+export type AgeInfo = {
+    /**
+     * The room and channel gates this node enforces.
+     */
+    gates: Array<string>;
+    /**
+     * Registration refuses younger people (`TAVRN_MINIMUM_AGE`).
+     */
+    minimum_age: number;
+    /**
+     * The date of birth is the user's own statement (no verification).
+     */
+    self_declared: boolean;
+};
+
+/**
+ * `age_status` of `GET /users/me` (the user's own account only).
+ */
+export type AgeStatus = {
+    /**
+     * `self` for a self-declared date of birth, `none` while the status is unknown.
+     */
+    method: string;
+    /**
+     * `adult` (18 or older), `minor` (younger) or `unknown` (no date of birth yet). `unknown` counts as `minor`.
+     */
+    tier: string;
 };
 
 /**
@@ -706,6 +745,15 @@ export type ChangePasswordRequest = {
 };
 
 export type Channel = {
+    /**
+     * The channel's own age gate: `none` or `adults_only` (PROTOCOL.md §5e).
+     */
+    age_gate?: string;
+    /**
+     * The gate that applies: `adults_only` when the channel's or its room's gate says so. Users below it see the
+     * channel locked: no messages, files, voice or events.
+     */
+    age_gate_effective?: string;
     /**
      * Threads without a message for this many minutes are archived (60–43200, default 10080 = 7 days;
      * PROTOCOL.md §7e).
@@ -1315,6 +1363,11 @@ export type CreateCategoryRequest = {
 };
 
 export type CreateChannelRequest = {
+    /**
+     * `none` (default) or `adults_only` (PROTOCOL.md §5e); the room's gate is the minimum. Only an adult can set
+     * `adults_only`.
+     */
+    age_gate?: string | null;
     bitrate_kbps?: number | null;
     category_id?: string | null;
     /**
@@ -1666,6 +1719,13 @@ export type DataSummary = {
     };
 };
 
+export type DateOfBirthRequest = {
+    /**
+     * `YYYY-MM-DD`, between 1900-01-01 and today, at least the node's minimum age.
+     */
+    date_of_birth: string;
+};
+
 export type DeclineRequest = {
     /**
      * Also block the sender (on my home node; users of other nodes block there).
@@ -1887,6 +1947,10 @@ export type DirectoryReport = {
  * A discoverable room (§7.3).
  */
 export type DirectoryRoom = {
+    /**
+     * `none` or `adults_only` (PROTOCOL.md §5e). Gated rooms are listed only to requests with an adult's session.
+     */
+    age_gate: string;
     description: string;
     /**
      * Always null: clients never load images of other nodes.
@@ -3200,6 +3264,10 @@ export type NodeBanRequest = {
 };
 
 export type NodeInfo = {
+    /**
+     * Date of birth and age gates (`age.v1`, PROTOCOL.md §5e).
+     */
+    age: AgeInfo;
     capabilities: Array<string>;
     captcha?: null | CaptchaInfo;
     description: string;
@@ -4029,6 +4097,11 @@ export type PublicKeyInfo = {
 };
 
 export type PublicRoom = {
+    /**
+     * `none` or `adults_only` (PROTOCOL.md §5e). Gated rooms are listed only to adults; invite previews carry the
+     * gate so clients can explain a refused join.
+     */
+    age_gate: string;
     description: string;
     /**
      * Icon paths on this node (see [`Room`]).
@@ -4376,6 +4449,12 @@ export type RegisterRequest = {
      * Captcha token, if the node requires one (see `/node`).
      */
     captcha_token?: string | null;
+    /**
+     * Required (`age.v1`, PROTOCOL.md §5e): the date of birth `YYYY-MM-DD`, between 1900-01-01 and today. Below the
+     * node's minimum age (`GET /node` → `age.minimum_age`) the registration is refused with `age.below_minimum`.
+     * Stored on this node only, never shown to others.
+     */
+    date_of_birth?: string | null;
     device_name?: string | null;
     display_name?: string | null;
     email?: string | null;
@@ -4609,6 +4688,11 @@ export type Role = {
 };
 
 export type Room = {
+    /**
+     * `none` or `adults_only` (PROTOCOL.md §5e): users below 18 never find the room in Discover and cannot join it;
+     * every channel of the room is locked for them.
+     */
+    age_gate: string;
     /**
      * Attachments of the room's channels are deleted after this many days (null = the node's value; a room
      * can only shorten it).
@@ -5365,6 +5449,11 @@ export type UpdateCategoryRequest = {
 
 export type UpdateChannelRequest = {
     /**
+     * `none` or `adults_only` (PROTOCOL.md §5e): the channel's own age gate; the room's gate stays the minimum.
+     * Only an adult can switch it on. Audited as `channel.age_gate`.
+     */
+    age_gate?: string | null;
+    /**
      * Threads without a message for this many minutes are archived (60–43200; PROTOCOL.md §7e).
      */
     auto_archive_minutes?: number | null;
@@ -5511,6 +5600,11 @@ export type UpdateRoleRequest = {
 };
 
 export type UpdateRoomRequest = {
+    /**
+     * `none` or `adults_only` (PROTOCOL.md §5e): the room's age gate, the minimum of every channel. Only an adult can
+     * switch it on. Audited as `room.age_gate`.
+     */
+    age_gate?: string | null;
     /**
      * Delete attachments after this many days (1–36500; 0 = use the node's value). Effective is the
      * shortest non-zero of this, the node value and room grants: a room can only shorten.
@@ -5766,11 +5860,16 @@ export type UserKeys = {
 };
 
 export type UserPrivate = User & {
+    age_status?: null | AgeStatus;
     /**
      * `GET /users/me` and `PATCH /users/me` of local users: load image previews automatically
      * (`always`, `friends_and_shared` or `never`).
      */
     auto_preview?: string | null;
+    /**
+     * `GET /users/me` of local users only: the own date of birth `YYYY-MM-DD` (null until given; PROTOCOL.md §5e).
+     */
+    date_of_birth?: string | null;
     email?: string | null;
     email_verified: boolean;
     has_identity_key: boolean;
@@ -6213,6 +6312,10 @@ export type WelcomeList = {
 };
 
 export type WellKnown = {
+    /**
+     * Date of birth and age gates (`age.v1`, PROTOCOL.md §5e).
+     */
+    age: AgeInfo;
     /**
      * API base of the node (`<TAVRN_PUBLIC_URL>/api/v1`); its host may differ from `domain` (delegation).
      */
@@ -7622,6 +7725,29 @@ export type UpdateUserResponses = {
 };
 
 export type UpdateUserResponse = UpdateUserResponses[keyof UpdateUserResponses];
+
+export type AdminSetDateOfBirthData = {
+    body: AdminDateOfBirthRequest;
+    path: {
+        user_id: string;
+    };
+    query?: never;
+    url: '/api/v1/admin/users/{user_id}/date-of-birth';
+};
+
+export type AdminSetDateOfBirthErrors = {
+    400: ProblemDetails;
+    403: ProblemDetails;
+    404: ProblemDetails;
+};
+
+export type AdminSetDateOfBirthError = AdminSetDateOfBirthErrors[keyof AdminSetDateOfBirthErrors];
+
+export type AdminSetDateOfBirthResponses = {
+    204: void;
+};
+
+export type AdminSetDateOfBirthResponse = AdminSetDateOfBirthResponses[keyof AdminSetDateOfBirthResponses];
 
 export type AdminDeleteUserData = {
     body: DeleteAccountRequest;
@@ -13608,6 +13734,27 @@ export type DataSummaryResponses = {
 };
 
 export type DataSummaryResponse = DataSummaryResponses[keyof DataSummaryResponses];
+
+export type SetDateOfBirthData = {
+    body: DateOfBirthRequest;
+    path?: never;
+    query?: never;
+    url: '/api/v1/users/me/date-of-birth';
+};
+
+export type SetDateOfBirthErrors = {
+    400: ProblemDetails;
+    403: ProblemDetails;
+    409: ProblemDetails;
+};
+
+export type SetDateOfBirthError = SetDateOfBirthErrors[keyof SetDateOfBirthErrors];
+
+export type SetDateOfBirthResponses = {
+    200: UserPrivate;
+};
+
+export type SetDateOfBirthResponse = SetDateOfBirthResponses[keyof SetDateOfBirthResponses];
 
 export type DevicesData = {
     body?: never;
