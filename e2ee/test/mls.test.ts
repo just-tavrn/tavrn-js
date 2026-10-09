@@ -805,6 +805,29 @@ describe("threads (PROTOCOL.md §7e)", () => {
   });
 });
 
+describe("content of one purpose is never accepted for another (ENCRYPTION.md §5.2, §7b)", () => {
+  it("a thread title or a history share served as a message or an ephemeral event is invalid", async () => {
+    const { device } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    await bob.mls.ensureJoined(CONV, { canCreate: true });
+    await alice.mls.catchUp(CONV);
+    // A thread title has the same format and AAD as a message of its author: a node could post it as a message.
+    const t = await alice.mls.encryptThreadTitle(CONV, "Plans");
+    expect(await bob.mls.decrypt(CONV, { id: "m-title", author: alice.address, device_id: DEV.a, epoch: t.title_epoch, content: t.title })).toEqual({ ok: false, reason: "invalid" });
+    // A history share (keys of past epochs for another member) must never become message content either.
+    const share = await alice.mls.encryptHistory(CONV, JSON.stringify({ type: "history_keys", v: 1, conversation: CONV, to: "carol@t.local", epochs: [[0, b64urlEncode(new Uint8Array(32))]] }));
+    expect(await bob.mls.decrypt(CONV, { id: "m-share", author: alice.address, device_id: DEV.a, epoch: share.epoch, content: share.content })).toEqual({ ok: false, reason: "invalid" });
+    expect(await bob.mls.decryptEphemeral(CONV, alice.address, DEV.a, share.content)).toEqual({ ok: false, reason: "invalid" });
+    // The genuine paths still work.
+    expect((await bob.mls.decryptThreadTitle(CONV, { id: "T9", title: t.title, title_epoch: t.title_epoch, title_author: alice.address, title_device_id: DEV.a })).ok).toBe(true);
+    expect((await bob.mls.decryptHistory(CONV, "S1", alice.address, DEV.a, share.content)).ok).toBe(true);
+    const m = await send(alice, CONV, "hello", "m-ok");
+    expect((await bob.mls.decrypt(CONV, m)).ok).toBe(true);
+  });
+});
+
 describe("qualified ids and stored meta data", () => {
   it("checks embeds: the sender refuses invalid ones, receivers drop invalid ones (APPLICATIONS.md §6.4)", async () => {
     const { device } = setup();
