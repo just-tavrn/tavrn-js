@@ -828,48 +828,150 @@ describe("content of one purpose is never accepted for another (ENCRYPTION.md §
   });
 });
 
-describe("proposed protocol changes (security review 2026-10-09, kept skipped until the protocol decides)", () => {
-  // PROPOSAL (format extension, needs ENCRYPTION.md §5.2): the content signature covers conversation, epoch, author
-  // and device, but not the envelope's thread_id, reply_to or the message id, so a node can move an encrypted reply
-  // into another thread or point it at another message (plaintext signatures, FEDERATION.md §10.3, cover both).
-  // Fix: senders put `ctx: { thread_id, reply_to }` into the signed JSON; receivers compare it with the envelope
-  // when present and show a mismatch as invalid. Skipped: changes what senders write.
-  it.skip("a reply moved into another thread by the node is not shown as part of it", async () => {
-    const { device } = setup();
+describe("signed context of messages (ENCRYPTION.md §5.2)", () => {
+  const T1 = "01J9ZK3G5M8Q2W4E6R8T0Y2VT1";
+  const T2 = "01J9ZK3G5M8Q2W4E6R8T0Y2VT2";
+  const R1 = "01J9ZK3G5M8Q2W4E6R8T0Y2VR1";
+
+  async function pair() {
+    const { device, node } = setup();
     const alice = device("alice", DEV.a);
     const bob = device("bob", DEV.b);
     await alice.mls.ensureJoined(CONV, { canCreate: true });
     await bob.mls.ensureJoined(CONV, { canCreate: true });
     await alice.mls.catchUp(CONV);
-    const reply = { ...(await send(bob, CONV, "only for thread 1", "t1")), thread_id: "01J9ZK3G5M8Q2W4E6R8T0Y2VT1" };
-    // The node serves the same message (same id) under another thread to a member who never saw the original.
-    const moved = { ...reply, thread_id: "01J9ZK3G5M8Q2W4E6R8T0Y2VT2" };
-    expect(await alice.mls.decrypt(CONV, moved)).toEqual({ ok: false, reason: "invalid" });
+    return { alice, bob, node };
+  }
+
+  it("a reply moved into another thread by the node is not shown as part of it", async () => {
+    const { alice, bob } = await pair();
+    const sealed = await bob.mls.encrypt(CONV, { type: "text", body: "only for thread 1" }, { ctx: { thread_id: T1, reply_to: null } });
+    const reply = { id: "t1", author: bob.address, device_id: DEV.b, ...sealed, thread_id: T1, reply_to_id: null };
+    // Shown where it was sent, without the context in the content.
+    expect(await alice.mls.decrypt(CONV, reply)).toEqual({ ok: true, content: { type: "text", body: "only for thread 1" } });
+    // The node serves the same message (same id) under another thread, in the main channel or as a reply.
+    expect(await alice.mls.decrypt(CONV, { ...reply, thread_id: T2 })).toEqual({ ok: false, reason: "envelope_mismatch" });
+    expect(await alice.mls.decrypt(CONV, { ...reply, thread_id: null })).toEqual({ ok: false, reason: "envelope_mismatch" });
+    expect(await alice.mls.decrypt(CONV, { ...reply, reply_to_id: R1 })).toEqual({ ok: false, reason: "envelope_mismatch" });
+    // A caller that does not know the envelope fields (undefined) does not compare them.
+    const { thread_id: _t, reply_to_id: _r, ...bare } = reply;
+    expect((await alice.mls.decrypt(CONV, bare)).ok).toBe(true);
+    // The genuine envelope still decrypts after the mismatches (no replay, no cached failure).
+    expect((await alice.mls.decrypt(CONV, reply)).ok).toBe(true);
+    expect(alice.mls.peek(CONV, reply)).toEqual({ ok: true, content: { type: "text", body: "only for thread 1" } });
   });
 
-  // PROPOSAL (client policy, ENCRYPTION.md §3.3 "re-pinned only after the notice was shown"): a changed identity key
-  // of a contact is re-pinned at once with `changed`, and devices attested under the new key count immediately: the
-  // ghost check passes them and DMs add them by Welcome before the user saw or acknowledged the warning. A home node
-  // that swaps a user's key can thus place its own device in that user's DMs. Fix: while `changed` is unacknowledged,
-  // addMissingDevices skips that user's new devices and ghostCheck reports their leaves (reason `key_changed`).
-  // Skipped: owner decision (DMs with a contact who reset wait for the acknowledgement).
-  it.skip("devices under an unacknowledged changed key are not added to a DM", async () => {
-    const { node, device, masters } = setup();
-    const alice = device("alice", DEV.a);
-    const bob = device("bob", DEV.b);
+  it("a reply keeps its target; content of older clients without ctx is accepted anywhere", async () => {
+    const { alice, bob } = await pair();
+    const sealed = await bob.mls.encrypt(CONV, { type: "text", body: "answer" }, { ctx: { thread_id: null, reply_to: R1 } });
+    const m = { id: "r1", author: bob.address, device_id: DEV.b, ...sealed, thread_id: null, reply_to_id: R1 };
+    expect((await alice.mls.decrypt(CONV, m)).ok).toBe(true);
+    expect(await alice.mls.decrypt(CONV, { ...m, reply_to_id: null })).toEqual({ ok: false, reason: "envelope_mismatch" });
+    const old = await send(bob, CONV, "from an older client", "o1");
+    expect(await alice.mls.decrypt(CONV, { ...old, thread_id: T2, reply_to_id: R1 })).toEqual({ ok: true, content: { type: "text", body: "from an older client" } });
+  });
+
+  it("a malformed context is a mismatch, never content", async () => {
+    const { alice, bob } = await pair();
+    for (const [i, ctx] of ([{ thread_id: 5, reply_to: null }, { thread_id: T1 }, { thread_id: T1, reply_to: null, extra: 1 }, "T1", null] as unknown[]).entries()) {
+      const { content, epoch } = await bob.mls.encrypt(CONV, { type: "text", body: "x", ctx } as Record<string, unknown>);
+      expect(await alice.mls.decrypt(CONV, { id: `bad${i}`, author: bob.address, device_id: DEV.b, epoch, content, thread_id: T1, reply_to_id: null }), JSON.stringify(ctx)).toEqual({ ok: false, reason: "envelope_mismatch" });
+    }
+  });
+});
+
+describe("changed identity keys hold back the new devices until acknowledged (ENCRYPTION.md §3.3, §4.6)", () => {
+  /** Bob's home node swaps his identity key and publishes a device of its own (`DEV.d`). */
+  function swapKey(env: ReturnType<typeof setup>, address: string) {
+    const fake = MasterSecret.generate();
+    env.masters.set(address, fake);
+    env.node.users.get(address.split("@")[0]!)!.identity = b64urlEncode(fake.identityPublicKey());
+    return env.device(address, DEV.d);
+  }
+
+  it("devices under an unacknowledged changed key are not added to a DM; acknowledging adds them", async () => {
+    const env = setup();
+    const alice = env.device("alice", DEV.a);
+    const bob = env.device("bob", DEV.b);
     await alice.mls.ensureJoined(CONV, { canCreate: true });
     expect(await alice.mls.addMissingDevices(CONV, [alice.address, bob.address])).toEqual([]);
-    // Bob's node swaps his identity key and publishes a device of its own.
-    const fake = MasterSecret.generate();
-    masters.set(bob.address, fake);
-    const ghost = Client.create(bob.address, DEV.d);
-    const rec = node.users.get("bob")!;
-    rec.identity = b64urlEncode(fake.identityPublicKey());
-    rec.devices.set(DEV.d, { pk: b64urlEncode(ghost.devicePublicKey), sig: b64urlEncode(fake.attestDevice(bob.address, DEV.d, ghost.devicePublicKey)) });
-    rec.kps.set(DEV.d, [b64urlEncode(ghost.createKeyPackage())]);
+    expect(alice.mls.roster(CONV)).toContain(`${bob.address}/${DEV.b}`);
+    swapKey(env, bob.address);
     alice.mls.identityChanged(bob.address);
     await alice.mls.addMissingDevices(CONV, [alice.address, bob.address]);
     expect(alice.mls.roster(CONV)).not.toContain(`${bob.address}/${DEV.d}`);
+    expect(alice.mls.changedKeys()).toEqual([bob.address]);
+    await alice.mls.acknowledgeKeyChange(bob.address);
+    await alice.mls.addMissingDevices(CONV, [alice.address, bob.address]);
+    expect(alice.mls.roster(CONV)).toContain(`${bob.address}/${DEV.d}`);
+  });
+
+  it("a leaf under an unacknowledged changed key is a ghost with the reason key_changed", async () => {
+    const env = setup();
+    const alice = env.device("alice", DEV.a);
+    const bob = env.device("bob", DEV.b);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    await bob.mls.ensureJoined(CONV, { canCreate: true });
+    await alice.mls.catchUp(CONV);
+    expect(await alice.mls.ghostCheck(CONV, memberSet(alice, bob))).toEqual([]);
+    const ghost = swapKey(env, bob.address);
+    await ghost.mls.ensureJoined(CONV, { canCreate: false });
+    await alice.mls.catchUp(CONV);
+    alice.mls.identityChanged(bob.address);
+    const ghosts = await alice.mls.ghostCheck(CONV, memberSet(alice, bob));
+    expect(ghosts).toContainEqual({ identity: `${bob.address}/${DEV.d}`, reason: "key_changed" });
+    // Bob's old device is not attested under the new key either.
+    expect(ghosts).toContainEqual({ identity: `${bob.address}/${DEV.b}`, reason: "unattested" });
+    await alice.mls.acknowledgeKeyChange(bob.address);
+    expect(await alice.mls.ghostCheck(CONV, memberSet(alice, bob))).toEqual([{ identity: `${bob.address}/${DEV.b}`, reason: "unattested" }]);
+  });
+
+  it("a rotation with a valid continuity statement is not held back", async () => {
+    const env = setup();
+    const alice = env.device("alice", DEV.a);
+    const bob = env.device("bob", DEV.b);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    await alice.mls.addMissingDevices(CONV, [alice.address, bob.address]);
+    // First contact: pinned without a warning, so the device counts at once.
+    expect(alice.mls.changedKeys()).toEqual([]);
+    expect(await alice.mls.ghostCheck(CONV, memberSet(alice, bob))).toEqual([]);
+  });
+});
+
+describe("encrypt() catches up first and refuses to send otherwise (ENCRYPTION.md §5.2)", () => {
+  it("fails with catch_up_failed when the handshake log cannot be read, and sends on the retry", async () => {
+    const { node, device } = setup();
+    const alice = device("alice", DEV.a);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    await alice.mls.encrypt(CONV, { type: "text", body: "first" });
+    node.failLog = 1;
+    await expect(alice.mls.encrypt(CONV, { type: "text", body: "second" })).rejects.toMatchObject({ name: "MlsError", code: "catch_up_failed" });
+    expect((await alice.mls.encrypt(CONV, { type: "text", body: "second" })).epoch).toBe(alice.mls.epoch(CONV));
+    node.failLog = 1;
+    await expect(alice.mls.encryptHistory(CONV, "{}")).rejects.toMatchObject({ code: "catch_up_failed" });
+  });
+
+  it("checks the roster again after commits it processed: a new ghost stops the message", async () => {
+    const { device } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    const mallory = device("mallory", DEV.c);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    await bob.mls.ensureJoined(CONV, { canCreate: true });
+    await alice.mls.catchUp(CONV);
+    expect(await alice.mls.ghostCheck(CONV, memberSet(alice, bob))).toEqual([]);
+    // A device of a non-member joins while Alice types (the node let it in).
+    await mallory.mls.ensureJoined(CONV, { canCreate: false });
+    await expect(alice.mls.encrypt(CONV, { type: "text", body: "secret" })).rejects.toMatchObject({ name: "MlsError", code: "ghost" });
+    // A retry is refused as well until the violation was shown (a ghost check of the caller) or the caller names it.
+    await expect(alice.mls.encrypt(CONV, { type: "text", body: "secret" })).rejects.toMatchObject({ code: "ghost" });
+    const guard = { members: memberSet(alice, bob), noBots: false };
+    await expect(alice.mls.encrypt(CONV, { type: "text", body: "secret" }, { ...guard, knownGhosts: [] })).rejects.toMatchObject({ code: "ghost" });
+    await expect(alice.mls.encrypt(CONV, { type: "text", body: "after the warning" }, { ...guard, knownGhosts: [`${mallory.address}/${DEV.c}`] })).resolves.toBeTruthy();
+    // Shown by the caller's ghost check: known from then on, also after further commits.
+    expect(await alice.mls.ghostCheck(CONV, memberSet(alice, bob))).toEqual([{ identity: `${mallory.address}/${DEV.c}`, reason: "not_member" }]);
+    await bob.mls.selfUpdate(CONV);
+    await expect(alice.mls.encrypt(CONV, { type: "text", body: "after the warning" })).resolves.toBeTruthy();
   });
 });
 
