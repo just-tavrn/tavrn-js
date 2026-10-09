@@ -1817,23 +1817,32 @@ export class MlsManager {
    * choice with a message the node made up. Uses a throwaway client; nothing is stored or cached.
    */
   async sampleProvesKey(q: string, epoch: number, key: Uint8Array, sample: { author: string; device_id: string; content: string }): Promise<boolean> {
+    return (await this.checkSample(q, epoch, key, sample)) === "proven";
+  }
+
+  /**
+   * {@link sampleProvesKey} with the reason of a failure: `unknown_device` when the sample's author device is neither
+   * attested nor known as retired (nothing can be told from it, for example the recipient's own device from before an
+   * identity reset), `invalid` when the key does not open it or the signature does not verify.
+   */
+  async checkSample(q: string, epoch: number, key: Uint8Array, sample: { author: string; device_id: string; content: string }): Promise<"proven" | "unknown_device" | "invalid"> {
     let deviceKey: Uint8Array | undefined;
     try {
       deviceKey = (await this.verifiedDevices(sample.author))?.get(sample.device_id) ?? (await this.verifiedDevices(sample.author, true))?.get(sample.device_id) ?? this.retiredDevice(sample.author, sample.device_id)?.key;
     } catch {
       deviceKey = undefined;
     }
-    if (!deviceKey) return false;
+    if (!deviceKey) return "unknown_device";
     let probe: Client | null = null;
     try {
       probe = Client.create(sample.author, sample.device_id);
       probe.importEpochKey(q, epoch, key);
       const header = contentHeader(sample.content);
-      if (!header || header.epoch !== epoch) return false;
+      if (!header || header.epoch !== epoch) return "invalid";
       probe.decryptContent(q, sample.author, sample.device_id, sample.content, deviceKey);
-      return true;
+      return "proven";
     } catch {
-      return false;
+      return "invalid";
     } finally {
       probe?.free();
     }

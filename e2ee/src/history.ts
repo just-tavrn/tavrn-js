@@ -226,13 +226,19 @@ export async function epochKeyOpens(key: Uint8Array, conversation: string, sampl
 }
 
 /**
- * Picks the message that checks a key of `epoch`: an encrypted message of that epoch, preferably not written
- * by the sharer (a sharer could plant a message under a forged key and then "prove" that key with it).
+ * The messages that can check a key of `epoch`, in the order they are tried: encrypted messages of that epoch, those
+ * not written by the sharer first (a sharer could plant a message under a forged key and then "prove" that key with
+ * it), the sharer's own last.
  */
-export function pickSample(messages: Pick<Message, "author" | "device_id" | "epoch" | "content" | "encrypted">[], epoch: number, sharer: string): KeySample | null {
+export function pickSamples(messages: Pick<Message, "author" | "device_id" | "epoch" | "content" | "encrypted">[], epoch: number, sharer: string): KeySample[] {
   const usable = messages.filter((m) => m.encrypted && m.epoch === epoch && typeof m.content === "string" && !!m.device_id);
-  const m = usable.find((x) => x.author !== sharer) ?? usable[0];
-  return m ? { author: m.author, device_id: m.device_id!, epoch, content: m.content as string } : null;
+  const ordered = [...usable.filter((x) => x.author !== sharer), ...usable.filter((x) => x.author === sharer)];
+  return ordered.map((m) => ({ author: m.author, device_id: m.device_id!, epoch, content: m.content as string }));
+}
+
+/** The first message of {@link pickSamples}: the one that checks a key of `epoch` when its author device is known. */
+export function pickSample(messages: Pick<Message, "author" | "device_id" | "epoch" | "content" | "encrypted">[], epoch: number, sharer: string): KeySample | null {
+  return pickSamples(messages, epoch, sharer)[0] ?? null;
 }
 
 // ---- Flows ---------------------------------------------------------------------------------------
@@ -527,8 +533,7 @@ export class HistorySync {
       try {
         for (const [epoch, key] of keys) {
           if (known.has(epoch)) continue;
-          const sample = pickSample(await api.messages(id, { epoch, limit: 10 }).catch(() => []), epoch, share.from_user);
-          if (sample && (await epochKeyOpens(key, q, sample)) && (await mls.sampleProvesKey(q, epoch, key, sample))) accepted.push([epoch, key]);
+          if (await this.keyProven(q, key, epoch, pickSamples(await api.messages(id, { epoch, limit: 10 }).catch(() => []), epoch, share.from_user))) accepted.push([epoch, key]);
           else dropped++;
         }
         total += await mls.importHistoryKeys(q, accepted);
@@ -539,6 +544,21 @@ export class HistorySync {
       await api.ack(id, share.id).catch(() => undefined);
     }
     return total;
+  }
+
+  /**
+   * §7b step 4: the key must open a sample of its epoch whose signature verifies with the author's device. A sample
+   * the key does not open, or whose signature fails, drops the key; one whose author device cannot be verified at all
+   * (such as the recipient's own device from before an identity reset, whose attestation went with the old key) tells
+   * nothing and is passed over for the next one. The sharer's own messages come last.
+   */
+  private async keyProven(q: string, key: Uint8Array, epoch: number, samples: KeySample[]): Promise<boolean> {
+    for (const sample of samples) {
+      if (!(await epochKeyOpens(key, q, sample))) return false;
+      const check = await this.deps.mls.checkSample(q, epoch, key, sample);
+      if (check !== "unknown_device") return check === "proven";
+    }
+    return false;
   }
 
   private reject(q: string, shareId: string) {

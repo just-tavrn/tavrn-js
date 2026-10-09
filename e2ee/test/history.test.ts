@@ -19,6 +19,7 @@ import {
   parseHistoryPayload,
   parseHistoryPolicy,
   pickSample,
+  pickSamples,
   sharerDelay,
   ulidFloor,
   epochsSinceReset,
@@ -196,7 +197,7 @@ function setup() {
     messages.push(m);
     return m;
   };
-  return { device, sync, post, messages, shares, pending, api };
+  return { device, sync, post, messages, shares, pending, api, net };
 }
 
 describe("HistorySync", () => {
@@ -478,5 +479,40 @@ describe("after a key reset (ENCRYPTION.md §7b)", () => {
     expect((await withRecords.restorePlan(CONV, { kind: "files", windowStart: 1 })).epochs).toEqual([1, 2]);
     // Nothing is sent while no device of the requester is in the group.
     expect(await s.restore(CONV, "nobody@t.local", { kind: "text", windowStart: null })).toMatchObject({ sent: 0, skipped: true });
+  });
+
+  it("passes over a sample whose author device is gone with the old key and proves the key with the next message", async () => {
+    const { device, sync, post, shares, net } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    await bob.mls.ensureJoined(CONV, { canCreate: false });
+    await alice.mls.catchUp(CONV);
+    // In the same epoch: Bob's greeting (preferred as a sample: not the sharer's) and Alice's message.
+    const greeting = await post(bob, "Hallo von Bob");
+    const forBob = await post(alice, "Für Bob vor dem Reset");
+    expect(greeting.epoch).toBe(forBob.epoch);
+    // Bob resets his key: the old device's attestation is gone, his new device cannot verify the greeting any more.
+    net.node(DOMAIN).users.get("bob")!.devices.delete(DEV.b);
+    const bob2 = device("bob", "01J9ZK3G5M8Q2W4E6R8T0Y2VB2");
+    await bob2.mls.ensureJoined(CONV, { canCreate: false });
+    await alice.mls.catchUp(CONV);
+    expect((await sync(alice).restore(CONV, bob2.address, { kind: "text", windowStart: null })).sent).toBeGreaterThan(0);
+    expect(shares).toHaveLength(1);
+    const log: string[] = [];
+    expect(await sync(bob2, undefined, log).receive(CONV)).toBeGreaterThan(0);
+    expect(log).toEqual([]);
+    expect(await bob2.mls.decrypt(CONV, forBob)).toEqual({ ok: true, content: { type: "text", body: "Für Bob vor dem Reset" } });
+  });
+
+  it("orders the samples of an epoch: other authors first, then the sharer's", () => {
+    const msgs = [
+      { author: "mallory@t.local", device_id: "D1", epoch: 4, content: "x", encrypted: true },
+      { author: "alice@t.local", device_id: "D2", epoch: 4, content: "y", encrypted: true },
+      { author: "bob@t.local", device_id: "D3", epoch: 4, content: "w", encrypted: true },
+      { author: "alice@t.local", device_id: "D2", epoch: 5, content: "z", encrypted: true },
+    ] as Message[];
+    expect(pickSamples(msgs, 4, "mallory@t.local").map((m) => m.content)).toEqual(["y", "w", "x"]);
+    expect(pickSamples(msgs, 6, "x")).toEqual([]);
   });
 });
