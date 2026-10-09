@@ -131,10 +131,12 @@ function setup() {
   const net = new Network();
   const masters = new Map<string, MasterSecret>();
   const messages: Message[] = [];
-  const shares: (HistoryShare & { to: string })[] = [];
+  // Shares as the node keeps them (`v` is absent on shares of older nodes; `boxes` per recipient device).
+  const shares: (Omit<HistoryShare, "v" | "box"> & { v?: number; to: string; boxes?: Record<string, string> })[] = [];
   const pending: { user: string; since: string; key_reset_at?: string | null; min_epoch?: number | null }[] = [];
   let counter = 0;
-  const device = (user: string, deviceId: string): Device => {
+  /** `shareKey`: the device published its share key (default), did not (`none`) or a forged one (`forged`). */
+  const device = (user: string, deviceId: string, opts: { shareKey?: "none" | "forged" } = {}): Device => {
     const address = `${user}@${DOMAIN}`;
     const home = net.node(domainOf(address));
     let master = masters.get(address);
@@ -144,7 +146,13 @@ function setup() {
       home.addUser(user, master);
     }
     const client = Client.create(address, deviceId);
-    home.users.get(user)!.devices.set(deviceId, { pk: b64urlEncode(client.devicePublicKey), sig: b64urlEncode(master.attestDevice(address, deviceId, client.devicePublicKey)) });
+    const share = opts.shareKey === "none" ? null : opts.shareKey === "forged" ? Client.create(address, deviceId).shareKey() : client.shareKey();
+    const forgedKey = opts.shareKey === "forged" ? client.shareKey().publicKey : null;
+    home.users.get(user)!.devices.set(deviceId, {
+      pk: b64urlEncode(client.devicePublicKey),
+      sig: b64urlEncode(master.attestDevice(address, deviceId, client.devicePublicKey)),
+      ...(share ? { spk: b64urlEncode(forgedKey ?? share.publicKey), ssig: b64urlEncode(share.signature) } : {}),
+    });
     home.users.get(user)!.kps.set(deviceId, [b64urlEncode(client.createKeyPackage())]);
     const events: MlsEvent[] = [];
     const m = master;
@@ -169,10 +177,16 @@ function setup() {
   /** The history routes as one user sees them (the node's rules: only the addressed user reads). */
   const api = (dev: Device): HistoryApi => ({
     share: async (_c, req) => {
-      shares.push({ id: `s${++counter}`, to: req.to_user, from_user: dev.address, from_device: dev.deviceId, epoch_from: req.epoch_from, epoch_to: req.epoch_to, ciphertext: req.ciphertext, created_at: "" });
+      const v2 = req.v === 2 ? { v: 2, boxes: req.boxes ?? {} } : {};
+      shares.push({ id: `s${++counter}`, to: req.to_user, from_user: dev.address, from_device: dev.deviceId, epoch_from: req.epoch_from, epoch_to: req.epoch_to, ciphertext: req.ciphertext, created_at: "", ...v2 } as (typeof shares)[number]);
       return {};
     },
-    shares: async () => ({ items: shares.filter((s) => s.to === dev.address) }),
+    // The node's rule (ENCRYPTION.md §7b): format 2 shares only to devices with a box, each with its own box.
+    shares: async () => ({
+      items: shares
+        .filter((s) => s.to === dev.address && (s.v !== 2 || s.boxes?.[dev.deviceId]))
+        .map(({ boxes, ...s }) => (s.v === 2 ? { ...s, box: boxes![dev.deviceId]! } : s)) as HistoryShare[],
+    }),
     ack: async (_c, id) => {
       const i = shares.findIndex((s) => s.id === id && s.to === dev.address);
       if (i >= 0) {
@@ -388,6 +402,106 @@ describe("HistorySync", () => {
     // since_join: nothing to do.
     await sync(alice).checkPending(CONV, { kind: "since_join" });
     expect(shares).toHaveLength(1);
+  });
+});
+
+describe("history shares v2 (ENCRYPTION.md §7b \"Format v2\")", () => {
+  const PHONE = "01J9ZK3G5M8Q2W4E6R8T0Y2VB2";
+
+  /** Alice writes in epoch 0; Bob joins with his laptop and his phone; Carol is another member. */
+  async function scenario(phone: { shareKey?: "none" | "forged" } = {}) {
+    const env = setup();
+    const { device, post } = env;
+    const alice = device("alice", DEV.a);
+    const carol = device("carol", DEV.c);
+    const bob = device("bob", DEV.b);
+    const bobPhone = device("bob", PHONE, phone);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    const old = await post(alice, "vor Bobs Beitritt");
+    await carol.mls.ensureJoined(CONV, { canCreate: false });
+    await bob.mls.ensureJoined(CONV, { canCreate: false });
+    await bobPhone.mls.ensureJoined(CONV, { canCreate: false });
+    for (const d of [alice, carol, bob]) await d.mls.catchUp(CONV);
+    env.pending.push({ user: bob.address, since: new Date().toISOString() });
+    return { ...env, alice, carol, bob, bobPhone, old };
+  }
+
+  it("seals the share to every device of the recipient; each opens only its own box, other members nothing", async () => {
+    const { sync, shares, alice, carol, bob, bobPhone, old } = await scenario();
+    await sync(alice, undefined, [], { shares2: () => true }).checkPending(CONV, { kind: "all" });
+    expect(shares).toHaveLength(1);
+    const share = shares[0]!;
+    expect(share.v).toBe(2);
+    expect(Object.keys(share.boxes!).sort()).toEqual([DEV.b, PHONE].sort());
+    // Carol knows the epoch's content key but cannot read the share, with or without a box of Bob's.
+    expect((await carol.mls.decryptHistory(CONV, share.id, alice.address, DEV.a, share.ciphertext)).ok).toBe(false);
+    expect((await carol.mls.decryptHistory(CONV, share.id, alice.address, DEV.a, share.ciphertext, share.boxes![DEV.b])).ok).toBe(false);
+    // Bob's phone opens its own box (not the laptop's) and reads the keys.
+    expect((await bobPhone.mls.decryptHistory(CONV, share.id, alice.address, DEV.a, share.ciphertext, share.boxes![DEV.b])).ok).toBe(false);
+    const log: string[] = [];
+    expect(await sync(bobPhone, undefined, log).receive(CONV)).toBe(1);
+    // Epochs 1 and 2 have no message to check their keys against (dropped as always); the share itself is accepted.
+    expect(log).not.toContain("share_rejected");
+    expect(await bobPhone.mls.decrypt(CONV, old)).toEqual({ ok: true, content: { type: "text", body: "vor Bobs Beitritt" } });
+    expect(shares).toHaveLength(0);
+    void bob;
+  });
+
+  it("looks the recipient's devices up again when a device in the group is not in the cached lookup", async () => {
+    const { device, post, sync, shares, pending } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    await post(alice, "vorher");
+    await bob.mls.ensureJoined(CONV, { canCreate: false });
+    await alice.mls.catchUp(CONV);
+    await alice.mls.verifiedDevices(bob.address); // cached before the phone existed
+    const phone = device("bob", PHONE);
+    await phone.mls.ensureJoined(CONV, { canCreate: false });
+    await alice.mls.catchUp(CONV);
+    pending.push({ user: bob.address, since: new Date().toISOString() });
+    await sync(alice, undefined, [], { shares2: async () => true }).checkPending(CONV, { kind: "all" });
+    expect(Object.keys(shares[0]!.boxes ?? {}).sort()).toEqual([DEV.b, PHONE].sort());
+  });
+
+  it("falls back to format 1 without the capability or a verified share key on every device of the recipient", async () => {
+    for (const [phone, shares2] of [[{}, false], [{ shareKey: "none" as const }, true], [{ shareKey: "forged" as const }, true]] as const) {
+      const { sync, shares, alice, bob, old } = await scenario(phone);
+      await sync(alice, undefined, [], { shares2: () => shares2 }).checkPending(CONV, { kind: "all" });
+      expect(shares, JSON.stringify(phone)).toHaveLength(1);
+      expect(shares[0]!.v ?? 1).toBe(1);
+      expect(shares[0]!.boxes).toBeUndefined();
+      expect(await sync(bob).receive(CONV)).toBe(1);
+      expect((await bob.mls.decrypt(CONV, old)).ok).toBe(true);
+    }
+  });
+
+  it("rejects a v2 share without its box, with a box that does not open, or whose payload says another version", async () => {
+    const { sync, shares, alice, bob, bobPhone, old } = await scenario();
+    const keys = () => alice.mls.exportEpochKeys(CONV, [0]);
+    const shareKeys = { [DEV.b]: bob.mls.ownShareKey(), [PHONE]: bobPhone.mls.ownShareKey() };
+    // A box of the phone served to the laptop, and a share whose payload claims format 1.
+    const good = await alice.mls.encryptHistory(CONV, encodeHistoryPayload(CONV, bob.address, keys(), 2), shareKeys);
+    shares.push({ id: "w1", to: bob.address, from_user: alice.address, from_device: DEV.a, epoch_from: 0, epoch_to: 0, ciphertext: good.content, created_at: "", v: 2, boxes: { [DEV.b]: good.boxes![PHONE]! } } as never);
+    const v1Payload = await alice.mls.encryptHistory(CONV, encodeHistoryPayload(CONV, bob.address, keys()), shareKeys);
+    shares.push({ id: "w2", to: bob.address, from_user: alice.address, from_device: DEV.a, epoch_from: 0, epoch_to: 0, ciphertext: v1Payload.content, created_at: "", v: 2, boxes: v1Payload.boxes } as never);
+    // A v2 ciphertext presented as format 1 (no box): not the epoch key, rejected.
+    shares.push({ id: "w3", to: bob.address, from_user: alice.address, from_device: DEV.a, epoch_from: 0, epoch_to: 0, ciphertext: good.content, created_at: "" });
+    const log: string[] = [];
+    expect(await sync(bob, undefined, log).receive(CONV)).toBe(0);
+    expect(log.filter((l) => l === "share_rejected")).toHaveLength(3);
+    expect(await bob.mls.decrypt(CONV, old)).toEqual({ ok: false, reason: "missing_key" });
+    // The genuine share with the laptop's own box works.
+    shares.push({ id: "w4", to: bob.address, from_user: alice.address, from_device: DEV.a, epoch_from: 0, epoch_to: 0, ciphertext: good.content, created_at: "", v: 2, boxes: { [DEV.b]: good.boxes![DEV.b]! } } as never);
+    expect(await sync(bob).receive(CONV)).toBe(1);
+  });
+
+  it("restore shares follow the same rule", async () => {
+    const { sync, shares, alice, bob } = await scenario();
+    const result = await sync(alice, undefined, [], { shares2: () => true }).restore(CONV, bob.address, { kind: "text", windowStart: null });
+    expect(result).toMatchObject({ sent: 3, skipped: false });
+    expect(shares[0]).toMatchObject({ v: 2, to: bob.address });
+    expect(await sync(bob).receive(CONV)).toBe(1);
   });
 });
 

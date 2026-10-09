@@ -2,7 +2,7 @@
 // In-memory nodes for the session manager tests: delivery services that follow the node's rules for
 // epochs, the handshake log, Welcomes and backups, keys and KeyPackages of each node's own users, the
 // claim proxy for users of other nodes (FEDERATION.md §3.5, §6).
-import { verifyContinuity, verifyDeviceAttestation, type MasterSecret } from "@tavrn/crypto";
+import { verifyContinuity, verifyDeviceAttestation, verifyDeviceShareKey, type MasterSecret } from "@tavrn/crypto";
 import { TavrnApiError, b64urlDecode, b64urlEncode, type CommitRequest, type TavrnApi, type UserKeys } from "@tavrn/sdk";
 import type { MlsApi, MlsNodeApi } from "../src/mls";
 
@@ -12,9 +12,16 @@ export function problem(status: number, code: string, meta?: unknown) {
 
 export const domainOf = (address: string) => address.slice(address.lastIndexOf("@") + 1);
 
+/** The node's check of a published share key (ENCRYPTION.md §3.1). */
+function checkShare(deviceId: string, devicePk: string, spk: string, ssig: string): { spk: string; ssig: string } {
+  if (!verifyDeviceShareKey(deviceId, b64urlDecode(devicePk), b64urlDecode(spk), b64urlDecode(ssig))) throw problem(400, "e2ee.share_key_invalid");
+  return { spk, ssig };
+}
+
 export interface UserRecord {
   identity: string;
-  devices: Map<string, { pk: string; sig: string }>;
+  /** Device keys with their attestation and, once published, the share key and its device signature (§3.1). */
+  devices: Map<string, { pk: string; sig: string; spk?: string; ssig?: string }>;
   kps: Map<string, string[]>;
   /** Deleted devices with their attestation (ENCRYPTION.md §2.3); `under` = the key it was attested under. */
   retired?: Map<string, { pk: string; sig: string; deletedAt: string; under?: string }>;
@@ -96,11 +103,21 @@ export class FakeNode {
           if (user()) throw problem(409, "e2ee.identity_exists");
           this.users.set(username, { identity: identity_public_key, devices: new Map(), kps: new Map() });
         },
-        putDeviceKey: async (deviceId: string, req: { device_public_key: string; identity_signature: string }) => {
+        putDeviceKey: async (deviceId: string, req: { device_public_key: string; identity_signature: string; share_public_key?: string; share_key_signature?: string }) => {
           const u = user();
           if (!u || !verifyDeviceAttestation(address, deviceId, b64urlDecode(req.device_public_key), b64urlDecode(req.identity_signature), b64urlDecode(u.identity))) throw problem(400, "e2ee.attestation_invalid");
           if (u.devices.has(deviceId)) throw problem(409, "e2ee.device_key_exists");
-          u.devices.set(deviceId, { pk: req.device_public_key, sig: req.identity_signature });
+          const share = req.share_public_key && req.share_key_signature ? checkShare(deviceId, req.device_public_key, req.share_public_key, req.share_key_signature) : {};
+          u.devices.set(deviceId, { pk: req.device_public_key, sig: req.identity_signature, ...share });
+        },
+        // ENCRYPTION.md §3.1: once per device, checked against the device key; the same key again is fine.
+        putShareKey: async (deviceId: string, req: { share_public_key: string; share_key_signature: string }) => {
+          this.shareKeyPuts++;
+          const d = user()?.devices.get(deviceId);
+          if (!d) throw problem(403, "e2ee.device_not_attested");
+          const share = checkShare(deviceId, d.pk, req.share_public_key, req.share_key_signature);
+          if (d.spk && d.spk !== share.spk) throw problem(409, "e2ee.share_key_exists");
+          Object.assign(d, share);
         },
         countKeyPackages: async (deviceId: string) => ({ count: user()?.kps.get(deviceId)?.length ?? 0 }),
         uploadKeyPackages: async (deviceId: string, req: { key_packages: string[] }) => {
@@ -118,6 +135,9 @@ export class FakeNode {
     };
     return api as unknown as Pick<TavrnApi, "keys" | "secretStorage">;
   }
+
+  /** Calls of `PUT …/share-key`. */
+  shareKeyPuts = 0;
 
   /** The node's own users: one KeyPackage per device (single use). */
   claimLocal(address: string): { device_id: string; key_package: string }[] {
@@ -139,7 +159,7 @@ export class FakeNode {
       user: `${username}@${this.domain}`,
       identity_public_key: user.identity,
       identity_reset_at: null,
-      devices: [...user.devices].map(([device_id, d]) => ({ device_id, device_public_key: d.pk, identity_signature: d.sig, created_at: "" })),
+      devices: [...user.devices].map(([device_id, d]) => ({ device_id, device_public_key: d.pk, identity_signature: d.sig, created_at: "", share_public_key: d.spk ?? null, share_key_signature: d.ssig ?? null })),
       retired: [...(user.retired ?? new Map())].map(([device_id, d]) => ({ device_id, device_public_key: d.pk, identity_signature: d.sig, attested_identity_key: d.under ?? user.identity, deleted_at: d.deletedAt })),
       continuity: user.continuity ?? [],
       identity_generation: user.continuity?.length ?? 0,

@@ -9,7 +9,7 @@
  * This module only needs a way to call the node (`request`) and the conversation's encryption ({@link CommandCrypto});
  * it does not know sockets, so it is tested with recorded event frames.
  */
-import { CommandArgsVerifier, qualify, type ArgsCheck, type Decrypted, type EncryptedEnvelope } from "@tavrn/e2ee";
+import { CommandArgsVerifier, qualify, type ArgsCheck, type Decrypted, type EncryptOptions, type EncryptedEnvelope } from "@tavrn/e2ee";
 import { BotError } from "./errors";
 import type { BotLogger } from "./logger";
 import { threadTitle } from "./threads";
@@ -55,7 +55,8 @@ export interface ReplyOptions {
 export interface CommandCrypto {
   hasGroup(q: string): boolean;
   decrypt(q: string, envelope: EncryptedEnvelope): Promise<Decrypted>;
-  encrypt(q: string, content: Record<string, unknown>): Promise<{ content: string; epoch: number }>;
+  /** `opts.ctx`: the signed context of an answer (thread, interaction; ENCRYPTION.md §5.2). */
+  encrypt(q: string, content: Record<string, unknown>, opts?: EncryptOptions): Promise<{ content: string; epoch: number }>;
   /** Joins the conversation's group in the background (the bot was not a member yet). */
   join(q: string): void;
 }
@@ -181,7 +182,7 @@ export class Interaction {
   private async replyNow(content: ReplyContent, opts: ReplyOptions): Promise<InteractionResult> {
     if (this.state === "deferred") return this.followUpNow(content, { ephemeral: opts.ephemeral ?? this.deferredEphemeral, mentions: opts.mentions, threadId: opts.threadId });
     this.requirePending();
-    const body = { type: "reply", ...(await this.seal(content)), ephemeral: !!opts.ephemeral, mentions: mentionList(opts.mentions), ...this.thread(opts) };
+    const body = { type: "reply", ...(await this.seal(content, opts)), ephemeral: !!opts.ephemeral, mentions: mentionList(opts.mentions), ...this.thread(opts) };
     this.state = "replied";
     return this.callback(body);
   }
@@ -239,7 +240,7 @@ export class Interaction {
   }
 
   private async followUpNow(content: ReplyContent, opts: ReplyOptions): Promise<InteractionResult> {
-    const body = { ...(await this.seal(content)), ephemeral: !!opts.ephemeral, mentions: mentionList(opts.mentions), ...this.thread(opts) };
+    const body = { ...(await this.seal(content, opts)), ephemeral: !!opts.ephemeral, mentions: mentionList(opts.mentions), ...this.thread(opts) };
     return this.ctx.request<InteractionResult>("POST", `/interactions/${encodeURIComponent(this.id)}/messages`, body);
   }
 
@@ -247,12 +248,16 @@ export class Interaction {
     return this.ctx.request<InteractionResult>("POST", `/interactions/${encodeURIComponent(this.id)}/callback`, body);
   }
 
-  /** The content as the conversation's mode wants it: a content object, or ciphertext of the bot device (§5.7). */
-  private async seal(content: ReplyContent): Promise<{ content: unknown; epoch?: number; device_id?: string }> {
+  /**
+   * The content as the conversation's mode wants it: a content object, or ciphertext of the bot device (§5.7) whose
+   * signed context names the interaction and the thread the answer goes to (the node's default: the invocation's).
+   */
+  private async seal(content: ReplyContent, opts: ReplyOptions): Promise<{ content: unknown; epoch?: number; device_id?: string }> {
     const object = normalize(content);
     if (!this.encrypted) return { content: object };
     if (!this.ctx.crypto) throw new BotError("not_member", "This bot has no encryption state for this conversation");
-    const sealed = await this.ctx.crypto.encrypt(this.conversation, object);
+    const threadId = opts.threadId ?? this.startedThread ?? this.threadId;
+    const sealed = await this.ctx.crypto.encrypt(this.conversation, object, { ctx: { thread_id: threadId, reply_to: null, interaction: this.id } });
     return { content: sealed.content, epoch: sealed.epoch, device_id: this.ctx.deviceId };
   }
 
