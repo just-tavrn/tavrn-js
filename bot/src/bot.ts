@@ -889,8 +889,18 @@ export class Bot {
     const thread = threadId ? { thread_id: threadId } : {};
     if (await this.isEncrypted(link, q, id)) {
       if (!(await this.join(q, true))) throw new BotError("not_member", `The bot could not join the encryption group of ${q}`);
-      const sealed = await mls.encrypt(q, object);
-      return link.api.conversations.send(id, { content: sealed.content, epoch: sealed.epoch, mentions, reply_to_id: replyTo, ...thread });
+      // Thread and reply are signed inside the content (ENCRYPTION.md §5.2); a stale epoch (§5.3) is caught up once.
+      const post = async () => {
+        const sealed = await mls.encrypt(q, object, { ctx: { thread_id: threadId, reply_to: replyTo } });
+        return link.api.conversations.send(id, { content: sealed.content, epoch: sealed.epoch, mentions, reply_to_id: replyTo, ...thread });
+      };
+      try {
+        return await post();
+      } catch (e) {
+        if (!(e instanceof TavrnApiError && e.code === "mls.epoch_stale")) throw e;
+        await mls.catchUp(q);
+        return post();
+      }
     }
     const signature = mls.signPlaintext(q, { reply_to: replyTo, thread_id: threadId, mentions_everyone: false, mentions, attachments: [] }, object);
     return link.api.conversations.send(id, { content: object, mentions, reply_to_id: replyTo, signature, ...thread });
