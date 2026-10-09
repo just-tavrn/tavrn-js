@@ -173,7 +173,7 @@ export interface TestUser {
 /** Registers a user with password and TOTP (the mandatory second factor) over the API. */
 export async function registerUser(node: TestNode, prefix = "user"): Promise<TestUser> {
   const username = unique(prefix);
-  const pre = await node.api.auth.register({ username, password: `passwort-${username}-xyz`, device_name: "vitest" });
+  const pre = await node.api.auth.register({ username, password: `passwort-${username}-xyz`, device_name: "vitest", date_of_birth: "1990-01-01" });
   const preApi = node.api.withToken(pre.preauth_token!);
   const { secret } = await preApi.auth.totpEnroll();
   const confirmed = (await preApi.auth.totpConfirm(totp(secret))) as unknown as { session: { access_token: string; device_id: string; user: UserPrivate } };

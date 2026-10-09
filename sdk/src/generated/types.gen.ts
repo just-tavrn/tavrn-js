@@ -131,6 +131,13 @@ export type AdminApplicationUpdate = {
     disabled: boolean;
 };
 
+export type AdminDateOfBirthRequest = {
+    /**
+     * `YYYY-MM-DD` between 1900-01-01 and today; null removes it (the user is asked again at the next request).
+     */
+    date_of_birth?: string | null;
+};
+
 export type AdminOverview = {
     blob_bytes: number;
     capabilities: Array<string>;
@@ -195,6 +202,38 @@ export type AdminUser = User & {
     email?: string | null;
     email_verified: boolean;
     room_creation_grant?: number | null;
+};
+
+/**
+ * `age` of `GET /node` and `/.well-known/tavrn` (PROTOCOL.md §5e).
+ */
+export type AgeInfo = {
+    /**
+     * The room and channel gates this node enforces.
+     */
+    gates: Array<string>;
+    /**
+     * Registration refuses younger people (`TAVRN_MINIMUM_AGE`).
+     */
+    minimum_age: number;
+    /**
+     * The date of birth is the user's own statement (no verification).
+     */
+    self_declared: boolean;
+};
+
+/**
+ * `age_status` of `GET /users/me` (the user's own account only).
+ */
+export type AgeStatus = {
+    /**
+     * `self` for a self-declared date of birth, `none` while the status is unknown.
+     */
+    method: string;
+    /**
+     * `adult` (18 or older), `minor` (younger) or `unknown` (no date of birth yet). `unknown` counts as `minor`.
+     */
+    tier: string;
 };
 
 /**
@@ -297,6 +336,13 @@ export type ApplicationBlockRequest = {
      * At most 500 characters.
      */
     reason?: string | null;
+};
+
+export type ApproveHistoryRequest = {
+    /**
+     * The approving device does not hold every key of the requester's window.
+     */
+    partial?: boolean;
 };
 
 export type Attachment = {
@@ -666,6 +712,10 @@ export type Callback = {
      */
     message?: string | null;
     /**
+     * `reply`: a thread of the conversation to answer in; defaults to the interaction's thread.
+     */
+    thread_id?: string | null;
+    /**
      * `reply`, `defer` or `error`.
      */
     type: string;
@@ -702,6 +752,15 @@ export type ChangePasswordRequest = {
 };
 
 export type Channel = {
+    /**
+     * The channel's own age gate: `none` or `adults_only` (PROTOCOL.md §5e).
+     */
+    age_gate?: string;
+    /**
+     * The gate that applies: `adults_only` when the channel's or its room's gate says so. Users below it see the
+     * channel locked: no messages, files, voice or events.
+     */
+    age_gate_effective?: string;
     /**
      * Threads without a message for this many minutes are archived (60–43200, default 10080 = 7 days;
      * PROTOCOL.md §7e).
@@ -743,7 +802,6 @@ export type Channel = {
     position: number;
     room_id: string;
     slowmode_secs: number;
-    sync_with_category: boolean;
     /**
      * Set on default channels (`general`, `voice`) so that clients localize the name; NULL after a rename.
      */
@@ -1311,10 +1369,16 @@ export type CreateCategoryRequest = {
 };
 
 export type CreateChannelRequest = {
+    /**
+     * `none` (default) or `adults_only` (PROTOCOL.md §5e); the room's gate is the minimum. Only an adult can set
+     * `adults_only`.
+     */
+    age_gate?: string | null;
     bitrate_kbps?: number | null;
     category_id?: string | null;
     /**
-     * Can be switched off only for text/announcement/forum. DMs and voice are always encrypted.
+     * Can be switched off only for text/announcement/forum. DMs and voice are always encrypted. Files channels:
+     * chosen here (default `true`) and fixed afterwards (FILES.md §1).
      */
     encrypted?: boolean | null;
     /**
@@ -1343,11 +1407,20 @@ export type CreateConversationRequest = {
 };
 
 export type CreateFolderRequest = {
-    name: string;
+    /**
+     * Encrypted channels: the client-chosen id (a fresh ULID), the entry record and its epoch (FILES.md §8.5).
+     */
+    id?: string | null;
+    /**
+     * Unencrypted channels: the name (refused in encrypted channels).
+     */
+    name?: string | null;
     /**
      * Parent folder (`null` or absent: top level).
      */
     parent_id?: string | null;
+    record?: string | null;
+    record_epoch?: number | null;
 };
 
 export type CreateGrantRequest = {
@@ -1374,6 +1447,13 @@ export type CreateGroupRequest = {
      * GroupInfo (MLSMessage) of epoch 0 with ratchet tree and external public key, base64url.
      */
     group_info: string;
+};
+
+export type CreateHistoryRequest = {
+    /**
+     * A note for the moderators (at most 500 characters).
+     */
+    message?: string | null;
 };
 
 export type CreateHistoryShareRequest = {
@@ -1517,6 +1597,11 @@ export type CreateRoomRequest = {
 };
 
 export type CreateThreadRequest = {
+    /**
+     * The thread id chosen by the client, so the first message's signature can cover `thread_id`: a ULID in its
+     * canonical form (uppercase) whose time is within 10 minutes of the node's clock. Without it the node picks one.
+     */
+    id?: string | null;
     message?: null | CreateMessageRequest;
     /**
      * Text and announcement channels: the channel message the thread starts from.
@@ -1584,7 +1669,17 @@ export type CreatedWebhook = {
 
 export type Crumb = {
     id: string;
+    /**
+     * Empty in encrypted channels (the name is in the folder's record).
+     */
     name: string;
+    /**
+     * Encrypted channels: the folder's record as in [`FileEntry`] (absent elsewhere).
+     */
+    record?: string | null;
+    record_author?: string | null;
+    record_device_id?: string | null;
+    record_epoch?: number | null;
 };
 
 /**
@@ -1657,6 +1752,13 @@ export type DataSummary = {
     };
 };
 
+export type DateOfBirthRequest = {
+    /**
+     * `YYYY-MM-DD`, between 1900-01-01 and today, at least the node's minimum age.
+     */
+    date_of_birth: string;
+};
+
 export type DeclineRequest = {
     /**
      * Also block the sender (on my home node; users of other nodes block there).
@@ -1725,6 +1827,13 @@ export type DelistedEntry = {
      * Null when the whole node is delisted.
      */
     room_id?: string | null;
+};
+
+export type DenyHistoryRequest = {
+    /**
+     * Why (1–500 characters); in the audit log and shown to the requester.
+     */
+    reason?: string | null;
 };
 
 export type DeviceInfo = {
@@ -1878,6 +1987,10 @@ export type DirectoryReport = {
  * A discoverable room (§7.3).
  */
 export type DirectoryRoom = {
+    /**
+     * `none` or `adults_only` (PROTOCOL.md §5e). Gated rooms are listed only to requests with an adult's session.
+     */
+    age_gate: string;
     description: string;
     /**
      * Always null: clients never load images of other nodes.
@@ -1997,6 +2110,10 @@ export type EphemeralReply = {
     device_id?: string | null;
     epoch?: number | null;
     interaction_id: string;
+    /**
+     * The thread the reply belongs to (null in the conversation itself).
+     */
+    thread_id?: string | null;
 };
 
 export type EphemeralRequest = {
@@ -2176,6 +2293,21 @@ export type FileEntry = {
      */
     parent_id?: string | null;
     /**
+     * Encrypted channels: the entry record (content format 1 with name, type and file key, FILES.md §8.4);
+     * `null` in unencrypted channels and when it was written before the requester's history window (§8.7).
+     */
+    record?: string | null;
+    /**
+     * When the record was written.
+     */
+    record_at?: string | null;
+    /**
+     * Address of the user whose device wrote the record.
+     */
+    record_author?: string | null;
+    record_device_id?: string | null;
+    record_epoch?: number | null;
+    /**
      * SHA-256 of the content, base64url (files).
      */
     sha256: string;
@@ -2183,6 +2315,10 @@ export type FileEntry = {
      * Size in bytes (files; 0 for folders).
      */
     size: number;
+    /**
+     * Size of the stored thumbnail (encrypted channels; 0 = none).
+     */
+    thumbnail_size: number;
     updated_at: string;
 };
 
@@ -2219,6 +2355,15 @@ export type FilesInfo = {
      */
     backend: string;
     /**
+     * Members with `manage_channels`: the external store's host (`""` for the node's storage), for the deletion
+     * dialog (FILES.md §9); `null` for everybody else.
+     */
+    backend_host?: string | null;
+    /**
+     * Members with `manage_channels`: the object prefix on the external store (`""` for the node's storage).
+     */
+    backend_prefix?: string | null;
+    /**
      * The requester may configure the storage backend.
      */
     can_configure: boolean;
@@ -2238,6 +2383,10 @@ export type FilesInfo = {
      * External store with encryption (files unreadable outside tavrn).
      */
     encrypt_files: boolean;
+    /**
+     * The channel is end-to-end encrypted (FILES.md §8).
+     */
+    encrypted: boolean;
     executables_allowed: boolean;
     files: number;
     folders: number;
@@ -2264,6 +2413,10 @@ export type FollowUp = {
     ephemeral?: boolean;
     epoch?: number | null;
     mentions?: Array<string>;
+    /**
+     * A thread of the conversation to write in; defaults to the interaction's thread.
+     */
+    thread_id?: string | null;
 };
 
 /**
@@ -2381,6 +2534,11 @@ export type GlobalSettings = {
      */
     push_text?: boolean;
     /**
+     * Web push for new reports (MODERATION.md §1.5) to the room moderators and node admins who receive them (default
+     * on). Left out of the document while on.
+     */
+    reports?: boolean;
+    /**
      * Play a sound for notifications (client side).
      */
     sound?: boolean;
@@ -2493,13 +2651,84 @@ export type HistoryPendingList = {
 
 export type HistoryPendingMember = {
     /**
-     * The membership's `joined_at` (start of the policy window).
+     * After a key reset of the member (ENCRYPTION.md §7b "History after a key reset"): the reset time; null otherwise.
+     */
+    key_reset_at?: string | null;
+    /**
+     * After a key reset: the lowest epoch an automatic share may carry (reset epoch + 1); null without a
+     * pre-reset range.
+     */
+    min_epoch?: number | null;
+    /**
+     * Start of the automatic window: the membership's `joined_at`, after a key reset its `key_reset_at`.
      */
     since: string;
     /**
      * Member address.
      */
     user: string;
+};
+
+export type HistoryRequest = {
+    /**
+     * For members with `restore_history`: the encrypted channels the requester may view (else empty).
+     */
+    channels: Array<HistoryRequestChannel>;
+    created_at: string;
+    decided_at?: string | null;
+    /**
+     * Address of the member who decided.
+     */
+    decided_by?: string | null;
+    display_name: string;
+    id: string;
+    /**
+     * The requester's membership start.
+     */
+    joined_at: string;
+    /**
+     * The requester's current key reset (null once the membership ended or nothing is reset).
+     */
+    key_reset_at?: string | null;
+    message: string;
+    /**
+     * The approving device did not hold every key of the window.
+     */
+    partial: boolean;
+    /**
+     * Reason of a denial.
+     */
+    reason?: string | null;
+    room_id: string;
+    /**
+     * `open`, `approved`, `denied` or `cancelled`.
+     */
+    status: string;
+    /**
+     * Requester address.
+     */
+    user: string;
+};
+
+export type HistoryRequestChannel = {
+    channel_id: string;
+    /**
+     * The channel's kind (`text`, `announcement`, `forum`, `files`).
+     */
+    kind: string;
+    /**
+     * The group epoch at the requester's key reset; keys up to it are the pre-reset range. Null: no group then.
+     */
+    reset_epoch?: number | null;
+    /**
+     * The requester's normal window start in this channel (policy and `read_history` from `joined_at`); null =
+     * everything.
+     */
+    window_start?: string | null;
+};
+
+export type HistoryRequestList = {
+    items: Array<HistoryRequest>;
 };
 
 export type HistoryShare = {
@@ -2759,6 +2988,10 @@ export type InvokeRequest = {
      * The epoch of `args_ciphertext`.
      */
     epoch?: number | null;
+    /**
+     * The thread of the channel the command is invoked in (PROTOCOL.md §7e); answers go there.
+     */
+    thread_id?: string | null;
 };
 
 /**
@@ -3006,6 +3239,20 @@ export type MessageSnapshot = {
     text: string;
 };
 
+export type MineList = {
+    bytes: number;
+    /**
+     * The requester's entries, oldest first, without records.
+     */
+    entries: Array<FileEntry>;
+    /**
+     * Totals of all the requester's entries in the channel (bytes: files and thumbnails).
+     */
+    files: number;
+    folders: number;
+    next_after?: string | null;
+};
+
 export type Mode = 'all' | 'mentions' | 'nothing';
 
 export type ModerateProfileRequest = {
@@ -3147,6 +3394,18 @@ export type MyEntitlements = {
     values: BTreeMap;
 };
 
+export type MyHistoryState = {
+    /**
+     * The membership's key reset (null: none).
+     */
+    key_reset_at?: string | null;
+    request?: null | HistoryRequest;
+    /**
+     * When a restore of the membership was approved (null: none).
+     */
+    restored_at?: string | null;
+};
+
 /**
  * The user's own presence with the chosen status and this device's idle flag.
  */
@@ -3174,6 +3433,10 @@ export type NodeBanRequest = {
 };
 
 export type NodeInfo = {
+    /**
+     * Date of birth and age gates (`age.v1`, PROTOCOL.md §5e).
+     */
+    age: AgeInfo;
     capabilities: Array<string>;
     captcha?: null | CaptchaInfo;
     description: string;
@@ -3190,6 +3453,11 @@ export type NodeInfo = {
      * Legal pages and the notice form (protocol/LEGAL.md).
      */
     legal: LegalInfo;
+    /**
+     * Message retention of this node in days (`TAVRN_RETENTION_DAYS`, PROTOCOL.md §7f; 0 = messages are kept). Rooms
+     * can only shorten it.
+     */
+    message_retention_days: number;
     name: string;
     /**
      * Images up to this size (bytes) load as previews automatically where the user's `auto_preview`
@@ -3204,6 +3472,11 @@ export type NodeInfo = {
      * Voice policies of this node (protocol/VOICE.md).
      */
     voice: VoiceInfo;
+    /**
+     * WebAuthn relying party id (`TAVRN_WEBAUTHN_RP_ID`, default the identity domain): clients pass it
+     * as `rpId` on the assertions they build themselves (PROTOCOL.md §5a.4).
+     */
+    webauthn: WebauthnInfo;
 };
 
 /**
@@ -3993,6 +4266,11 @@ export type PublicKeyInfo = {
 };
 
 export type PublicRoom = {
+    /**
+     * `none` or `adults_only` (PROTOCOL.md §5e). Gated rooms are listed only to adults; invite previews carry the
+     * gate so clients can explain a refused join.
+     */
+    age_gate: string;
     description: string;
     /**
      * Icon paths on this node (see [`Room`]).
@@ -4319,6 +4597,14 @@ export type Record = {
     version: number;
 };
 
+export type RecordList = {
+    /**
+     * Entries with a record inside the requester's history window, oldest record first.
+     */
+    entries: Array<FileEntry>;
+    next_after?: string | null;
+};
+
 export type RecoveryCodes = {
     /**
      * Ten single-use codes, shown once.
@@ -4340,6 +4626,12 @@ export type RegisterRequest = {
      * Captcha token, if the node requires one (see `/node`).
      */
     captcha_token?: string | null;
+    /**
+     * Required (`age.v1`, PROTOCOL.md §5e): the date of birth `YYYY-MM-DD`, between 1900-01-01 and today. Below the
+     * node's minimum age (`GET /node` → `age.minimum_age`) the registration is refused with `age.below_minimum`.
+     * Stored on this node only, never shown to others.
+     */
+    date_of_birth?: string | null;
     device_name?: string | null;
     display_name?: string | null;
     email?: string | null;
@@ -4574,6 +4866,11 @@ export type Role = {
 
 export type Room = {
     /**
+     * `none` or `adults_only` (PROTOCOL.md §5e): users below 18 never find the room in Discover and cannot join it;
+     * every channel of the room is locked for them.
+     */
+    age_gate: string;
+    /**
      * Attachments of the room's channels are deleted after this many days (null = the node's value; a room
      * can only shorten it).
      */
@@ -4590,6 +4887,10 @@ export type Room = {
      * Listed in the directory and on Discover (FEDERATION.md §7.3; public rooms only).
      */
     discoverable: boolean;
+    /**
+     * History restore after a key reset (ENCRYPTION.md §7b): `request` (members may ask, default) or `off`.
+     */
+    history_restore: string;
     /**
      * Path of the icon on this node (the animated variant if there is one), null without icon.
      */
@@ -4611,6 +4912,11 @@ export type Room = {
      * public | invite
      */
     join_mode: string;
+    /**
+     * Messages of the room's channels are deleted after this many days (null = the node's value; a room can only
+     * shorten it; pinned messages and the welcome channel are exempt, PROTOCOL.md §7f).
+     */
+    message_retention_days?: number | null;
     name: string;
     /**
      * "No bots" zone (APPLICATIONS.md §3.5): no bot can be in the room.
@@ -4846,6 +5152,10 @@ export type SealedPayload = {
      * `crypto_box_seal` of the inner JSON `{ "content": {…}, "username"? }` to the inbox key, base64url.
      */
     sealed: string;
+    /**
+     * A thread of the channel to post into (routing metadata outside the box); required in forum channels.
+     */
+    thread_id?: string | null;
 };
 
 /**
@@ -5320,6 +5630,11 @@ export type UpdateCategoryRequest = {
 
 export type UpdateChannelRequest = {
     /**
+     * `none` or `adults_only` (PROTOCOL.md §5e): the channel's own age gate; the room's gate stays the minimum.
+     * Only an adult can switch it on. Audited as `channel.age_gate`.
+     */
+    age_gate?: string | null;
+    /**
      * Threads without a message for this many minutes are archived (60–43200; PROTOCOL.md §7e).
      */
     auto_archive_minutes?: number | null;
@@ -5346,6 +5661,12 @@ export type UpdateChannelRequest = {
     no_bots?: boolean | null;
     position?: number | null;
     slowmode_secs?: number | null;
+    /**
+     * Deprecated and ignored (protocol permissions.md "Changes", 2026-10-09): overrides are layered, a channel
+     * always inherits its category's overrides underneath its own. Accepted for one release, then unknown.
+     *
+     * @deprecated
+     */
     sync_with_category?: boolean | null;
     /**
      * Forum channels: the complete new tag list (at most 20; entries without `id` are new tags). Audit-logged.
@@ -5364,13 +5685,18 @@ export type UpdateConversationRequest = {
 
 export type UpdateEntryRequest = {
     /**
-     * New name.
+     * New name (unencrypted channels).
      */
     name?: string | null;
     /**
      * New folder (`null`: top level; absent: unchanged).
      */
     parent_id?: string | null;
+    /**
+     * Encrypted channels: a new entry record (rename) and its epoch (FILES.md §8.5).
+     */
+    record?: string | null;
+    record_epoch?: number | null;
 };
 
 export type UpdateGrantRequest = {
@@ -5413,6 +5739,10 @@ export type UpdateMeRequest = {
      * Linked accounts (at most 10); replaces the list. The node derives every URL itself.
      */
     links?: Array<ProfileLinkInput> | null;
+    /**
+     * The language of the node's mails: a language tag such as `de` or `pt-BR` (stored lowercase), `""` = English.
+     */
+    locale?: string | null;
 };
 
 export type UpdateMemberRequest = {
@@ -5463,6 +5793,11 @@ export type UpdateRoleRequest = {
 
 export type UpdateRoomRequest = {
     /**
+     * `none` or `adults_only` (PROTOCOL.md §5e): the room's age gate, the minimum of every channel. Only an adult can
+     * switch it on. Audited as `room.age_gate`.
+     */
+    age_gate?: string | null;
+    /**
      * Delete attachments after this many days (1–36500; 0 = use the node's value). Effective is the
      * shortest non-zero of this, the node value and room grants: a room can only shorten.
      */
@@ -5478,7 +5813,17 @@ export type UpdateRoomRequest = {
      * a room to `invite` removes it from the directory.
      */
     discoverable?: boolean | null;
+    /**
+     * History restore after a key reset (ENCRYPTION.md §7b): `request` (members may ask, default) or `off`.
+     * Owner or `manage_room`; never a bot.
+     */
+    history_restore?: string | null;
     join_mode?: string | null;
+    /**
+     * Delete messages after this many days (1–36500; 0 = use the node's value, PROTOCOL.md §7f). Effective is the
+     * shorter non-zero of this and the node's `TAVRN_RETENTION_DAYS`: a room can only shorten.
+     */
+    message_retention_days?: number | null;
     name?: string | null;
     /**
      * "No bots" zone (APPLICATIONS.md §3.5): setting it removes every bot from the room and refuses new
@@ -5712,11 +6057,16 @@ export type UserKeys = {
 };
 
 export type UserPrivate = User & {
+    age_status?: null | AgeStatus;
     /**
      * `GET /users/me` and `PATCH /users/me` of local users: load image previews automatically
      * (`always`, `friends_and_shared` or `never`).
      */
     auto_preview?: string | null;
+    /**
+     * `GET /users/me` of local users only: the own date of birth `YYYY-MM-DD` (null until given; PROTOCOL.md §5e).
+     */
+    date_of_birth?: string | null;
     email?: string | null;
     email_verified: boolean;
     has_identity_key: boolean;
@@ -5724,6 +6074,11 @@ export type UserPrivate = User & {
      * `false` for accounts that sign in only with SSO (no password, APPLICATIONS.md §8.3).
      */
     has_password?: boolean;
+    /**
+     * `GET /users/me` and `PATCH /users/me` of local users: the language of the node's mails (a lowercase language
+     * tag such as `de`; null = English). Clients send theirs when it changes.
+     */
+    locale?: string | null;
     notification_settings?: null | StoredNotificationSettings;
 };
 
@@ -5988,6 +6343,15 @@ export type WebauthnCredential = {
     prf_supported: boolean;
 };
 
+/**
+ * The WebAuthn relying party id (`TAVRN_WEBAUTHN_RP_ID`, default the identity domain). It may be a parent
+ * domain of the web client's host (delegation); clients pass it as `rpId` on assertions they build
+ * themselves (the secret storage PRF, PROTOCOL.md §5a.4).
+ */
+export type WebauthnInfo = {
+    rp_id: string;
+};
+
 export type WebauthnLoginFinish = {
     challenge_id: string;
     device?: null | DeviceProof;
@@ -6106,6 +6470,10 @@ export type WebhookPayload = {
      */
     reply_to?: string | null;
     /**
+     * A thread of the channel to post into; required in forum channels (a post), which show no loose messages.
+     */
+    thread_id?: string | null;
+    /**
      * Name shown for this message instead of the webhook's name.
      */
     username?: string | null;
@@ -6142,6 +6510,10 @@ export type WelcomeList = {
 
 export type WellKnown = {
     /**
+     * Date of birth and age gates (`age.v1`, PROTOCOL.md §5e).
+     */
+    age: AgeInfo;
+    /**
      * API base of the node (`<TAVRN_PUBLIC_URL>/api/v1`); its host may differ from `domain` (delegation).
      */
     api: string;
@@ -6162,6 +6534,10 @@ export type WellKnown = {
      * `<web>/connect`); `TAVRN_WEBAUTHN_ORIGIN`, default the public URL.
      */
     web: string;
+    /**
+     * WebAuthn relying party of this node's passkeys (PROTOCOL.md §5a.4).
+     */
+    webauthn: WebauthnInfo;
     /**
      * WebSocket URL (`wss://<public host>/api/v1/ws`).
      */
@@ -7546,6 +7922,29 @@ export type UpdateUserResponses = {
 };
 
 export type UpdateUserResponse = UpdateUserResponses[keyof UpdateUserResponses];
+
+export type AdminSetDateOfBirthData = {
+    body: AdminDateOfBirthRequest;
+    path: {
+        user_id: string;
+    };
+    query?: never;
+    url: '/api/v1/admin/users/{user_id}/date-of-birth';
+};
+
+export type AdminSetDateOfBirthErrors = {
+    400: ProblemDetails;
+    403: ProblemDetails;
+    404: ProblemDetails;
+};
+
+export type AdminSetDateOfBirthError = AdminSetDateOfBirthErrors[keyof AdminSetDateOfBirthErrors];
+
+export type AdminSetDateOfBirthResponses = {
+    204: void;
+};
+
+export type AdminSetDateOfBirthResponse = AdminSetDateOfBirthResponses[keyof AdminSetDateOfBirthResponses];
 
 export type AdminDeleteUserData = {
     body: DeleteAccountRequest;
@@ -9531,6 +9930,7 @@ export type CreateConversationMessageErrors = {
     400: ProblemDetails;
     403: ProblemDetails;
     404: ProblemDetails;
+    409: ProblemDetails;
     429: ProblemDetails;
 };
 
@@ -9579,6 +9979,7 @@ export type EditConversationMessageErrors = {
     400: ProblemDetails;
     403: ProblemDetails;
     404: ProblemDetails;
+    409: ProblemDetails;
 };
 
 export type EditConversationMessageError = EditConversationMessageErrors[keyof EditConversationMessageErrors];
@@ -10052,6 +10453,7 @@ export type PublicImageData = {
 
 export type PublicImageErrors = {
     404: ProblemDetails;
+    429: ProblemDetails;
 };
 
 export type PublicImageError = PublicImageErrors[keyof PublicImageErrors];
@@ -10738,7 +11140,13 @@ export type DeleteRoom2Data = {
     path: {
         room_id: string;
     };
-    query?: never;
+    query?: {
+        /**
+         * Files channels on an external store that are not end-to-end encrypted: keep the objects on the store
+         * (FILES.md §9; ignored for encrypted channels, whose objects are unreadable without the channel's keys).
+         */
+        keep_external?: boolean;
+    };
     url: '/api/v1/rooms/{room_id}';
 };
 
@@ -11053,7 +11461,13 @@ export type DeleteChannelData = {
         room_id: string;
         channel_id: string;
     };
-    query?: never;
+    query?: {
+        /**
+         * Files channels on an external store that are not end-to-end encrypted: keep the objects on the store
+         * (FILES.md §9; ignored for encrypted channels, whose objects are unreadable without the channel's keys).
+         */
+        keep_external?: boolean;
+    };
     url: '/api/v1/rooms/{room_id}/channels/{channel_id}';
 };
 
@@ -11072,6 +11486,12 @@ export type UpdateChannelData = {
     query?: never;
     url: '/api/v1/rooms/{room_id}/channels/{channel_id}';
 };
+
+export type UpdateChannelErrors = {
+    403: ProblemDetails;
+};
+
+export type UpdateChannelError = UpdateChannelErrors[keyof UpdateChannelErrors];
 
 export type UpdateChannelResponses = {
     200: Channel;
@@ -11110,6 +11530,7 @@ export type List5Errors = {
     400: ProblemDetails;
     403: ProblemDetails;
     404: ProblemDetails;
+    429: ProblemDetails;
 };
 
 export type List5Error = List5Errors[keyof List5Errors];
@@ -11215,6 +11636,77 @@ export type CreateFolderResponses = {
 
 export type CreateFolderResponse = CreateFolderResponses[keyof CreateFolderResponses];
 
+export type MineData = {
+    body?: never;
+    path: {
+        room_id: string;
+        channel_id: string;
+    };
+    query?: {
+        /**
+         * 1–200, default 100.
+         */
+        limit?: number | null;
+        /**
+         * Cursor: the last entry id of the previous page.
+         */
+        after?: string | null;
+    };
+    url: '/api/v1/rooms/{room_id}/channels/{channel_id}/files/mine';
+};
+
+export type MineErrors = {
+    403: ProblemDetails;
+};
+
+export type MineError = MineErrors[keyof MineErrors];
+
+export type MineResponses = {
+    200: MineList;
+};
+
+export type MineResponse = MineResponses[keyof MineResponses];
+
+export type RecordsData = {
+    body?: never;
+    path: {
+        room_id: string;
+        channel_id: string;
+    };
+    query?: {
+        /**
+         * Only records of this epoch.
+         */
+        epoch?: number | null;
+        /**
+         * Only records written at or after this time (RFC 3339).
+         */
+        since?: string | null;
+        /**
+         * Cursor: the last entry id of the previous page.
+         */
+        after?: string | null;
+        /**
+         * 1–200, default 100.
+         */
+        limit?: number | null;
+    };
+    url: '/api/v1/rooms/{room_id}/channels/{channel_id}/files/records';
+};
+
+export type RecordsErrors = {
+    400: ProblemDetails;
+    403: ProblemDetails;
+};
+
+export type RecordsError = RecordsErrors[keyof RecordsErrors];
+
+export type RecordsResponses = {
+    200: RecordList;
+};
+
+export type RecordsResponse = RecordsResponses[keyof RecordsResponses];
+
 export type UploadData = {
     body: Array<number>;
     path: {
@@ -11230,6 +11722,7 @@ export type UploadErrors = {
     403: ProblemDetails;
     409: ProblemDetails;
     413: ProblemDetails;
+    429: ProblemDetails;
     502: ProblemDetails;
 };
 
@@ -11369,6 +11862,57 @@ export type Download2Responses = {
     206: unknown;
 };
 
+export type GetThumbnailData = {
+    body?: never;
+    path: {
+        room_id: string;
+        channel_id: string;
+        entry_id: string;
+    };
+    query?: never;
+    url: '/api/v1/rooms/{room_id}/channels/{channel_id}/files/{entry_id}/thumbnail';
+};
+
+export type GetThumbnailErrors = {
+    400: ProblemDetails;
+    404: ProblemDetails;
+};
+
+export type GetThumbnailError = GetThumbnailErrors[keyof GetThumbnailErrors];
+
+export type GetThumbnailResponses = {
+    /**
+     * Thumbnail ciphertext
+     */
+    200: unknown;
+};
+
+export type PutThumbnailData = {
+    body: Array<number>;
+    path: {
+        room_id: string;
+        channel_id: string;
+        entry_id: string;
+    };
+    query?: never;
+    url: '/api/v1/rooms/{room_id}/channels/{channel_id}/files/{entry_id}/thumbnail';
+};
+
+export type PutThumbnailErrors = {
+    400: ProblemDetails;
+    403: ProblemDetails;
+    404: ProblemDetails;
+    413: ProblemDetails;
+};
+
+export type PutThumbnailError = PutThumbnailErrors[keyof PutThumbnailErrors];
+
+export type PutThumbnailResponses = {
+    204: void;
+};
+
+export type PutThumbnailResponse = PutThumbnailResponses[keyof PutThumbnailResponses];
+
 export type ListMessagesData = {
     body?: never;
     path: {
@@ -11427,6 +11971,7 @@ export type CreateMessageData = {
 export type CreateMessageErrors = {
     400: ProblemDetails;
     403: ProblemDetails;
+    409: ProblemDetails;
     429: ProblemDetails;
 };
 
@@ -11471,6 +12016,12 @@ export type EditMessageData = {
     query?: never;
     url: '/api/v1/rooms/{room_id}/channels/{channel_id}/messages/{message_id}';
 };
+
+export type EditMessageErrors = {
+    409: ProblemDetails;
+};
+
+export type EditMessageError = EditMessageErrors[keyof EditMessageErrors];
 
 export type EditMessageResponses = {
     200: Message;
@@ -12050,6 +12601,146 @@ export type FollowedThreadsResponses = {
 
 export type FollowedThreadsResponse = FollowedThreadsResponses[keyof FollowedThreadsResponses];
 
+export type List7Data = {
+    body?: never;
+    path: {
+        room_id: string;
+    };
+    query?: never;
+    url: '/api/v1/rooms/{room_id}/history-requests';
+};
+
+export type List7Errors = {
+    403: ProblemDetails;
+    404: ProblemDetails;
+};
+
+export type List7Error = List7Errors[keyof List7Errors];
+
+export type List7Responses = {
+    200: HistoryRequestList;
+};
+
+export type List7Response = List7Responses[keyof List7Responses];
+
+export type Create5Data = {
+    body: CreateHistoryRequest;
+    path: {
+        room_id: string;
+    };
+    query?: never;
+    url: '/api/v1/rooms/{room_id}/history-requests';
+};
+
+export type Create5Errors = {
+    400: ProblemDetails;
+    403: ProblemDetails;
+    409: ProblemDetails;
+    429: ProblemDetails;
+};
+
+export type Create5Error = Create5Errors[keyof Create5Errors];
+
+export type Create5Responses = {
+    201: HistoryRequest;
+};
+
+export type Create5Response = Create5Responses[keyof Create5Responses];
+
+export type Mine2Data = {
+    body?: never;
+    path: {
+        room_id: string;
+    };
+    query?: never;
+    url: '/api/v1/rooms/{room_id}/history-requests/mine';
+};
+
+export type Mine2Errors = {
+    403: ProblemDetails;
+    404: ProblemDetails;
+};
+
+export type Mine2Error = Mine2Errors[keyof Mine2Errors];
+
+export type Mine2Responses = {
+    200: MyHistoryState;
+};
+
+export type Mine2Response = Mine2Responses[keyof Mine2Responses];
+
+export type CancelData = {
+    body?: never;
+    path: {
+        room_id: string;
+        request_id: string;
+    };
+    query?: never;
+    url: '/api/v1/rooms/{room_id}/history-requests/{request_id}';
+};
+
+export type CancelErrors = {
+    403: ProblemDetails;
+    404: ProblemDetails;
+};
+
+export type CancelError = CancelErrors[keyof CancelErrors];
+
+export type CancelResponses = {
+    204: void;
+};
+
+export type CancelResponse = CancelResponses[keyof CancelResponses];
+
+export type ApproveData = {
+    body: ApproveHistoryRequest;
+    path: {
+        room_id: string;
+        request_id: string;
+    };
+    query?: never;
+    url: '/api/v1/rooms/{room_id}/history-requests/{request_id}/approve';
+};
+
+export type ApproveErrors = {
+    403: ProblemDetails;
+    404: ProblemDetails;
+    409: ProblemDetails;
+};
+
+export type ApproveError = ApproveErrors[keyof ApproveErrors];
+
+export type ApproveResponses = {
+    200: HistoryRequest;
+};
+
+export type ApproveResponse = ApproveResponses[keyof ApproveResponses];
+
+export type DenyData = {
+    body: DenyHistoryRequest;
+    path: {
+        room_id: string;
+        request_id: string;
+    };
+    query?: never;
+    url: '/api/v1/rooms/{room_id}/history-requests/{request_id}/deny';
+};
+
+export type DenyErrors = {
+    400: ProblemDetails;
+    403: ProblemDetails;
+    404: ProblemDetails;
+    409: ProblemDetails;
+};
+
+export type DenyError = DenyErrors[keyof DenyErrors];
+
+export type DenyResponses = {
+    200: HistoryRequest;
+};
+
+export type DenyResponse = DenyResponses[keyof DenyResponses];
+
 export type DeleteRoomIconData = {
     body?: never;
     path: {
@@ -12413,6 +13104,7 @@ export type PurgeData = {
 
 export type PurgeErrors = {
     403: ProblemDetails;
+    429: ProblemDetails;
 };
 
 export type PurgeError = PurgeErrors[keyof PurgeErrors];
@@ -12431,6 +13123,14 @@ export type SetOverrideData = {
     query?: never;
     url: '/api/v1/rooms/{room_id}/overrides';
 };
+
+export type SetOverrideErrors = {
+    400: ProblemDetails;
+    403: ProblemDetails;
+    404: ProblemDetails;
+};
+
+export type SetOverrideError = SetOverrideErrors[keyof SetOverrideErrors];
 
 export type SetOverrideResponses = {
     200: Array<PermissionOverride>;
@@ -12472,6 +13172,7 @@ export type PutRoomSettingData = {
 export type PutRoomSettingErrors = {
     403: ProblemDetails;
     404: ProblemDetails;
+    429: ProblemDetails;
 };
 
 export type PutRoomSettingError = PutRoomSettingErrors[keyof PutRoomSettingErrors];
@@ -12978,6 +13679,7 @@ export type PublicSoundAudioData = {
 
 export type PublicSoundAudioErrors = {
     404: ProblemDetails;
+    429: ProblemDetails;
     502: ProblemDetails;
 };
 
@@ -13533,6 +14235,27 @@ export type DataSummaryResponses = {
 
 export type DataSummaryResponse = DataSummaryResponses[keyof DataSummaryResponses];
 
+export type SetDateOfBirthData = {
+    body: DateOfBirthRequest;
+    path?: never;
+    query?: never;
+    url: '/api/v1/users/me/date-of-birth';
+};
+
+export type SetDateOfBirthErrors = {
+    400: ProblemDetails;
+    403: ProblemDetails;
+    409: ProblemDetails;
+};
+
+export type SetDateOfBirthError = SetDateOfBirthErrors[keyof SetDateOfBirthErrors];
+
+export type SetDateOfBirthResponses = {
+    200: UserPrivate;
+};
+
+export type SetDateOfBirthResponse = SetDateOfBirthResponses[keyof SetDateOfBirthResponses];
+
 export type DevicesData = {
     body?: never;
     path?: never;
@@ -13782,18 +14505,18 @@ export type ExportMeResponses = {
     200: unknown;
 };
 
-export type List7Data = {
+export type List8Data = {
     body?: never;
     path?: never;
     query?: never;
     url: '/api/v1/users/me/friends';
 };
 
-export type List7Responses = {
+export type List8Responses = {
     200: FriendList;
 };
 
-export type List7Response = List7Responses[keyof List7Responses];
+export type List8Response = List8Responses[keyof List8Responses];
 
 export type SendRequestData = {
     body: FriendRequestBody;
@@ -13999,24 +14722,24 @@ export type Rotate2Responses = {
 
 export type Rotate2Response = Rotate2Responses[keyof Rotate2Responses];
 
-export type List8Data = {
+export type List9Data = {
     body?: never;
     path?: never;
     query?: never;
     url: '/api/v1/users/me/invites';
 };
 
-export type List8Errors = {
+export type List9Errors = {
     403: ProblemDetails;
 };
 
-export type List8Error = List8Errors[keyof List8Errors];
+export type List9Error = List9Errors[keyof List9Errors];
 
-export type List8Responses = {
+export type List9Responses = {
     200: UserInviteList;
 };
 
-export type List8Response = List8Responses[keyof List8Responses];
+export type List9Response = List9Responses[keyof List9Responses];
 
 export type DismissData = {
     body?: never;
@@ -14167,24 +14890,24 @@ export type PutMineResponses = {
 
 export type PutMineResponse = PutMineResponses[keyof PutMineResponses];
 
-export type List9Data = {
+export type List10Data = {
     body?: never;
     path?: never;
     query?: never;
     url: '/api/v1/users/me/push-subscriptions';
 };
 
-export type List9Errors = {
+export type List10Errors = {
     403: ProblemDetails;
 };
 
-export type List9Error = List9Errors[keyof List9Errors];
+export type List10Error = List10Errors[keyof List10Errors];
 
-export type List9Responses = {
+export type List10Responses = {
     200: Array<PushRegistration>;
 };
 
-export type List9Response = List9Responses[keyof List9Responses];
+export type List10Response = List10Responses[keyof List10Responses];
 
 export type Register2Data = {
     body: PushSubscriptionRequest;
@@ -14254,24 +14977,24 @@ export type Remove2Responses = {
 
 export type Remove2Response = Remove2Responses[keyof Remove2Responses];
 
-export type List10Data = {
+export type List11Data = {
     body?: never;
     path?: never;
     query?: never;
     url: '/api/v1/users/me/secret-storage';
 };
 
-export type List10Errors = {
+export type List11Errors = {
     401: ProblemDetails;
 };
 
-export type List10Error = List10Errors[keyof List10Errors];
+export type List11Error = List11Errors[keyof List11Errors];
 
-export type List10Responses = {
+export type List11Responses = {
     200: SecretStorageList;
 };
 
-export type List10Response = List10Responses[keyof List10Responses];
+export type List11Response = List11Responses[keyof List11Responses];
 
 export type DeletePasskeyData = {
     body?: never;
@@ -14591,7 +15314,7 @@ export type PutSceneResponses = {
 
 export type PutSceneResponse = PutSceneResponses[keyof PutSceneResponses];
 
-export type GetThumbnailData = {
+export type GetThumbnail2Data = {
     body?: never;
     path: {
         scene_id: string;
@@ -14600,20 +15323,20 @@ export type GetThumbnailData = {
     url: '/api/v1/users/me/whiteboards/{scene_id}/thumbnail';
 };
 
-export type GetThumbnailErrors = {
+export type GetThumbnail2Errors = {
     404: ProblemDetails;
 };
 
-export type GetThumbnailError = GetThumbnailErrors[keyof GetThumbnailErrors];
+export type GetThumbnail2Error = GetThumbnail2Errors[keyof GetThumbnail2Errors];
 
-export type GetThumbnailResponses = {
+export type GetThumbnail2Responses = {
     /**
      * Encrypted thumbnail (application/octet-stream)
      */
     200: unknown;
 };
 
-export type PutThumbnailData = {
+export type PutThumbnail2Data = {
     body: Array<number>;
     path: {
         scene_id: string;
@@ -14622,19 +15345,19 @@ export type PutThumbnailData = {
     url: '/api/v1/users/me/whiteboards/{scene_id}/thumbnail';
 };
 
-export type PutThumbnailErrors = {
+export type PutThumbnail2Errors = {
     400: ProblemDetails;
     404: ProblemDetails;
     413: ProblemDetails;
 };
 
-export type PutThumbnailError = PutThumbnailErrors[keyof PutThumbnailErrors];
+export type PutThumbnail2Error = PutThumbnail2Errors[keyof PutThumbnail2Errors];
 
-export type PutThumbnailResponses = {
+export type PutThumbnail2Responses = {
     204: void;
 };
 
-export type PutThumbnailResponse = PutThumbnailResponses[keyof PutThumbnailResponses];
+export type PutThumbnail2Response = PutThumbnail2Responses[keyof PutThumbnail2Responses];
 
 export type GetProfileData = {
     body?: never;

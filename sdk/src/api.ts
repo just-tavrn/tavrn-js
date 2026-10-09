@@ -184,8 +184,9 @@ import type { CreatedWebhook, CreateWebhookRequest, PutSubscriptionRequest, Subs
 import type { DeviceNonce, DeviceProof, PendingRemovalList, ReauthRequest, ReauthToken, RetiredDeviceRequest } from "./generated/types.gen";
 import type { GroupMapDocument, GroupMapUpdate, LogoutResponse, OidcIdentity, OidcStartRequest, OidcStartResponse, OidcTokenResponse } from "./generated/types.gen";
 import type { CreateHistoryShareRequest, HistoryPendingList, HistoryShareCreated, HistoryShareList } from "./generated/types.gen";
+import type { ApproveHistoryRequest, HistoryRequest, HistoryRequestList, MyHistoryState } from "./generated/types.gen";
 import type { InboxKey, PublishInboxKeyRequest } from "./generated/types.gen";
-import type { BackendInfo, BackendRequest, BackendTest, DeleteResult, FileEntry, FileEntryDetail, FileList, FilesInfo, UpdateEntryRequest } from "./generated/types.gen";
+import type { BackendInfo, BackendRequest, BackendTest, DeleteResult, FileEntry, FileEntryDetail, FileList, FilesInfo, MineList, RecordList, UpdateEntryRequest } from "./generated/types.gen";
 import type { AdminApplication, AdminApplicationUpdate, ApplicationBlock, ApplicationBlockRequest, InstallIndexEntry, InstallRequest, Installation, PublicApplication } from "./generated/types.gen";
 import type { PeerResolution } from "./generated/types.gen";
 import type { PushRegistration, PushSubscriptionRequest, VapidInfo } from "./generated/types.gen";
@@ -231,8 +232,11 @@ export type NotificationMode = "all" | "mentions" | "nothing";
  * are the ids on the node hosting them.
  */
 export interface NotificationSettings {
-  /** `push_text`: web pushes of unencrypted conversations carry a text preview (PROTOCOL.md §6d; default off). */
-  global: { mode: NotificationMode; sound: boolean; browser: boolean; push_text?: boolean };
+  /**
+   * `push_text`: web pushes of unencrypted conversations carry a text preview (PROTOCOL.md §6d; default off).
+   * `reports`: web pushes of new reports for moderators and node admins (PROTOCOL.md §6c; default on, absent = on).
+   */
+  global: { mode: NotificationMode; sound: boolean; browser: boolean; push_text?: boolean; reports?: boolean };
   rooms: Record<string, { mode?: NotificationMode | null; muted_until?: string | null; suppress_everyone?: boolean | null }>;
   channels: Record<string, { mode?: NotificationMode | null; muted_until?: string | null }>;
 }
@@ -625,6 +629,9 @@ export class TavrnApi {
     users: (query?: { q?: string; limit?: number; after?: string }) => this.get<AdminUser[]>("/admin/users", query),
     updateUser: (userId: string, req: UpdateUserRequest) => this.patch<AdminUser>(`/admin/users/${userId}`, req),
     purgeUser: (userId: string, req: PurgeUserRequest) => this.post<PurgeUserResponse>(`/admin/users/${userId}/purge`, req),
+    /** Corrects a user's date of birth on request; `null` removes it (the user is asked again). PROTOCOL.md §5e. */
+    setDateOfBirth: (userId: string, dateOfBirth: string | null) =>
+      this.put<void>(`/admin/users/${encodeURIComponent(userId)}/date-of-birth`, { date_of_birth: dateOfBirth }),
     invites: () => this.get<AccountInvite[]>("/admin/invites"),
     createInvite: (req: CreateAccountInviteRequest) => this.post<AccountInvite>("/admin/invites", req),
     deleteInvite: (code: string) => this.del(`/admin/invites/${encodeURIComponent(code)}`),
@@ -763,6 +770,23 @@ export class TavrnApi {
     pending: (conversationId: string) => this.get<HistoryPendingList>(`/conversations/${conversationId}/history-pending`),
   };
 
+  /**
+   * History restore after a key reset (ENCRYPTION.md §7b "History after a key reset"): a member whose key was reset
+   * asks for its history; members with `restore_history` approve (then share the keys from their device) or deny.
+   */
+  historyRequests = {
+    create: (roomId: string, message?: string) => this.post<HistoryRequest>(`/rooms/${roomId}/history-requests`, message ? { message } : {}),
+    /** The requester's own state in the room: its key reset, an approved restore and its latest request. */
+    mine: (roomId: string) => this.get<MyHistoryState>(`/rooms/${roomId}/history-requests/mine`),
+    cancel: (roomId: string, requestId: string) => this.del(`/rooms/${roomId}/history-requests/${encodeURIComponent(requestId)}`),
+    /** Open requests with the channels each would restore (`restore_history`). */
+    list: (roomId: string) => this.get<HistoryRequestList>(`/rooms/${roomId}/history-requests`),
+    approve: (roomId: string, requestId: string, req: ApproveHistoryRequest = {}) =>
+      this.post<HistoryRequest>(`/rooms/${roomId}/history-requests/${encodeURIComponent(requestId)}/approve`, req),
+    deny: (roomId: string, requestId: string, reason: string) =>
+      this.post<HistoryRequest>(`/rooms/${roomId}/history-requests/${encodeURIComponent(requestId)}/deny`, { reason }),
+  };
+
   /** Encrypted history backups on the home node (ENCRYPTION.md §7). */
   backups = {
     list: () => this.get<BackupList>("/users/me/backups"),
@@ -814,7 +838,11 @@ export class TavrnApi {
    * send them with `thread_id` (`conversations.send`, `messages.create`) and page them with `threads.messages`.
    */
   threads = {
-    /** Start a thread (from `root_message_id` or standalone) or, in a forum channel, a post with its first `message`. */
+    /**
+     * Start a thread (from `root_message_id` or standalone) or, in a forum channel, a post with its first `message`.
+     * With the node capability `threads.client_ids` pass `id` ({@link newUlid}) and sign the first message with it as
+     * `thread_id` (`400 thread.id_invalid`, `409 thread.id_taken`).
+     */
     create: (roomId: string, channelId: string, req: CreateThreadRequest) => this.post<Thread>(`/rooms/${roomId}/channels/${channelId}/threads`, req),
     list: (roomId: string, channelId: string, query?: ThreadListQuery) => this.get<ThreadList>(`/rooms/${roomId}/channels/${channelId}/threads`, query as Query),
     get: (threadId: string) => this.get<Thread>(`/threads/${encodeURIComponent(threadId)}`),
@@ -947,6 +975,11 @@ export class TavrnApi {
   users = {
     me: () => this.get<UserPrivate>("/users/me"),
     updateMe: (req: UpdateMeRequest) => this.patch<UserPrivate>("/users/me", req),
+    /**
+     * Adds the date of birth (`YYYY-MM-DD`) to an account that has none yet (PROTOCOL.md §5e): the answer to
+     * `age.status_required`. Set once; `age.date_of_birth_set` afterwards, `age.below_minimum` below the node's minimum.
+     */
+    setDateOfBirth: (dateOfBirth: string) => this.put<UserPrivate>("/users/me/date-of-birth", { date_of_birth: dateOfBirth }),
     devices: () => this.get<DeviceInfo[]>("/users/me/devices"),
     deleteDevice: (deviceId: string) => this.del(`/users/me/devices/${deviceId}`),
     /** Attests a deleted own device again as retired, from its MLS leaf key (ENCRYPTION.md §5.2). */
@@ -976,7 +1009,11 @@ export class TavrnApi {
     vapid: () => this.get<VapidInfo>("/push/vapid"),
     /** The account's registered subscriptions (`current_device` marks this device's). */
     subscriptions: () => this.get<PushRegistration[]>("/users/me/push-subscriptions"),
-    /** Registers the browser's `PushSubscription.toJSON()` for this device (new, or taken over by endpoint). */
+    /**
+     * Registers the browser's `PushSubscription.toJSON()` for this device (new, or the account's one with the same
+     * endpoint). An endpoint of another account's live subscription is refused with `409 push.endpoint_taken`: the
+     * client then unsubscribes the browser and subscribes again (a new endpoint).
+     */
     subscribe: (subscription: PushSubscriptionRequest) => this.put<PushRegistration>("/users/me/push-subscriptions", subscription),
     unsubscribe: (subscriptionId: string) => this.del(`/users/me/push-subscriptions/${encodeURIComponent(subscriptionId)}`),
     /** Queues a test push to every subscription of the account (5 per 10 minutes). */
@@ -1090,7 +1127,8 @@ export class TavrnApi {
     create: (req: CreateRoomRequest) => this.post<RoomDetail>("/rooms", req),
     get: (roomId: string) => this.get<RoomDetail>(`/rooms/${roomId}`),
     update: (roomId: string, req: UpdateRoomRequest) => this.patch<RoomDetail>(`/rooms/${roomId}`, req),
-    delete: (roomId: string) => this.del(`/rooms/${roomId}`),
+    /** Deletes the room; `keepExternal` keeps the objects of its unencrypted external files channels (FILES.md §9). */
+    delete: (roomId: string, opts: { keepExternal?: boolean } = {}) => this.del(`/rooms/${roomId}${opts.keepExternal ? "?keep_external=true" : ""}`),
     join: (roomId: string, req: JoinRequest = {}) => this.post<RoomDetail>(`/rooms/${roomId}/join`, req),
     leave: (roomId: string) => this.post<void>(`/rooms/${roomId}/leave`),
     /** Room icon (`manage_room`; PNG, JPEG, GIF, WebP, MP4, WebM; converted by the node). */
@@ -1155,11 +1193,23 @@ export class TavrnApi {
   channels = {
     create: (roomId: string, req: CreateChannelRequest) => this.post<Channel>(`/rooms/${roomId}/channels`, req),
     update: (roomId: string, channelId: string, req: UpdateChannelRequest) => this.patch<Channel>(`/rooms/${roomId}/channels/${channelId}`, req),
-    delete: (roomId: string, channelId: string) => this.del(`/rooms/${roomId}/channels/${channelId}`),
+    /** Deletes the channel; `keepExternal` keeps the objects of an unencrypted external files channel (FILES.md §9). */
+    delete: (roomId: string, channelId: string, opts: { keepExternal?: boolean } = {}) =>
+      this.del(`/rooms/${roomId}/channels/${channelId}${opts.keepExternal ? "?keep_external=true" : ""}`),
     createCategory: (roomId: string, req: CreateCategoryRequest) => this.post<Category>(`/rooms/${roomId}/categories`, req),
     updateCategory: (roomId: string, categoryId: string, req: UpdateCategoryRequest) => this.patch<Category>(`/rooms/${roomId}/categories/${categoryId}`, req),
     deleteCategory: (roomId: string, categoryId: string) => this.del(`/rooms/${roomId}/categories/${categoryId}`),
+    /** Set an override (channel-scoped bits only, `permissions.not_channel_scoped`); allow = deny = "0" removes it. */
     setOverride: (roomId: string, req: SetOverrideRequest) => this.put<PermissionOverride[]>(`/rooms/${roomId}/overrides`, req),
+    /**
+     * Removes these overrides (allow, deny and the upload categories set to nothing), one request each: "Reset to
+     * category" of a channel clears the channel's own overrides, so the category's apply (layered overrides).
+     */
+    clearOverrides: async (roomId: string, overrides: readonly Pick<PermissionOverride, "target_type" | "target_id" | "subject_type" | "subject_id">[]) => {
+      for (const o of overrides) {
+        await this.channels.setOverride(roomId, { target_type: o.target_type, target_id: o.target_id, subject_type: o.subject_type, subject_id: o.subject_id, allow: "0", deny: "0", upload_allow: [], upload_deny: [] });
+      }
+    },
   };
 
   roles = {
@@ -1204,7 +1254,9 @@ export class TavrnApi {
 
   /**
    * Files channels (design note 4.13 item 9, protocol/FILES.md): folders and files of a channel of kind `files`.
-   * Not end-to-end encrypted; uploads are streamed raw with the name in `Tavrn-File-Name`.
+   * Unencrypted channels: uploads are streamed raw with the name in `Tavrn-File-Name`. End-to-end encrypted channels
+   * (FILES.md §8): the client chooses the entry id, uploads ciphertext and sends the entry record instead of a name
+   * (`createFolderEncrypted`, `uploadEncrypted`, `update` with `record`); `@tavrn/e2ee` (`files.ts`) makes both.
    */
   files = {
     /** A folder's entries (`parent` absent: top level) or, with `q`, a name search across the channel. */
@@ -1221,6 +1273,48 @@ export class TavrnApi {
       if (opts.rename) headers["Tavrn-Conflict"] = "rename";
       const url = `${this.baseUrl}/api/v1/rooms/${roomId}/channels/${channelId}/files/upload`;
       return this.sendBlob<FileEntry>(url, file, headers, opts.onProgress, opts.signal);
+    },
+    /** Encrypted channels: a folder with a client-chosen id and its entry record. */
+    createFolderEncrypted: (roomId: string, channelId: string, req: { id: string; record: string; record_epoch: number; parent_id: string | null }) =>
+      this.post<FileEntry>(`/rooms/${roomId}/channels/${channelId}/files/folders`, req),
+    /** Encrypted channels: the ciphertext of a file with its client-chosen id, record and declared upload category. */
+    uploadEncrypted: (
+      roomId: string,
+      channelId: string,
+      ciphertext: Blob,
+      req: { id: string; record: string; recordEpoch: number; category: string; parentId?: string | null; onProgress?: (fraction: number) => void; signal?: AbortSignal },
+    ): Promise<FileEntry> => {
+      const headers: Record<string, string> = {
+        "Content-Type": "application/octet-stream",
+        "Tavrn-Entry-Id": req.id,
+        "Tavrn-Record": req.record,
+        "Tavrn-Record-Epoch": String(req.recordEpoch),
+        "Tavrn-Upload-Category": req.category,
+        ...this.authHeaders(),
+      };
+      if (req.parentId) headers["Tavrn-Parent"] = req.parentId;
+      const url = `${this.baseUrl}/api/v1/rooms/${roomId}/channels/${channelId}/files/upload`;
+      return this.sendBlob<FileEntry>(url, ciphertext, headers, req.onProgress, req.signal);
+    },
+    /** The raw response of a download (encrypted channels: the ciphertext as a stream), optionally of a byte range. */
+    downloadResponse: async (roomId: string, channelId: string, entryId: string, range?: { start: number; end: number }): Promise<Response> => {
+      const headers: Record<string, string> = range ? { Range: `bytes=${range.start}-${range.end}` } : {};
+      return (await this.binary("GET", `/rooms/${roomId}/channels/${channelId}/files/${entryId}/download`, { headers })) as Response;
+    },
+    /** The requester's own entries (no names or records) with totals, for deleting without keys (FILES.md §8.8). */
+    mine: (roomId: string, channelId: string, query: { limit?: number; after?: string | null } = {}) =>
+      this.get<MineList>(`/rooms/${roomId}/channels/${channelId}/files/mine`, { limit: query.limit, after: query.after ?? undefined }),
+    /** Encrypted channels: entries with records in the order they were written (history key checks, search sync). */
+    records: (roomId: string, channelId: string, query: { epoch?: number; since?: string; after?: string | null; limit?: number } = {}) =>
+      this.get<RecordList>(`/rooms/${roomId}/channels/${channelId}/files/records`, { epoch: query.epoch, since: query.since, after: query.after ?? undefined, limit: query.limit }),
+    /** Encrypted channels: stores the thumbnail ciphertext of a file (at most 1 MiB). */
+    putThumbnail: async (roomId: string, channelId: string, entryId: string, ciphertext: Uint8Array): Promise<void> => {
+      await this.binary("PUT", `/rooms/${roomId}/channels/${channelId}/files/${entryId}/thumbnail`, { body: ciphertext, headers: { "Content-Type": "application/octet-stream" } });
+    },
+    /** Encrypted channels: the thumbnail ciphertext, or null when the file has none. */
+    thumbnail: async (roomId: string, channelId: string, entryId: string): Promise<Uint8Array | null> => {
+      const resp = await this.binary("GET", `/rooms/${roomId}/channels/${channelId}/files/${entryId}/thumbnail`, { allow404: true });
+      return resp ? new Uint8Array(await resp.arrayBuffer()) : null;
     },
     /** The file's content (with the token); ranges are for streaming players and are not needed here. */
     download: async (roomId: string, channelId: string, entryId: string): Promise<Blob> => {

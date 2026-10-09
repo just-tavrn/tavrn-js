@@ -12,6 +12,7 @@
 import { CommandArgsVerifier, qualify, type ArgsCheck, type Decrypted, type EncryptedEnvelope } from "@tavrn/e2ee";
 import { BotError } from "./errors";
 import type { BotLogger } from "./logger";
+import { threadTitle } from "./threads";
 
 /** `data` of the `command.invoke` event (§5.6). */
 export interface CommandInvokeData {
@@ -21,6 +22,8 @@ export interface CommandInvokeData {
   conversation_id: string;
   room_id: string | null;
   channel_id: string | null;
+  /** The thread the command was invoked in (PROTOCOL.md §7e); absent from older nodes. */
+  thread_id?: string | null;
   encrypted: boolean;
   user: string;
   user_id: string;
@@ -41,6 +44,11 @@ export interface ReplyOptions {
   ephemeral?: boolean;
   /** Addresses mentioned in the reply. */
   mentions?: string[];
+  /**
+   * Answer in this thread of the conversation (PROTOCOL.md §7e). By default the node answers in the thread the
+   * command was invoked in, or in the one {@link Interaction.replyInThread} started.
+   */
+  threadId?: string;
 }
 
 /** The encryption of the conversations the bot is a member of (the bot's MLS session manager). */
@@ -98,6 +106,8 @@ export class Interaction {
   readonly conversation: string;
   readonly roomId: string | null;
   readonly channelId: string | null;
+  /** The thread the command was invoked in (PROTOCOL.md §7e), null outside threads. Answers go there. */
+  readonly threadId: string | null;
   readonly encrypted: boolean;
   /** The arguments (decrypted and checked in encrypted conversations). */
   readonly args: Record<string, unknown>;
@@ -108,6 +118,8 @@ export class Interaction {
   readonly expiresAt: string;
   private state: "pending" | "deferred" | "replied" | "failed" = "pending";
   private deferredEphemeral = false;
+  /** The thread {@link replyInThread} started: later answers go there too. */
+  private startedThread: string | null = null;
   private chain: Promise<unknown> = Promise.resolve();
 
   constructor(
@@ -124,6 +136,7 @@ export class Interaction {
     this.conversation = qualify(ctx.node, data.conversation_id);
     this.roomId = data.room_id ?? null;
     this.channelId = data.channel_id ?? null;
+    this.threadId = data.thread_id ?? null;
     this.encrypted = !!data.encrypted;
     this.args = args;
     this.locale = data.locale ?? null;
@@ -138,13 +151,45 @@ export class Interaction {
 
   /** Answers with a message (stored, `message.create`) or, with `ephemeral`, a reply only the invoker sees. */
   reply(content: ReplyContent, opts: ReplyOptions = {}): Promise<InteractionResult> {
+    return this.serial(() => this.replyNow(content, opts));
+  }
+
+  /**
+   * Answers in a thread: the one the command was invoked in, else a new thread of the channel (`title` defaults to
+   * the start of the text, encrypted in encrypted channels); later follow-ups go there too. Room channels only.
+   */
+  replyInThread(content: ReplyContent, opts: ReplyOptions & { title?: string } = {}): Promise<InteractionResult> {
     return this.serial(async () => {
-      if (this.state === "deferred") return this.followUpNow(content, { ephemeral: opts.ephemeral ?? this.deferredEphemeral, mentions: opts.mentions });
-      this.requirePending();
-      const body = { type: "reply", ...(await this.seal(content)), ephemeral: !!opts.ephemeral, mentions: mentionList(opts.mentions) };
-      this.state = "replied";
-      return this.callback(body);
+      const { title, ...rest } = opts;
+      if (this.threadId || this.startedThread || rest.threadId) return this.replyNow(content, rest);
+      if (!this.roomId || !this.channelId) throw new BotError("not_member", "Threads exist in room channels only");
+      const object = normalize(content);
+      const text = threadTitle(title ?? (typeof object.body === "string" ? object.body : ""));
+      let sealedTitle: Record<string, unknown> = { title: text };
+      if (this.encrypted) {
+        if (!this.ctx.crypto) throw new BotError("not_member", "This bot has no encryption state for this conversation");
+        const sealed = await this.ctx.crypto.encrypt(this.conversation, { type: "thread.title", body: text });
+        sealedTitle = { title: sealed.content, title_epoch: sealed.epoch };
+      }
+      const path = `/rooms/${encodeURIComponent(this.roomId)}/channels/${encodeURIComponent(this.channelId)}/threads`;
+      const thread = await this.ctx.request<{ id: string }>("POST", path, sealedTitle);
+      this.startedThread = thread.id;
+      return this.replyNow(object, rest);
     });
+  }
+
+  private async replyNow(content: ReplyContent, opts: ReplyOptions): Promise<InteractionResult> {
+    if (this.state === "deferred") return this.followUpNow(content, { ephemeral: opts.ephemeral ?? this.deferredEphemeral, mentions: opts.mentions, threadId: opts.threadId });
+    this.requirePending();
+    const body = { type: "reply", ...(await this.seal(content)), ephemeral: !!opts.ephemeral, mentions: mentionList(opts.mentions), ...this.thread(opts) };
+    this.state = "replied";
+    return this.callback(body);
+  }
+
+  /** `thread_id` of an answer: the one asked for, else the thread {@link replyInThread} started (else the node's default). */
+  private thread(opts: ReplyOptions): { thread_id?: string } {
+    const id = opts.threadId ?? this.startedThread;
+    return id ? { thread_id: id } : {};
   }
 
   /** Shorthand for `reply(content, { ephemeral: true })`. */
@@ -194,7 +239,7 @@ export class Interaction {
   }
 
   private async followUpNow(content: ReplyContent, opts: ReplyOptions): Promise<InteractionResult> {
-    const body = { ...(await this.seal(content)), ephemeral: !!opts.ephemeral, mentions: mentionList(opts.mentions) };
+    const body = { ...(await this.seal(content)), ephemeral: !!opts.ephemeral, mentions: mentionList(opts.mentions), ...this.thread(opts) };
     return this.ctx.request<InteractionResult>("POST", `/interactions/${encodeURIComponent(this.id)}/messages`, body);
   }
 

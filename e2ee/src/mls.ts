@@ -211,6 +211,41 @@ export interface MlsDeps {
   backupDelayMs?: number;
   /** Clock (tests). */
   now?(): number;
+  /**
+   * Coordination with other tabs of the same browser profile (see `tabs.ts`, wired by `openMlsManager`): while
+   * another tab owns the state, every state-changing operation runs there; this manager reads from a copy.
+   */
+  tabs?: MlsTabLink;
+}
+
+/** Operations a tab forwards to the tab that owns the MLS state (everything that changes the client state). */
+export const FORWARDED_OPERATIONS = [
+  "ensureJoined",
+  "processWelcomes",
+  "catchUp",
+  "selfUpdate",
+  "removeLeaves",
+  "addMissingDevices",
+  "encrypt",
+  "encryptHistory",
+  "importHistoryKeys",
+  "publishInboxKey",
+  "setInboxWanted",
+  "flushBackups",
+  "restoreBackups",
+  "restoreBackup",
+  "createKeyPackages",
+] as const;
+export type ForwardedOperation = (typeof FORWARDED_OPERATIONS)[number];
+
+/** The manager's side of the tab coordination. */
+export interface MlsTabLink {
+  /** Whether this manager runs state-changing operations itself (it owns the state and has loaded it). */
+  local(): boolean;
+  /** Runs the operation in the owning tab; resolves once this tab's copy of the state is current. */
+  forward(operation: ForwardedOperation, args: unknown[]): Promise<unknown>;
+  /** Leaves the coordination (dispose). */
+  close(): void;
 }
 
 /** Conversations are named by their qualified id. */
@@ -226,7 +261,7 @@ export type MlsEvent =
   | { type: "verification"; address: string };
 
 /** Why a message could not be shown (rendered as a neutral placeholder, never as content). */
-export type DecryptFailure = "missing_key" | "bad_signature" | "unknown_device" | "replay" | "invalid" | "locked";
+export type DecryptFailure = "missing_key" | "bad_signature" | "unknown_device" | "replay" | "invalid" | "locked" | "envelope_mismatch";
 /**
  * `retired`: sent from a device that was deleted later; verified with its retired attestation (ENCRYPTION.md §5.2).
  * `sealedBy`: a sealed webhook message (APPLICATIONS.md §6.1a) with the per-message `webhookName` from inside the box.
@@ -234,6 +269,11 @@ export type DecryptFailure = "missing_key" | "bad_signature" | "unknown_device" 
 export type Decrypted =
   | { ok: true; content: Record<string, unknown>; retired?: true; sealedBy?: SealedBy; webhookName?: string }
   | { ok: false; reason: DecryptFailure };
+
+/** `type` of an encrypted thread title (PROTOCOL.md §7e). */
+const THREAD_TITLE_TYPE = "thread.title";
+/** Content types that are never a message or an event: history shares (§7b) travel only through their own route. */
+const NOT_CONTENT_TYPES = new Set(["history_keys"]);
 
 /** Longest thread title in characters (PROTOCOL.md §7e). */
 export const THREAD_TITLE_MAX = 100;
@@ -245,8 +285,9 @@ export const RETIRED_SLACK_MS = 5 * 60 * 1000;
  * `removed`: an `unattested` leaf whose device the node reports as deleted (cleanup pending, ENCRYPTION.md §4.7).
  * `bot`: a leaf of a bot (or of an account whose `kind` this client does not know) in a conversation whose effective
  * "no bots" flag is set (APPLICATIONS.md §3.5, ENCRYPTION.md §4.6).
+ * `key_changed`: a leaf attested under a changed identity key whose warning the user has not acknowledged yet (§3.3).
  */
-export type GhostReason = "not_member" | "unattested" | "duplicate" | "removed" | "bot";
+export type GhostReason = "not_member" | "unattested" | "duplicate" | "removed" | "bot" | "key_changed";
 
 /** Options of {@link MlsManager.ghostCheck}. */
 export interface GhostCheckOptions {
@@ -276,16 +317,61 @@ export interface EncryptedEnvelope {
   created_at?: string | null;
   /** Set on webhook messages (sealed ones carry `content.type = "webhook.sealed"`). */
   webhook?: unknown;
+  /**
+   * The envelope's thread and reply (null = none). Compared with the signed context of the content (ENCRYPTION.md
+   * §5.2); `undefined` (a caller that does not know the envelope) is not compared.
+   */
+  thread_id?: string | null;
+  reply_to_id?: string | null;
+}
+
+/** The envelope fields a message's content signs as `ctx` (ENCRYPTION.md §5.2, "Signed context"). */
+export interface MessageContext {
+  thread_id: string | null;
+  reply_to: string | null;
+}
+
+/** Options of {@link MlsManager.encrypt}. */
+export interface EncryptOptions {
+  /** A message's signed context: the thread and the reply the envelope will carry. */
+  ctx?: MessageContext;
+  /**
+   * The ghost check after the catch-up (§4.6): the conversation's members as the caller knows them and its effective
+   * "no bots" flag. Without them the members of this manager's last {@link MlsManager.ghostCheck} are used.
+   */
+  members?: string[];
+  noBots?: boolean;
+  /** Ghost identities the user was already shown (they do not stop the message again). */
+  knownGhosts?: string[];
+}
+
+const ENVELOPE_MISMATCH: Decrypted = Object.freeze({ ok: false, reason: "envelope_mismatch" }) as Decrypted;
+
+/** The `ctx` of a content object: null when it is not exactly `{ thread_id, reply_to }` of strings or nulls. */
+function parseContext(v: unknown): MessageContext | null {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const o = v as Record<string, unknown>;
+  const keys = Object.keys(o);
+  const ok = (x: unknown) => x === null || typeof x === "string";
+  if (keys.length !== 2 || !("thread_id" in o) || !("reply_to" in o) || !ok(o.thread_id) || !ok(o.reply_to)) return null;
+  return { thread_id: o.thread_id as string | null, reply_to: o.reply_to as string | null };
 }
 
 export class MlsError extends Error {
-  constructor(readonly code: "no_group" | "conflict" | "not_joined" | "invalid_id") {
+  /** `owner_unavailable`: the tab that owns the state did not answer in time (or left twice), see `tabs.ts`. */
+  /**
+   * `catch_up_failed`: the handshake log could not be processed before encrypting, nothing was sent (retry).
+   * `ghost`: commits processed before encrypting brought a ghost member the user was not shown yet (§4.6).
+   */
+  constructor(readonly code: "no_group" | "conflict" | "not_joined" | "invalid_id" | "owner_unavailable" | "catch_up_failed" | "ghost") {
     super(code);
     this.name = "MlsError";
   }
 }
 
 const ROTATE_AFTER_MS = 7 * 24 * 3600 * 1000;
+/** Most KeyPackages {@link MlsManager.createKeyPackages} creates at once. */
+export const MAX_KEY_PACKAGES = 100;
 const MAX_TRIES = 3;
 /** A forced lookup of a user's devices reuses a result younger than this. */
 const KEY_REFETCH_MS = 2_000;
@@ -325,6 +411,30 @@ export function contentHeader(content: string): { epoch: number; nonce: string }
   }
 }
 
+/** {@link EncryptOptions} forwarded from another tab, checked field by field. */
+function encryptOptions(v: unknown): EncryptOptions {
+  if (v === undefined) return {};
+  if (!v || typeof v !== "object" || Array.isArray(v)) throw new MlsError("invalid_id");
+  const o = v as Record<string, unknown>;
+  const strings = (x: unknown): string[] | undefined => {
+    if (x === undefined) return undefined;
+    if (!Array.isArray(x) || !x.every((i) => typeof i === "string")) throw new MlsError("invalid_id");
+    return x as string[];
+  };
+  const out: EncryptOptions = {};
+  if (o.ctx !== undefined) {
+    const ctx = parseContext(o.ctx);
+    if (!ctx) throw new MlsError("invalid_id");
+    out.ctx = ctx;
+  }
+  const members = strings(o.members);
+  if (members) out.members = members;
+  if (o.noBots !== undefined) out.noBots = o.noBots === true;
+  const known = strings(o.knownGhosts);
+  if (known) out.knownGhosts = known;
+  return out;
+}
+
 export class MlsManager {
   private client: Client;
   private queue: Promise<unknown> = Promise.resolve();
@@ -336,6 +446,12 @@ export class MlsManager {
   /** `kind` of every user whose keys were looked up (from the user's home node, APPLICATIONS.md §3.5). */
   private readonly kinds = new Map<string, string>();
   private readonly decrypted = new Map<string, Decrypted>();
+  /** The signed context of decrypted messages (stripped from their content), "malformed" when invalid. */
+  private readonly contexts = new WeakMap<Decrypted, MessageContext | "malformed">();
+  /** The last ghost check per conversation: its members and the violations shown (§4.6, re-checked by encrypt). */
+  private readonly lastGhosts = new Map<string, { members: string[]; noBots: boolean; known: Set<string> }>();
+  /** Conversations where encrypt found a ghost nobody was shown yet: checked again on every try. */
+  private readonly ghostDirty = new Set<string>();
   private readonly nonces = new Map<string, string>();
   private readonly backupTried = new Set<string>();
   private readonly plainChecked = new Map<string, PlainStatus>();
@@ -366,6 +482,102 @@ export class MlsManager {
 
   private now(): number {
     return this.deps.now?.() ?? Date.now();
+  }
+
+  /** The forwarded call when another tab owns the state, otherwise null (run it here). */
+  private forwarded<T>(operation: ForwardedOperation, args: unknown[]): Promise<T> | null {
+    const tabs = this.deps.tabs;
+    return tabs && !tabs.local() ? (tabs.forward(operation, args) as Promise<T>) : null;
+  }
+
+  /**
+   * Tab coordination, in the tab that owns the state: runs an operation another tab forwarded. Only the operations
+   * of {@link FORWARDED_OPERATIONS}, with their arguments checked.
+   */
+  serveForwarded(operation: string, args: unknown[]): Promise<unknown> {
+    const str = (v: unknown): string => {
+      if (typeof v !== "string") throw new MlsError("invalid_id");
+      return v;
+    };
+    const strs = (v: unknown): string[] => {
+      if (!Array.isArray(v)) throw new MlsError("invalid_id");
+      return v.map(str);
+    };
+    const obj = (v: unknown): Record<string, unknown> => {
+      if (!v || typeof v !== "object" || Array.isArray(v)) throw new MlsError("invalid_id");
+      return v as Record<string, unknown>;
+    };
+    try {
+      const [a, b] = args;
+      switch (operation as ForwardedOperation) {
+        case "ensureJoined":
+          return this.ensureJoined(str(a), { canCreate: obj(b).canCreate === true });
+        case "processWelcomes":
+          return this.processWelcomes(str(a));
+        case "catchUp":
+          return this.catchUp(str(a));
+        case "selfUpdate":
+          return this.selfUpdate(str(a));
+        case "removeLeaves":
+          return this.removeLeaves(str(a), strs(b));
+        case "addMissingDevices":
+          return this.addMissingDevices(str(a), strs(b));
+        case "encrypt":
+          return this.encrypt(str(a), obj(b), encryptOptions(args[2]));
+        case "encryptHistory":
+          return this.encryptHistory(str(a), str(b));
+        case "importHistoryKeys": {
+          if (!Array.isArray(b) || !b.every((k) => Array.isArray(k) && typeof k[0] === "number" && k[1] instanceof Uint8Array)) throw new MlsError("invalid_id");
+          return this.importHistoryKeys(str(a), b as [number, Uint8Array][]);
+        }
+        case "publishInboxKey":
+          return this.publishInboxKey(str(a));
+        case "setInboxWanted":
+          this.setInboxWanted(str(a), b === true);
+          return Promise.resolve(undefined);
+        case "flushBackups":
+          return this.flushBackups();
+        case "restoreBackups":
+          return this.restoreBackups();
+        case "createKeyPackages":
+          if (typeof a !== "number") throw new MlsError("invalid_id");
+          return this.createKeyPackages(a);
+        case "restoreBackup": {
+          const q = str(a);
+          splitQualified(q);
+          return this.run(() => this.restoreOne(q));
+        }
+        default:
+          return Promise.reject(new MlsError("invalid_id"));
+      }
+    } catch (e) {
+      return Promise.reject(e);
+    }
+  }
+
+  /**
+   * Tab coordination: replaces the client state and the bookkeeping with the stored ones (the owning tab wrote
+   * them, or this tab takes the state over), after every earlier operation. `load` returns null to keep the
+   * current state; `then` runs inside the same step (before any later operation).
+   */
+  reloadState(load: () => Promise<{ client: Client; meta: MlsMeta } | null>, then?: () => void): Promise<void> {
+    return this.run(async () => {
+      if (this.disposed) return;
+      const next = await load();
+      if (next && !this.disposed) {
+        const old = this.client;
+        this.client = next.client;
+        old.free();
+        const meta = this.deps.meta as unknown as Record<string, unknown>;
+        for (const k of Object.keys(meta)) delete meta[k];
+        Object.assign(meta, normalizeMeta(next.meta, this.deps.homeDomain));
+        // Keys may have arrived with the new state: failed messages are tried again.
+        for (const [k, v] of [...this.decrypted]) if (!v.ok) this.decrypted.delete(k);
+      } else {
+        next?.client.free();
+      }
+      then?.();
+    });
   }
 
   /** Runs `fn` after every earlier operation: the client is mutated by one operation at a time. */
@@ -410,6 +622,8 @@ export class MlsManager {
    * exists and `canCreate` (the user may post). Returns `no_group` when there is nothing to join yet.
    */
   ensureJoined(q: string, opts: { canCreate: boolean }): Promise<"joined" | "no_group"> {
+    const remote = this.forwarded<"joined" | "no_group">("ensureJoined", [q, { canCreate: opts.canCreate }]);
+    if (remote) return remote;
     return this.run(async () => {
       const { domain } = splitQualified(q);
       if (!this.client.hasGroup(q)) await this.processWelcomesInner(domain);
@@ -480,6 +694,8 @@ export class MlsManager {
    * of that node's socket, or after connecting to it). Returns the qualified ids joined.
    */
   processWelcomes(domain: string): Promise<string[]> {
+    const remote = this.forwarded<string[]>("processWelcomes", [domain]);
+    if (remote) return remote;
     return this.run(() => this.processWelcomesInner(domain));
   }
 
@@ -520,11 +736,15 @@ export class MlsManager {
 
   /** Processes the handshake log from the local epoch (after `mls.commit`). No-op without a local group. */
   catchUp(q: string): Promise<void> {
-    return this.run(() => this.catchUpInner(q));
+    const remote = this.forwarded<void>("catchUp", [q]);
+    if (remote) return remote;
+    return this.run(() => this.catchUpInner(q)).then(() => undefined);
   }
 
-  private async catchUpInner(q: string): Promise<void> {
-    if (!this.client.hasGroup(q)) return;
+  /** True when commits were processed (the roster may have changed). */
+  private async catchUpInner(q: string): Promise<boolean> {
+    if (!this.client.hasGroup(q)) return false;
+    let changed = false;
     const ds = this.ds(q);
     for (let page = 0; page < 1000; page++) {
       const since = this.client.currentEpoch(q);
@@ -540,14 +760,14 @@ export class MlsManager {
             this.client.deleteGroup(q);
             await this.persist();
             this.deps.onEvent?.({ type: "removed", conversationId: q });
-            return;
+            return true;
           }
           // §4.3: a commit that fails validation stops processing; rejoin and warn.
           this.client.deleteGroup(q);
           await this.persist();
           await this.joinInner(q, false).catch(() => "no_group");
           this.deps.onEvent?.({ type: "rejoined", conversationId: q });
-          return;
+          return true;
         }
         progressed = true;
         const selfRemoved = outcome.selfRemoved;
@@ -557,7 +777,7 @@ export class MlsManager {
           this.client.deleteGroup(q);
           await this.persist();
           this.deps.onEvent?.({ type: "removed", conversationId: q });
-          return;
+          return true;
         }
         if (removedByOther) {
           const meta = this.deps.meta;
@@ -566,12 +786,14 @@ export class MlsManager {
         }
       }
       if (progressed) {
+        changed = true;
         await this.persist();
         this.markDirty(q);
         this.deps.onEvent?.({ type: "epoch", conversationId: q });
       }
-      if (log.next == null || !progressed) return;
+      if (log.next == null || !progressed) return changed;
     }
+    return changed;
   }
 
   /**
@@ -618,6 +840,13 @@ export class MlsManager {
    * key gets one. Channels without webhooks cost nothing (no derivation, no request).
    */
   setInboxWanted(q: string, wanted: boolean): void {
+    if (this.deps.tabs && !this.deps.tabs.local()) {
+      // Remembered here too (for a take-over); the owner publishes.
+      if (wanted) this.inboxWanted.add(q);
+      else this.inboxWanted.delete(q);
+      void this.deps.tabs.forward("setInboxWanted", [q, wanted]).catch(() => undefined);
+      return;
+    }
     if (!wanted) {
       this.inboxWanted.delete(q);
       return;
@@ -632,6 +861,8 @@ export class MlsManager {
    * session. False without a local group (the webhook then waits until a member publishes).
    */
   async publishInboxKey(q: string): Promise<boolean> {
+    const remote = this.forwarded<boolean>("publishInboxKey", [q]);
+    if (remote) return remote;
     if (!this.client.hasGroup(q)) return false;
     const ds = this.ds(q);
     if (!ds.api.publishInboxKey) return false;
@@ -659,6 +890,8 @@ export class MlsManager {
    * starts on a fresh frame key (ENCRYPTION.md §5a). `false` without a local group.
    */
   selfUpdate(q: string): Promise<boolean> {
+    const remote = this.forwarded<boolean>("selfUpdate", [q]);
+    if (remote) return remote;
     return this.run(async () => {
       if (!this.client.hasGroup(q)) return false;
       await this.catchUpInner(q);
@@ -678,6 +911,8 @@ export class MlsManager {
 
   /** `mls.remove_needed`: removes the listed leaves that are still in the group (callers check rights). */
   removeLeaves(q: string, identities: string[]): Promise<boolean> {
+    const remote = this.forwarded<boolean>("removeLeaves", [q, identities]);
+    if (remote) return remote;
     return this.run(async () => {
       if (!this.client.hasGroup(q)) return false;
       await this.catchUpInner(q);
@@ -702,6 +937,8 @@ export class MlsManager {
    * the ones attested on the members' home nodes. Returns the other members without any device.
    */
   addMissingDevices(q: string, members: string[]): Promise<string[]> {
+    const remote = this.forwarded<string[]>("addMissingDevices", [q, members]);
+    if (remote) return remote;
     return this.run(async () => {
       const waiting: string[] = [];
       if (!this.client.hasGroup(q)) return waiting;
@@ -716,6 +953,8 @@ export class MlsManager {
             if (address !== this.deps.address) waiting.push(address);
             continue;
           }
+          // §3.3: devices under a changed key wait until the user acknowledged the warning.
+          if (this.deps.pins[address]?.changed) continue;
           const missing = [...devices.keys()].map((d) => `${address}/${d}`).filter((i) => i !== own && !roster.has(i));
           if (!missing.length) continue;
           const claimed = await ds.api.claim(address);
@@ -736,6 +975,22 @@ export class MlsManager {
         if (added) this.deps.onEvent?.({ type: "added", conversationId: q, addresses: [...new Set(candidates.map((c) => splitIdentity(c.identity).address))] });
       }
       return waiting;
+    });
+  }
+
+  /**
+   * Creates up to `count` KeyPackages (base64url, at most {@link MAX_KEY_PACKAGES}) in this device's client state and
+   * persists it. `ensureDevice` tops up through it while a manager is open (its `keyPackages` option), so that the
+   * private keys end up in the state that is written from now on (the owning tab's).
+   */
+  createKeyPackages(count: number): Promise<string[]> {
+    const remote = this.forwarded<string[]>("createKeyPackages", [count]);
+    if (remote) return remote;
+    return this.run(async () => {
+      const n = Math.max(0, Math.min(MAX_KEY_PACKAGES, Math.floor(count)));
+      const out = Array.from({ length: n }, () => b64urlEncode(this.client.createKeyPackage()));
+      if (n) await this.persist();
+      return out;
     });
   }
 
@@ -768,18 +1023,27 @@ export class MlsManager {
    * Encrypts a content object for the current epoch (§5.2). Rotates the content key first when a
    * self update is due (weekly, or after a removal committed by someone else, §4.2).
    */
-  encrypt(conversationId: string, content: Record<string, unknown>): Promise<{ content: string; epoch: number }> {
+  encrypt(conversationId: string, content: Record<string, unknown>, opts: EncryptOptions = {}): Promise<{ content: string; epoch: number }> {
     // The node cannot see encrypted embeds: the sender checks them (APPLICATIONS.md §6.4).
     try {
       assertEmbeds(content);
     } catch (e) {
       return Promise.reject(e);
     }
+    const remote = this.forwarded<{ content: string; epoch: number }>("encrypt", [conversationId, content, opts]);
+    if (remote) return remote;
     return this.run(async () => {
       const q = conversationId;
-      // Senders use the current epoch (§5.2): pick up commits whose events may still be on the way.
-      await this.catchUpInner(conversationId).catch(() => undefined);
+      // Senders use the current epoch (§5.2): pick up commits whose events may still be on the way. Without them the
+      // message would go out under an epoch the node may refuse, or one that removed members still hold: no sending.
+      let progressed: boolean;
+      try {
+        progressed = await this.catchUpInner(conversationId);
+      } catch {
+        throw new MlsError("catch_up_failed");
+      }
       if (!this.client.hasGroup(q)) throw new MlsError("not_joined");
+      await this.recheckGhosts(q, opts, progressed);
       if (this.rotationDue(conversationId)) {
         try {
           await this.commitInner(conversationId, () => (this.client.hasGroup(q) ? this.client.selfUpdate(q) : null));
@@ -788,24 +1052,69 @@ export class MlsManager {
         }
         if (!this.client.hasGroup(q)) throw new MlsError("not_joined");
       }
-      const ciphertext = this.client.encryptContent(q, JSON.stringify(content));
+      const json = opts.ctx ? { ...content, ctx: { thread_id: opts.ctx.thread_id, reply_to: opts.ctx.reply_to } } : content;
+      const ciphertext = this.client.encryptContent(q, JSON.stringify(json));
       return { content: ciphertext, epoch: this.client.currentEpoch(q) };
     });
   }
 
-  /** Decrypts and verifies an encrypted envelope; the result is cached for the session (not persisted). */
-  async decrypt(conversationId: string, m: EncryptedEnvelope): Promise<Decrypted> {
+  /**
+   * §4.6 again after commits were processed before encrypting (a processed commit may have brought a device): a
+   * violation the user was not shown yet refuses the message (`MlsError("ghost")`), until a ghost check showed it or
+   * the caller names it in `knownGhosts`. Without members (neither passed nor from an earlier check) nothing to do.
+   */
+  private async recheckGhosts(q: string, opts: EncryptOptions, progressed: boolean): Promise<void> {
+    const guard = opts.members ? { members: opts.members, noBots: !!opts.noBots, known: new Set(opts.knownGhosts ?? []) } : this.lastGhosts.get(q);
+    if (!guard || !(progressed || this.ghostDirty.has(q))) return;
+    const found = await this.ghostCheckInner(q, guard.members, { noBots: guard.noBots });
+    if (found.some((v) => !guard.known.has(v.identity))) {
+      this.ghostDirty.add(q);
+      throw new MlsError("ghost");
+    }
+    this.ghostDirty.delete(q);
+  }
+
+  /**
+   * Decrypts and verifies an encrypted envelope; the result is cached for the session (not persisted). Content of
+   * another purpose in the same format (a thread title, a history share) is `invalid` here: the node could otherwise
+   * serve it as a message of its author, since format and AAD are the same (§5.2, §7b).
+   */
+  decrypt(conversationId: string, m: EncryptedEnvelope): Promise<Decrypted> {
+    return this.decryptEnvelope(conversationId, m, "message");
+  }
+
+  private async decryptEnvelope(conversationId: string, m: EncryptedEnvelope, purpose: "message" | "title"): Promise<Decrypted> {
     const sealed = m.webhook ? sealedContent(m.content) : null;
-    if (sealed) return this.decryptSealed(conversationId, m, sealed);
+    if (sealed) return purpose === "message" ? this.decryptSealed(conversationId, m, sealed) : { ok: false, reason: "invalid" };
     if (typeof m.content !== "string" || !m.device_id) return { ok: false, reason: "invalid" };
-    const cacheKey = `${conversationId}|${m.id}|${m.content}`;
+    const cacheKey = `${purpose}|${conversationId}|${m.id}|${m.content}`;
     const cached = this.decrypted.get(cacheKey);
-    if (cached) return cached;
+    if (cached) return this.matchContext(cached, m);
     const sentAt = m.created_at ? Date.parse(m.created_at) : NaN;
-    const result = await this.decryptUncached(conversationId, m.id, m.author, m.device_id, m.epoch ?? null, m.content, Number.isFinite(sentAt) ? sentAt : null);
+    let result = await this.decryptUncached(conversationId, m.id, m.author, m.device_id, m.epoch ?? null, m.content, Number.isFinite(sentAt) ? sentAt : null);
+    if (result.ok && (purpose === "title") !== (result.content.type === THREAD_TITLE_TYPE)) result = { ok: false, reason: "invalid" };
+    if (result.ok && NOT_CONTENT_TYPES.has(String(result.content.type))) result = { ok: false, reason: "invalid" };
+    if (!result.ok && result.reason === "invalid") this.forgetNonce(conversationId, m.content, m.id);
+    if (result.ok && purpose === "message" && "ctx" in result.content) {
+      // §5.2: the signed context is checked against every envelope this content is served in, never shown.
+      const { ctx, ...content } = result.content;
+      const stripped: Decrypted = { ...result, content };
+      this.contexts.set(stripped, parseContext(ctx) ?? "malformed");
+      result = stripped;
+    }
     // Missing keys may arrive later (catch-up, backup): only final results are cached.
     if (result.ok || result.reason !== "missing_key") this.decrypted.set(cacheKey, result);
-    return result;
+    return this.matchContext(result, m);
+  }
+
+  /** `envelope_mismatch` when the signed context differs from the envelope's (known) thread and reply (§5.2). */
+  private matchContext(r: Decrypted, m: EncryptedEnvelope): Decrypted {
+    const ctx = r.ok ? this.contexts.get(r) : undefined;
+    if (!ctx) return r;
+    if (ctx === "malformed") return ENVELOPE_MISMATCH;
+    if (m.thread_id !== undefined && (m.thread_id ?? null) !== ctx.thread_id) return ENVELOPE_MISMATCH;
+    if (m.reply_to_id !== undefined && (m.reply_to_id ?? null) !== ctx.reply_to) return ENVELOPE_MISMATCH;
+    return r;
   }
 
   /**
@@ -850,7 +1159,7 @@ export class MlsManager {
     }
     if (this.backupTried.has(q)) return false;
     this.backupTried.add(q);
-    await this.run(() => this.restoreOne(q)).catch(() => undefined);
+    await (this.forwarded<void>("restoreBackup", [q]) ?? this.run(() => this.restoreOne(q))).catch(() => undefined);
     return true;
   }
 
@@ -874,7 +1183,7 @@ export class MlsManager {
     conversationId: string,
     t: { id: string; title: string; title_epoch?: number | null; title_author: string; title_device_id?: string | null; created_at?: string | null },
   ): Promise<{ ok: true; title: string } | { ok: false; reason: DecryptFailure }> {
-    const r = await this.decrypt(conversationId, { id: `thread-title:${t.id}`, author: t.title_author, device_id: t.title_device_id ?? null, epoch: t.title_epoch ?? null, content: t.title, created_at: t.created_at ?? null });
+    const r = await this.decryptEnvelope(conversationId, { id: `thread-title:${t.id}`, author: t.title_author, device_id: t.title_device_id ?? null, epoch: t.title_epoch ?? null, content: t.title, created_at: t.created_at ?? null }, "title");
     if (!r.ok) return r;
     const body = r.content.body;
     if (r.content.type !== "thread.title" || typeof body !== "string" || !body.trim() || Array.from(body).length > THREAD_TITLE_MAX) return { ok: false, reason: "invalid" };
@@ -885,7 +1194,8 @@ export class MlsManager {
   peek(conversationId: string, m: EncryptedEnvelope): Decrypted | undefined {
     const sealed = m.webhook ? sealedContent(m.content) : null;
     if (sealed) return this.decrypted.get(`${conversationId}|${m.id}|${sealed.sealed}`);
-    return this.decrypted.get(`${conversationId}|${m.id}|${String(m.content)}`);
+    const r = this.decrypted.get(`message|${conversationId}|${m.id}|${String(m.content)}`);
+    return r && this.matchContext(r, m);
   }
 
   /**
@@ -910,7 +1220,11 @@ export class MlsManager {
     if (!header) return { ok: false, reason: "invalid" };
     const replayKey = `${conversationId}|${header.epoch}|${header.nonce}`;
     if (this.ephemeralNonces.has(replayKey)) return { ok: false, reason: "replay" };
-    const result = await this.decryptUncached(conversationId, `eph:${replayKey}`, author, deviceId, header.epoch, content);
+    let result = await this.decryptUncached(conversationId, `eph:${replayKey}`, author, deviceId, header.epoch, content);
+    if (result.ok && (result.content.type === THREAD_TITLE_TYPE || NOT_CONTENT_TYPES.has(String(result.content.type)))) {
+      this.nonces.delete(replayKey);
+      return { ok: false, reason: "invalid" };
+    }
     if (result.ok) {
       this.ephemeralNonces.add(replayKey);
       // A bounded window: the oldest nonces are forgotten first (Set keeps insertion order).
@@ -922,6 +1236,13 @@ export class MlsManager {
       this.nonces.delete(replayKey);
     }
     return result;
+  }
+
+  /** A ciphertext refused for its purpose does not count as seen: the genuine use of it is not a replay. */
+  private forgetNonce(q: string, content: string, id: string) {
+    const h = contentHeader(content);
+    const key = h ? `${q}|${h.epoch}|${h.nonce}` : null;
+    if (key && this.nonces.get(key) === id) this.nonces.delete(key);
   }
 
   private async decryptUncached(conversationId: string, id: string, author: string, deviceId: string, epoch: number | null, content: string, sentAt: number | null = null): Promise<Decrypted> {
@@ -1283,6 +1604,15 @@ export class MlsManager {
    * list says: `kind` comes from the bot's home node, so a lying room node cannot disguise it (APPLICATIONS.md §3.5).
    */
   async ghostCheck(q: string, members: Iterable<string>, opts: GhostCheckOptions = {}): Promise<GhostViolation[]> {
+    const list = [...members];
+    const out = await this.ghostCheckInner(q, list, opts);
+    // What the caller was shown: encrypt() refuses only violations beyond these (§4.6 after its catch-up).
+    this.lastGhosts.set(q, { members: list, noBots: !!opts.noBots, known: new Set(out.map((v) => v.identity)) });
+    this.ghostDirty.delete(q);
+    return out;
+  }
+
+  private async ghostCheckInner(q: string, members: Iterable<string>, opts: GhostCheckOptions = {}): Promise<GhostViolation[]> {
     if (!this.client.hasGroup(q)) return [];
     const entries = this.client.roster(q).map((e) => {
       const r = { identity: e.identity, key: e.signatureKey };
@@ -1320,6 +1650,7 @@ export class MlsManager {
         continue;
       }
       if (!key || !sameBytes(key, e.key)) out.push({ identity: e.identity, reason: "unattested" });
+      else if (this.deps.pins[address]?.changed) out.push({ identity: e.identity, reason: "key_changed" });
     }
     return out;
   }
@@ -1350,6 +1681,8 @@ export class MlsManager {
 
   /** Uploads the backups of conversations with new epoch keys (merge with the stored blob, If-Match). */
   flushBackups(): Promise<void> {
+    const remote = this.forwarded<void>("flushBackups", []);
+    if (remote) return remote;
     return this.run(async () => {
       for (const c of this.deps.meta.pendingBackups ?? []) this.dirty.add(c);
       for (const c of [...this.dirty]) {
@@ -1407,6 +1740,8 @@ export class MlsManager {
 
   /** New device (§8 step 3): imports every backup of the account once. */
   restoreBackups(): Promise<number> {
+    const remote = this.forwarded<number>("restoreBackups", []);
+    if (remote) return remote;
     return this.run(async () => {
       if (this.deps.meta.restored) return 0;
       const { items } = await this.deps.api.backupList();
@@ -1452,8 +1787,14 @@ export class MlsManager {
    * epoch, after catching up, without rotating: only current members can read it.
    */
   encryptHistory(q: string, json: string): Promise<{ content: string; epoch: number }> {
+    const remote = this.forwarded<{ content: string; epoch: number }>("encryptHistory", [q, json]);
+    if (remote) return remote;
     return this.run(async () => {
-      await this.catchUpInner(q).catch(() => undefined);
+      try {
+        await this.catchUpInner(q);
+      } catch {
+        throw new MlsError("catch_up_failed");
+      }
       if (!this.client.hasGroup(q)) throw new MlsError("not_joined");
       return { content: this.client.encryptContent(q, json), epoch: this.client.currentEpoch(q) };
     });
@@ -1470,11 +1811,51 @@ export class MlsManager {
   }
 
   /**
+   * Whether a candidate content key of `epoch` opens `sample` (a stored message of that epoch) **and** the plaintext
+   * carries a valid signature of the sample author's attested device (§7b step 4, §5.2). The AES-GCM tag alone can be
+   * produced by anyone who knows the key, so a sharer colluding with the node could otherwise "prove" a key of its
+   * choice with a message the node made up. Uses a throwaway client; nothing is stored or cached.
+   */
+  async sampleProvesKey(q: string, epoch: number, key: Uint8Array, sample: { author: string; device_id: string; content: string }): Promise<boolean> {
+    return (await this.checkSample(q, epoch, key, sample)) === "proven";
+  }
+
+  /**
+   * {@link sampleProvesKey} with the reason of a failure: `unknown_device` when the sample's author device is neither
+   * attested nor known as retired (nothing can be told from it, for example the recipient's own device from before an
+   * identity reset), `invalid` when the key does not open it or the signature does not verify.
+   */
+  async checkSample(q: string, epoch: number, key: Uint8Array, sample: { author: string; device_id: string; content: string }): Promise<"proven" | "unknown_device" | "invalid"> {
+    let deviceKey: Uint8Array | undefined;
+    try {
+      deviceKey = (await this.verifiedDevices(sample.author))?.get(sample.device_id) ?? (await this.verifiedDevices(sample.author, true))?.get(sample.device_id) ?? this.retiredDevice(sample.author, sample.device_id)?.key;
+    } catch {
+      deviceKey = undefined;
+    }
+    if (!deviceKey) return "unknown_device";
+    let probe: Client | null = null;
+    try {
+      probe = Client.create(sample.author, sample.device_id);
+      probe.importEpochKey(q, epoch, key);
+      const header = contentHeader(sample.content);
+      if (!header || header.epoch !== epoch) return "invalid";
+      probe.decryptContent(q, sample.author, sample.device_id, sample.content, deviceKey);
+      return "proven";
+    } catch {
+      return "invalid";
+    } finally {
+      probe?.free();
+    }
+  }
+
+  /**
    * Stores accepted history keys (validated by the caller) in the client state, exactly like own epoch keys:
    * persisted in the encrypted key store and included in the history backup. Keys never overwrite known
    * ones. Returns the number of new keys.
    */
   importHistoryKeys(q: string, keys: [number, Uint8Array][]): Promise<number> {
+    const remote = this.forwarded<number>("importHistoryKeys", [q, keys]);
+    if (remote) return remote;
     return this.run(async () => {
       const known = new Set(this.client.knownEpochs(q));
       let n = 0;
@@ -1487,7 +1868,7 @@ export class MlsManager {
       if (n === 0) return 0;
       await this.persist();
       // Messages that failed with a missing key are decrypted again.
-      for (const [k, v] of [...this.decrypted]) if (!v.ok && k.startsWith(`${q}|`)) this.decrypted.delete(k);
+      for (const [k, v] of [...this.decrypted]) if (!v.ok && [`${q}|`, `message|${q}|`, `title|${q}|`].some((p) => k.startsWith(p))) this.decrypted.delete(k);
       this.markDirty(q);
       this.deps.onEvent?.({ type: "epoch", conversationId: q });
       return n;
@@ -1497,6 +1878,7 @@ export class MlsManager {
   /** Stops timers and frees the client (sign-out, identity change). */
   dispose(): void {
     this.disposed = true;
+    this.deps.tabs?.close();
     if (this.backupTimer) clearTimeout(this.backupTimer);
     this.decrypted.clear();
     this.plainChecked.clear();

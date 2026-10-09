@@ -110,6 +110,12 @@ the owner's editor, §5.1). The handler gets an `Interaction` with `args`, `user
   minutes). `reply` after `defer` sends a follow-up;
 - `error(message)`: a short notice for the invoker. The node sees it, so keep it generic.
 
+**Threads** (PROTOCOL.md §7e): `threadId` names the thread a command was invoked in (null outside threads), and the
+node puts the reply and the follow-ups there. `replyInThread(content, { title?, ephemeral?, mentions? })` answers in
+that thread, or, invoked in the channel itself, starts a thread of the channel (the title, encrypted in encrypted
+channels, defaults to the start of the text) and answers there; later follow-ups go there too. `reply`, `followUp`
+and `replyInThread` take `{ threadId }` to answer in another thread of the conversation.
+
 A handler that throws or never answers is answered with a generic error notice. In encrypted channels the arguments
 arrive encrypted: the runtime decrypts them, checks the signature of the invoker's device and refuses arguments made
 for another command, older than five minutes or replayed (§5.8); replies and follow-ups are encrypted for the channel.

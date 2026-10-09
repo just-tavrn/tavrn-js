@@ -9,7 +9,7 @@
 import { Client, MasterSecret, RecoveryKey, passkeyMethod, passkeyWrappingKey, unwrapIdentityKey, unwrapMasterSecret, wrapMasterSecret } from "@tavrn/crypto";
 import { TavrnApiError, b64urlDecode, b64urlEncode, type TavrnApi } from "@tavrn/sdk";
 import { E2eeError } from "./errors";
-import { IDENTITY_SEED, resolveIdentity, syncIdentity, withIdentityKey } from "./identity";
+import { IDENTITY_SEED, chainReaches, ownIdentityPublicKey, resolveIdentity, syncIdentity, withIdentityKey } from "./identity";
 import { LocalKeyMismatchError, withMasterSecret, type CryptoStatus, type KeyStore } from "./keystore";
 import { ensureCrypto } from "./wasm";
 
@@ -33,6 +33,12 @@ export interface E2eeContext {
   store: KeyStore;
   /** `client` in the params of secret storage entries (default `tavrn-web`). */
   clientName?: string;
+  /**
+   * `ensureDevice`: creates `count` KeyPackages (base64url) in the client state of the open session manager
+   * (`MlsManager.createKeyPackages`, which also runs in the tab that owns the state), so that no second copy of the
+   * state is written next to it. Omitted or null: they are created in the stored state.
+   */
+  keyPackages?: (count: number) => Promise<string[] | null>;
 }
 
 export { E2eeError, type E2eeErrorCode } from "./errors";
@@ -150,8 +156,11 @@ export async function ensureDevice(ctx: E2eeContext): Promise<void> {
     }
     const { count } = await ctx.api.keys.countKeyPackages(ctx.deviceId);
     if (count < KEY_PACKAGE_MIN) {
-      const packages = Array.from({ length: KEY_PACKAGE_BATCH - count }, () => b64urlEncode(client.createKeyPackage()));
-      await saveClient(store, client);
+      let packages = (await ctx.keyPackages?.(KEY_PACKAGE_BATCH - count)) ?? null;
+      if (!packages) {
+        packages = Array.from({ length: KEY_PACKAGE_BATCH - count }, () => b64urlEncode(client.createKeyPackage()));
+        await saveClient(store, client);
+      }
       await ctx.api.keys.uploadKeyPackages(ctx.deviceId, { key_packages: packages });
     }
   } finally {
@@ -243,7 +252,8 @@ async function adoptMaster(ctx: E2eeContext, master: MasterSecret): Promise<void
   try {
     // §2.4: a stale or forged entry must not be used. The published key is the derived one, or a rotated key the
     // continuity chain reaches from it and the blob holds (§9a).
-    seed = await resolveIdentity(ctx.api, await ctx.api.keys.get(ctx.username), derived, (blob) => unwrapIdentityKey(master, blob, ctx.address));
+    const doc = await ctx.api.keys.get(ctx.username);
+    seed = await resolveIdentity(ctx.api, doc, derived, (blob) => unwrapIdentityKey(master, blob, ctx.address));
     const keepSeed = async () => {
       if (seed) await store.putSecret(IDENTITY_SEED, seed);
       else await store.deleteSecret(IDENTITY_SEED);
@@ -251,6 +261,14 @@ async function adoptMaster(ctx: E2eeContext, master: MasterSecret): Promise<void
     if ((await localStatus(store, ctx.address, ctx.deviceId)) === "locked") {
       try {
         await store.unlockWithMaster(ctx.address, bytes);
+        // Forward only (§9a): local data that already follows a rotated key accepts the published key only when the
+        // chain leads to it from that key, so the node cannot roll this device back to an older generation.
+        const own = await ownIdentityPublicKey(store);
+        const published = doc.identity_public_key ?? derived;
+        if (own !== derived && own !== published && !chainReaches(doc.continuity, own, published)) {
+          store.lock();
+          throw new E2eeError("identity_mismatch");
+        }
         await keepSeed();
         await ensureDevice(ctx);
         return;
