@@ -39,6 +39,27 @@ const TOKEN_CACHE = 50_000;
 const DOC_CHUNK = 128;
 const DAY_MS = 86_400_000;
 
+/**
+ * An entry of an encrypted files channel (SEARCH.md §3.6), indexed as a doc of the channel's conversation with the
+ * entry id as its id, the upload date as its time and the uploader as its author. Never thumbnail bytes.
+ */
+export interface IndexedFile {
+  kind: "file" | "folder";
+  name: string;
+  /** Folder path, "A/B" (empty at the top level). */
+  folder: string;
+  /** Empty for folders. */
+  mime: string;
+  /** Upload category (PROTOCOL.md §7a); empty for folders. */
+  category: string;
+  /** Plaintext bytes. */
+  size: number;
+  /** The entry has a thumbnail (the client fetches it from its preview cache or the node). */
+  thumbnail: boolean;
+  /** Parent folder id (null at the top level). */
+  parent: string | null;
+}
+
 export interface IndexedMessage {
   /** Qualified conversation id "<node>/<ulid>" (opaque here). */
   conversation: string;
@@ -56,6 +77,8 @@ export interface IndexedMessage {
   room?: string;
   /** The thread of a thread message (PROTOCOL.md §7e; the client opens it there). Stored sealed. */
   thread?: string;
+  /** Entries of encrypted files channels instead of messages. Stored sealed. */
+  file?: IndexedFile;
 }
 
 export interface SearchFilter {
@@ -68,6 +91,10 @@ export interface SearchFilter {
   /** ms, ts < before. */
   before?: number;
   hasFile?: boolean;
+  /** Only messages or only entries of files channels (default both). */
+  kind?: "messages" | "files";
+  /** Entries of files channels of this upload category. */
+  category?: string;
   /** Default and maximum MAX_RESULTS. */
   limit?: number;
 }
@@ -84,6 +111,8 @@ export interface LocalHit {
   room?: string;
   /** The thread, as given to `add`. */
   thread?: string;
+  /** The entry of a files channel, as given to `add`. */
+  file?: IndexedFile;
 }
 
 export interface SyncState {
@@ -123,6 +152,8 @@ interface DocRecord {
   r?: string;
   /** Thread id (thread messages). */
   h?: string;
+  /** Entry of a files channel. */
+  e?: IndexedFile;
   /** Lookup keys of the message (its posting token keys are derived from them). */
   k: string[];
 }
@@ -189,6 +220,20 @@ function cleanMessage(m: IndexedMessage): IndexedMessage {
     files: Array.isArray(m.files) ? m.files.map(String) : [],
     ...(typeof m.room === "string" && m.room ? { room: m.room } : {}),
     ...(typeof m.thread === "string" && m.thread ? { thread: m.thread } : {}),
+    ...(m.file && typeof m.file === "object" ? { file: cleanFile(m.file) } : {}),
+  };
+}
+
+function cleanFile(f: IndexedFile): IndexedFile {
+  return {
+    kind: f.kind === "folder" ? "folder" : "file",
+    name: String(f.name ?? ""),
+    folder: String(f.folder ?? ""),
+    mime: String(f.mime ?? ""),
+    category: String(f.category ?? ""),
+    size: Number.isFinite(f.size) ? f.size : 0,
+    thumbnail: f.thumbnail === true,
+    parent: typeof f.parent === "string" ? f.parent : null,
   };
 }
 
@@ -294,7 +339,8 @@ export class SearchIndex {
       const terms = queryTerms(query);
       const limit = Math.max(1, Math.min(MAX_RESULTS, Math.floor(filter.limit ?? MAX_RESULTS)));
       const scope = filter.conversations ? [...new Set(filter.conversations)].filter((c) => this.convs.has(c)) : [...this.convs.keys()];
-      const hasFilter = filter.author !== undefined || filter.after !== undefined || filter.before !== undefined || filter.hasFile !== undefined;
+      const hasFilter =
+        filter.author !== undefined || filter.after !== undefined || filter.before !== undefined || filter.hasFile !== undefined || filter.kind !== undefined || filter.category !== undefined;
       if (terms.length === 0 && !hasFilter) return [];
       const hits: DocRecord[] = [];
       for (const c of scope) {
@@ -310,6 +356,7 @@ export class SearchIndex {
         files: d.f,
         ...(d.r ? { room: d.r } : {}),
         ...(d.h ? { thread: d.h } : {}),
+        ...(d.e ? { file: d.e } : {}),
       }));
     });
   }
@@ -603,7 +650,7 @@ export class SearchIndex {
         list.map(async (m) => {
           const lookups = indexKeys(m.files.length ? `${m.files.join("\n")}\n${m.text}` : m.text);
           const key = await this.docKey(c, m.id);
-          const doc: DocRecord = { c, m: m.id, t: m.ts, a: m.author, x: m.text, f: m.files, k: lookups, ...(m.room ? { r: m.room } : {}), ...(m.thread ? { h: m.thread } : {}) };
+          const doc: DocRecord = { c, m: m.id, t: m.ts, a: m.author, x: m.text, f: m.files, k: lookups, ...(m.room ? { r: m.room } : {}), ...(m.thread ? { h: m.thread } : {}), ...(m.file ? { e: m.file } : {}) };
           const sealed = await seal(keys, aad("docs", key), doc);
           return { m, key, lookups, sealed };
         }),
@@ -738,6 +785,9 @@ export class SearchIndex {
     if (f.after !== undefined && !(d.t > f.after)) return false;
     if (f.before !== undefined && !(d.t < f.before)) return false;
     if (f.hasFile !== undefined && f.hasFile !== d.f.length > 0) return false;
+    if (f.kind === "files" && !d.e) return false;
+    if (f.kind === "messages" && d.e) return false;
+    if (f.category !== undefined && d.e?.category !== f.category) return false;
     return true;
   }
 
