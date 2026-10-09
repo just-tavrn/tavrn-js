@@ -9930,6 +9930,7 @@ export type CreateConversationMessageErrors = {
     400: ProblemDetails;
     403: ProblemDetails;
     404: ProblemDetails;
+    409: ProblemDetails;
     429: ProblemDetails;
 };
 
@@ -9978,6 +9979,7 @@ export type EditConversationMessageErrors = {
     400: ProblemDetails;
     403: ProblemDetails;
     404: ProblemDetails;
+    409: ProblemDetails;
 };
 
 export type EditConversationMessageError = EditConversationMessageErrors[keyof EditConversationMessageErrors];
@@ -11960,6 +11962,7 @@ export type CreateMessageData = {
 export type CreateMessageErrors = {
     400: ProblemDetails;
     403: ProblemDetails;
+    409: ProblemDetails;
     429: ProblemDetails;
 };
 
@@ -12004,6 +12007,12 @@ export type EditMessageData = {
     query?: never;
     url: '/api/v1/rooms/{room_id}/channels/{channel_id}/messages/{message_id}';
 };
+
+export type EditMessageErrors = {
+    409: ProblemDetails;
+};
+
+export type EditMessageError = EditMessageErrors[keyof EditMessageErrors];
 
 export type EditMessageResponses = {
     200: Message;
