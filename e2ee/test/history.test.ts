@@ -19,9 +19,12 @@ import {
   parseHistoryPayload,
   parseHistoryPolicy,
   pickSample,
+  pickSamples,
   sharerDelay,
   ulidFloor,
+  epochsSinceReset,
   type HistoryApi,
+  type HistorySyncDeps,
 } from "../src/history";
 import { Network, domainOf } from "./fake-node";
 
@@ -129,7 +132,7 @@ function setup() {
   const masters = new Map<string, MasterSecret>();
   const messages: Message[] = [];
   const shares: (HistoryShare & { to: string })[] = [];
-  const pending: { user: string; since: string }[] = [];
+  const pending: { user: string; since: string; key_reset_at?: string | null; min_epoch?: number | null }[] = [];
   let counter = 0;
   const device = (user: string, deviceId: string): Device => {
     const address = `${user}@${DOMAIN}`;
@@ -180,19 +183,21 @@ function setup() {
     },
     pending: async () => ({ items: [...pending] }),
     messages: async (_c, q) =>
-      messages
-        .filter((m) => (q.epoch === undefined || (m.encrypted && m.epoch === q.epoch)) && (!q.after || m.id > q.after))
-        .slice(0, q.limit ?? 50),
+      q.before
+        ? messages.filter((m) => m.id < q.before!).sort((a, b) => (a.id < b.id ? 1 : -1)).slice(0, q.limit ?? 50)
+        : messages
+            .filter((m) => (q.epoch === undefined || (m.encrypted && m.epoch === q.epoch)) && (!q.after || m.id > q.after))
+            .slice(0, q.limit ?? 50),
   });
-  const sync = (dev: Device, online: (a: string) => boolean = () => true, log: string[] = []) =>
-    new HistorySync({ mls: dev.mls, address: dev.address, deviceId: dev.deviceId, api: () => api(dev), isOnline: online, onLog: (e) => log.push(e), backoffMs: 50 });
+  const sync = (dev: Device, online: (a: string) => boolean = () => true, log: string[] = [], extra: Partial<HistorySyncDeps> = {}) =>
+    new HistorySync({ mls: dev.mls, address: dev.address, deviceId: dev.deviceId, api: () => api(dev), isOnline: online, onLog: (e) => log.push(e), backoffMs: 50, ...extra });
   const post = async (dev: Device, body: string) => {
     const { content, epoch } = await dev.mls.encrypt(CONV, { type: "text", body });
     const m = { id: ulidFloor(Date.now()).slice(0, 10) + String(++counter).padStart(16, "0"), author: dev.address, device_id: dev.deviceId, epoch, content, encrypted: true } as unknown as Message;
     messages.push(m);
     return m;
   };
-  return { device, sync, post, messages, shares, pending, api };
+  return { device, sync, post, messages, shares, pending, api, net };
 }
 
 describe("HistorySync", () => {
@@ -258,6 +263,47 @@ describe("HistorySync", () => {
     expect(log.filter((l) => l === "share_rejected")).toHaveLength(3);
     // The forged share was acknowledged (it decrypted), the rejected ones stay unacknowledged.
     expect(shares.map((s) => s.id).sort()).toEqual(["p2", "p3", "p4"]);
+  });
+
+  it("drops a planted key whose sample message is not signed by the claimed author's device (node and sharer collude)", async () => {
+    const { device, sync, post, shares, messages } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    const mallory = device("mallory", DEV.m);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    const old = await post(alice, "geheim");
+    await mallory.mls.ensureJoined(CONV, { canCreate: false });
+    await bob.mls.ensureJoined(CONV, { canCreate: false });
+    await alice.mls.catchUp(CONV);
+    await mallory.mls.catchUp(CONV);
+
+    // Mallory shares a key of her choice for epoch 0; the node serves a "message of Alice" made under that key.
+    // Anyone who knows the key can produce the AES-GCM tag; only Alice's device can produce the signature inside.
+    const planted = new Uint8Array(32).fill(7);
+    const json = new TextEncoder().encode('{"type":"text","body":"fake"}');
+    const str16 = (x: string) => {
+      const b = new TextEncoder().encode(x);
+      return [b.length >> 8, b.length & 0xff, ...b];
+    };
+    const aad = new Uint8Array([1, ...str16(CONV), 0, 0, 0, 0, 0, 0, 0, 0, ...str16(alice.address), ...str16(DEV.a)]);
+    const nonce = new Uint8Array(12).fill(3);
+    const k = await crypto.subtle.importKey("raw", planted, "AES-GCM", false, ["encrypt"]);
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce, additionalData: aad }, k, new Uint8Array([...new Uint8Array(64).fill(1), ...json])));
+    const forgedContent = b64urlEncode(new Uint8Array([1, 0, 0, 0, 0, 0, 0, 0, 0, ...nonce, ...ct]));
+    messages.unshift({ ...old, id: "01J9ZK3G5M8Q2W4E6R8T0Y2VF0", content: forgedContent } as Message);
+    const enc = await mallory.mls.encryptHistory(CONV, encodeHistoryPayload(CONV, bob.address, [[0, planted]]));
+    shares.push({ id: "q1", to: bob.address, from_user: mallory.address, from_device: DEV.m, epoch_from: 0, epoch_to: 0, ciphertext: enc.content, created_at: "" });
+
+    const log: string[] = [];
+    expect(await sync(bob, undefined, log).receive(CONV)).toBe(0);
+    expect(bob.mls.knownEpochs(CONV)).not.toContain(0);
+    expect(log).toContain("keys_rejected");
+    // The real key still gets in later (a planted one would have blocked it for good: keys are never overwritten).
+    const real = await alice.mls.encryptHistory(CONV, encodeHistoryPayload(CONV, bob.address, alice.mls.exportEpochKeys(CONV, [0])));
+    messages.shift();
+    shares.push({ id: "q2", to: bob.address, from_user: alice.address, from_device: DEV.a, epoch_from: 0, epoch_to: 0, ciphertext: real.content, created_at: "" });
+    expect(await sync(bob).receive(CONV)).toBe(1);
+    expect(await bob.mls.decrypt(CONV, old)).toEqual({ ok: true, content: { type: "text", body: "geheim" } });
   });
 
   it("checks keys against messages of other authors first", () => {
@@ -342,5 +388,131 @@ describe("HistorySync", () => {
     // since_join: nothing to do.
     await sync(alice).checkPending(CONV, { kind: "since_join" });
     expect(shares).toHaveLength(1);
+  });
+});
+
+describe("after a key reset (ENCRYPTION.md §7b)", () => {
+  it("shares automatically only epochs after the reset epoch", () => {
+    const known = [0, 1, 2, 3, 4, 5, 6];
+    expect(epochsSinceReset(known, 7, 3, 5)).toEqual([5, 6]);
+    expect(epochsSinceReset(known, 7, 3, null)).toEqual([3, 4, 5, 6]);
+    expect(epochsSinceReset(known, 7, 6, 2)).toEqual([6]);
+    expect(epochsSinceReset(known, 7, null, 2)).toEqual([]);
+  });
+
+  /**
+   * Alice writes in epoch 0, Bob joins (epoch 1) and reads along, Bob resets his key; Alice writes once more in epoch
+   * 1, updates (epoch 2) and writes again; Bob's new device joins (epoch 3).
+   */
+  async function resetScenario() {
+    const env = setup();
+    const { device, post } = env;
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    const before = await post(alice, "vor Bob");
+    await bob.mls.ensureJoined(CONV, { canCreate: false });
+    await alice.mls.catchUp(CONV);
+    const there = await post(alice, "Bob liest mit");
+    await new Promise((r) => setTimeout(r, 5));
+    const resetAt = Date.now();
+    await new Promise((r) => setTimeout(r, 5));
+    const boundary = await post(alice, "nach dem Reset, gleiche Epoche");
+    await alice.mls.selfUpdate(CONV);
+    const after = await post(alice, "nach dem Reset");
+    const bob2 = device("bob", "01J9ZK3G5M8Q2W4E6R8T0Y2VB2");
+    await bob2.mls.ensureJoined(CONV, { canCreate: false });
+    await alice.mls.catchUp(CONV);
+    return { ...env, alice, bob2, resetAt, msgs: { before, there, boundary, after } };
+  }
+
+  it("with key_reset_at and min_epoch from the node: nothing before the reset reaches the reset member", async () => {
+    const { sync, shares, pending, alice, bob2, resetAt, msgs } = await resetScenario();
+    const iso = new Date(resetAt).toISOString();
+    pending.push({ user: bob2.address, since: iso, key_reset_at: iso, min_epoch: 2 });
+    await sync(alice).checkPending(CONV, { kind: "all" });
+    expect(shares).toHaveLength(1);
+    expect(shares[0]).toMatchObject({ to: bob2.address, epoch_from: 2, epoch_to: 2 });
+    expect(await sync(bob2).receive(CONV)).toBe(1);
+    expect((await bob2.mls.decrypt(CONV, msgs.after)).ok).toBe(true);
+    for (const m of [msgs.before, msgs.there, msgs.boundary]) expect(await bob2.mls.decrypt(CONV, m)).toEqual({ ok: false, reason: "missing_key" });
+  });
+
+  it("with an older node: the keys document's reset and the newest message before it decide", async () => {
+    const { sync, shares, pending, alice, bob2, resetAt } = await resetScenario();
+    // The node reports the join as `since` and nothing about the reset.
+    pending.push({ user: bob2.address, since: new Date(resetAt - 60_000).toISOString() });
+    await sync(alice, undefined, [], { resetAt: async (a) => (a === bob2.address ? resetAt : null) }).checkPending(CONV, { kind: "all" });
+    expect(shares).toHaveLength(1);
+    expect(shares[0]).toMatchObject({ epoch_from: 2, epoch_to: 2 });
+    // A reset from before the join is no reset of this membership: the policy applies.
+    shares.length = 0;
+    const s = sync(alice, undefined, [], { resetAt: async () => resetAt - 120_000 });
+    pending.length = 0;
+    pending.push({ user: bob2.address, since: new Date(resetAt - 60_000).toISOString() });
+    await s.checkPending(CONV, { kind: "all" });
+    expect(shares[0]).toMatchObject({ epoch_from: 0, epoch_to: 2 });
+  });
+
+  it("restores the requester's window after an approval and reports what this device lacks", async () => {
+    const { device, sync, shares, alice, bob2, msgs } = await resetScenario();
+    const s = sync(alice);
+    // Policy `all`: everything from the first message's epoch.
+    expect(await s.restorePlan(CONV, { kind: "text", windowStart: null })).toEqual({ epochs: [0, 1, 2], missing: 0, unknown: false });
+    // since_join: from the oldest message after the join.
+    const joined = Date.parse(new Date(Date.now() - 1).toISOString());
+    expect((await s.restorePlan(CONV, { kind: "text", windowStart: joined + 60_000 })).epochs).toEqual([]);
+    const result = await s.restore(CONV, bob2.address, { kind: "text", windowStart: null });
+    expect(result).toMatchObject({ sent: 3, missing: 0, skipped: false });
+    expect(shares[0]).toMatchObject({ to: bob2.address, epoch_from: 0, epoch_to: 2 });
+    expect(await sync(bob2).receive(CONV)).toBe(3);
+    for (const m of Object.values(msgs)) expect((await bob2.mls.decrypt(CONV, m)).ok).toBe(true);
+    // A device that joined later lacks the older epochs: partial.
+    const carol = device("carol", DEV.c);
+    await carol.mls.ensureJoined(CONV, { canCreate: false });
+    const plan = await sync(carol).restorePlan(CONV, { kind: "text", windowStart: null });
+    expect(plan.missing).toBeGreaterThan(0);
+    // Files channels: everything without a window start; with one only through their own listing.
+    expect((await s.restorePlan(CONV, { kind: "files", windowStart: null })).epochs).toEqual([0, 1, 2]);
+    expect(await s.restorePlan(CONV, { kind: "files", windowStart: 1 })).toEqual({ epochs: [], missing: 0, unknown: true });
+    const withRecords = sync(alice, undefined, [], { firstEpoch: async () => 1 });
+    expect((await withRecords.restorePlan(CONV, { kind: "files", windowStart: 1 })).epochs).toEqual([1, 2]);
+    // Nothing is sent while no device of the requester is in the group.
+    expect(await s.restore(CONV, "nobody@t.local", { kind: "text", windowStart: null })).toMatchObject({ sent: 0, skipped: true });
+  });
+
+  it("passes over a sample whose author device is gone with the old key and proves the key with the next message", async () => {
+    const { device, sync, post, shares, net } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    await bob.mls.ensureJoined(CONV, { canCreate: false });
+    await alice.mls.catchUp(CONV);
+    // In the same epoch: Bob's greeting (preferred as a sample: not the sharer's) and Alice's message.
+    const greeting = await post(bob, "Hallo von Bob");
+    const forBob = await post(alice, "Für Bob vor dem Reset");
+    expect(greeting.epoch).toBe(forBob.epoch);
+    // Bob resets his key: the old device's attestation is gone, his new device cannot verify the greeting any more.
+    net.node(DOMAIN).users.get("bob")!.devices.delete(DEV.b);
+    const bob2 = device("bob", "01J9ZK3G5M8Q2W4E6R8T0Y2VB2");
+    await bob2.mls.ensureJoined(CONV, { canCreate: false });
+    await alice.mls.catchUp(CONV);
+    expect((await sync(alice).restore(CONV, bob2.address, { kind: "text", windowStart: null })).sent).toBeGreaterThan(0);
+    expect(shares).toHaveLength(1);
+    const log: string[] = [];
+    expect(await sync(bob2, undefined, log).receive(CONV)).toBeGreaterThan(0);
+    expect(log).toEqual([]);
+    expect(await bob2.mls.decrypt(CONV, forBob)).toEqual({ ok: true, content: { type: "text", body: "Für Bob vor dem Reset" } });
+  });
+
+  it("orders the samples of an epoch: other authors first, then the sharer's", () => {
+    const msgs = [
+      { author: "mallory@t.local", device_id: "D1", epoch: 4, content: "x", encrypted: true },
+      { author: "alice@t.local", device_id: "D2", epoch: 4, content: "y", encrypted: true },
+      { author: "bob@t.local", device_id: "D3", epoch: 4, content: "w", encrypted: true },
+      { author: "alice@t.local", device_id: "D2", epoch: 5, content: "z", encrypted: true },
+    ] as Message[];
+    expect(pickSamples(msgs, 4, "mallory@t.local").map((m) => m.content)).toEqual(["y", "w", "x"]);
+    expect(pickSamples(msgs, 6, "x")).toEqual([]);
   });
 });

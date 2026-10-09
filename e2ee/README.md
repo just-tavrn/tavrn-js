@@ -44,7 +44,7 @@ Every function of this package awaits it itself; call it before using `@tavrn/cr
   `localStorageKey(master, deviceId)`, `localAad(account, name)`.
 
 **Account flows** (`account.ts`, ENCRYPTION.md §2.4, §3, §8, §9) — all take an `E2eeContext { api, username,
-address, deviceId, store, clientName? }`, where `api` needs the `keys` and `secretStorage` routes of a
+address, deviceId, store, clientName?, keyPackages? }`, where `api` needs the `keys` and `secretStorage` routes of a
 `TavrnApi`:
 `ensureDevice` (create the MLS client, attest the device, keep ≥ `KEY_PACKAGE_MIN` KeyPackages, uploading up to
 `KEY_PACKAGE_BATCH`), `setupAccount`, `unlockWithRecoveryKey`, `unlockWithPasskeyPrf`, `addPasskeySecret`,
@@ -58,7 +58,7 @@ deviceId)`, `loadClient(store)` / `saveClient(store, client)` (secret `CLIENT_ST
 MlsDeps)` with the node API injected (`MlsApi`: `node(domain)` → `MlsNodeApi` delivery service of the hosting
 node, `keys(address)` from the user's home node, backups on the own home node; `mlsApiOf({ home, node, keys })`
 adapts `@tavrn/sdk` clients) and persistence injected (`persist`, `savePins`, `saveMeta`, `saveVerified`).
-`openMlsManager(store, { api, address, deviceId, homeDomain, onEvent?, backupDelayMs? })` wires it to a
+`openMlsManager(store, { api, address, deviceId, homeDomain, onEvent?, backupDelayMs?, tabs? })` wires it to a
 `KeyStore` (secrets `PINS`, `META`, `VERIFIED`) and returns null when the device has no MLS client yet.
 Conversation ids are qualified (`qualify(domain, ulid)`, `splitQualified`). Methods:
 
@@ -70,14 +70,62 @@ Conversation ids are qualified (`qualify(domain, ulid)`, `splitQualified`). Meth
 - identities: `verifiedDevices(address)`, `ghostCheck(q, members)`, `changedKeys()`, `acknowledgeKeyChange`,
   `identityChanged`, `forgetDevices`, `safetyNumber`, `comparePayload`, `markVerified`, `removeVerification`,
   `acceptNewKey`, `verification(address)`, `verificationStates()`;
-- backups: `flushBackups()`, `hasPendingBackups()`, `restoreBackups()`; `dispose()`.
+- backups: `flushBackups()`, `hasPendingBackups()`, `restoreBackups()`; `dispose()`;
+- KeyPackages: `createKeyPackages(count)` (in the manager's state; `ensureDevice` tops up through it when its context
+  has `keyPackages`, see below).
 
-Events (`onEvent`): `epoch`, `rejoined`, `removed`, `key_changed`, `verification`.
+Events (`onEvent`): `epoch`, `rejoined`, `removed`, `added`, `key_changed`, `key_rotated`, `verification`.
+
+**Tabs of one browser** (`tabs.ts`, option `tabs` of `openMlsManager`) — the tabs of a browser profile share one
+IndexedDB store and so one MLS state. Without coordination every tab keeps its own copy in memory and writes it:
+the last writer wins, and a tab whose copy is stale commits on an old epoch, joins once more with the same device
+(which throws the other tab out of the group) or rejoins after an invalid commit. With `tabs: { name }`:
+
+- **One owner.** Every tab requests the Web Lock `name` (`navigator.locks`; the web client uses
+  `tavrn-mls|<home node origin>|<address>/<device id>`). The tab that holds it owns the state: it runs every
+  state-changing operation and alone writes the client state and the MLS bookkeeping.
+- **The others forward.** A tab without the lock keeps a read-only copy of the state (loaded from the store) for the
+  synchronous reads (`hasGroup`, `epoch`, `roster`, `voiceKey`, …), decryption, ephemeral events and plaintext
+  signatures: none of them changes the state (content keys are derived per epoch, ENCRYPTION.md §5). Everything that
+  does (`FORWARDED_OPERATIONS`: joins, catch-ups, commits, `encrypt` with its catch-up and rotation, history keys,
+  backups, KeyPackages, inbox keys) goes to the owner over the BroadcastChannel `name`: a request with an id, the
+  response (result or error, rebuilt as `MlsError` / `TavrnApiError`) addressed to the asking tab, 30 s timeout
+  (`MlsError("owner_unavailable")`). A decryption that misses an epoch key asks the owner to catch up or restore
+  the backup, then reads again.
+- **Following the owner.** After every write the owner announces `state`; the other tabs reload their copy before
+  they read it next (after a forwarded call returns, before an event is passed on). The owner also passes on the
+  events the views need (`epoch`, `rejoined`, `removed`); `added` stays with the owner (it shares the history once).
+- **Hand-over.** When the owner tab closes (or signs out: `dispose()`) the browser releases the lock and the next
+  waiting tab gets it. It reloads the state from the store before anything runs there, then announces itself.
+  Operations in flight are retried once on the new owner (the tab that took over runs its own ones itself); losing
+  a second owner fails the call with `owner_unavailable`. Retrying is safe because every forwarded operation can run
+  twice: joins and catch-ups are idempotent, a second commit is one more epoch, and an encryption whose result never
+  arrived was never sent. A new owner serves a request id only once.
+- **Fallback.** Without Web Locks or BroadcastChannel (or when the lock request fails) every tab works alone, as
+  before. The desktop app has one window: its tab always wins the lock, nothing else changes. Bots (one process per
+  state directory) leave `tabs` out.
+- **Not coordinated:** the pins and verified contacts (every tab reads them at start and writes them as before), and
+  the account flows that replace the whole state (identity reset, `forgetIdentityKeepDevice`, `wipeLocal`), after
+  which the web client opens a new manager anyway. Same-origin scripts can talk to the channel; they could read the
+  same store (and the open tab's memory) anyway, and the owner serves only the listed operations with checked
+  arguments.
+
+`ensureDevice` writes the client state when it tops up KeyPackages. While a manager is open, pass
+`keyPackages: (n) => manager.createKeyPackages(n)` in its context: the KeyPackages are then created in the manager's
+state (in the owning tab), and their private keys are not lost when that state is written next.
 
 **Codecs** — `content.ts` (ENCRYPTION.md §6): `encryptAttachment(file)` → ciphertext `Blob` and metadata,
 `decryptAttachment(ciphertext, meta)` (checks the SHA-256 first, `AttachmentIntegrityError`),
 `contentAttachments(content, envelope)` (only entries matching the envelope), `safeFileName`. `plaintext.ts`
 (FEDERATION.md §10.3): `signedAttachments`, `envelopeFields`, `signatureNonce`, `plainMarker`.
+
+**Encrypted files channels** — `files.ts` (FILES.md §8, WebCrypto only): `encryptFileStream(blob)` (1 MiB chunks,
+one in memory at a time) → ciphertext `Blob` and the file key, `decryptFileChunks(key, part, storedSize)` (a
+`TransformStream` for downloads, also for ranges from `ciphertextRange`), `encryptFileBytes`/`decryptFileBytes`
+(thumbnails), `encryptedSize`/`plaintextSize`; entry records: `encryptFileRecord(manager, conversation, record)`
+(under the current epoch, forwarded to the owning tab), `decryptFileRecord` (local; `withheld` when the node serves
+no record), `parseFileRecord` (binds the record to its entry, kind and ciphertext size), `entryName`/`validEntryName`
+(FILES.md §2) and `recordSamples` (records as the samples of history key checks).
 
 ## How a bot uses it
 
@@ -106,4 +154,6 @@ There is no recovery key and no secret storage for bots; the key file is the bac
 against in-memory nodes (`test/fake-node.ts`): the session manager across several nodes, two parties end to
 end with the in-memory and the file store (setup, join, messages, ephemeral events, plaintext signatures,
 backup restore on a new device, restart from the state directory), the account flows, the `KeyStore` contract
-and the file store's guarantees (encryption at rest, permissions, atomic and serialized writes, tampering).
+and the file store's guarantees (encryption at rest, permissions, atomic and serialized writes, tampering), and the
+tab coordination with an in-memory lock manager and BroadcastChannel (`test/fake-tabs.ts`: election, forwarding,
+errors, timeouts, hand-over, fallback; several tabs of one account on one state, with a control case without it).

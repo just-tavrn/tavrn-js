@@ -42,6 +42,8 @@ export class FakeNode {
   /** Requests served by the delivery service (for "which node was asked" checks). */
   dsCalls = 0;
   failNextPut = false;
+  /** The next this many handshake log requests fail like a lost connection. */
+  failLog = 0;
   counter = 0;
   /** Secret storage entries (method → wrapped) per username. */
   secrets = new Map<string, Map<string, string>>();
@@ -179,6 +181,10 @@ export class FakeNode {
         return { epoch: g.epoch };
       },
       log: async (c, since) => {
+        if (this.failLog > 0) {
+          this.failLog--;
+          throw new TypeError("Failed to fetch");
+        }
         const g = group(c);
         const items = [...g.log.entries()].filter(([e]) => e >= since).sort(([x], [y]) => x - y).map(([epoch, commit]) => ({ epoch, commit }));
         return { items, next: null };
