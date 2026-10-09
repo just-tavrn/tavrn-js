@@ -1458,8 +1458,15 @@ export type CreateHistoryRequest = {
 
 export type CreateHistoryShareRequest = {
     /**
+     * Format 2: the share's key sealed to each device of the recipient, device id → base64url box: 1 to 20 boxes,
+     * each at most 128 bytes, every device an attested device of `to_user` with a share key.
+     */
+    boxes?: {
+        [key: string]: string;
+    } | null;
+    /**
      * The key list, encrypted like message content under the current epoch (ENCRYPTION.md §7b), base64url;
-     * at most 64 KiB.
+     * at most 64 KiB. Format 2: under the share's fresh key, with the current epoch in the header.
      */
     ciphertext: string;
     /**
@@ -1471,6 +1478,10 @@ export type CreateHistoryShareRequest = {
      * Recipient address `name@domain` (a member of the conversation other than the sender).
      */
     to_user: string;
+    /**
+     * Share format: 1 (default) or 2 (sealed per recipient device, capability `history.shares2`).
+     */
+    v?: number | null;
 };
 
 export type CreateInviteRequest = {
@@ -1865,6 +1876,15 @@ export type DeviceKey = {
     device_id: string;
     device_public_key: string;
     identity_signature: string;
+    /**
+     * The device key's signature over the share key, base64url.
+     */
+    share_key_signature?: string | null;
+    /**
+     * The device's X25519 share key (ENCRYPTION.md §3.1), base64url; null until the device published one. Clients
+     * verify `share_key_signature` with the attested device key before sealing anything to it.
+     */
+    share_public_key?: string | null;
 };
 
 export type DeviceKeyRequest = {
@@ -1876,6 +1896,14 @@ export type DeviceKeyRequest = {
      * Signature of the identity key over the attestation message (§3.1), base64url (64 bytes).
      */
     identity_signature: string;
+    /**
+     * The device key's signature over the share key, base64url (64 bytes).
+     */
+    share_key_signature?: string | null;
+    /**
+     * The device's X25519 share key (§3.1), base64url (32 bytes); optional, together with `share_key_signature`.
+     */
+    share_public_key?: string | null;
 };
 
 /**
@@ -2732,6 +2760,10 @@ export type HistoryRequestList = {
 };
 
 export type HistoryShare = {
+    /**
+     * Format 2: the share's key sealed to the requesting device (base64url); null for format 1.
+     */
+    box?: string | null;
     ciphertext: string;
     created_at: string;
     epoch_from: number;
@@ -2742,6 +2774,10 @@ export type HistoryShare = {
      */
     from_user: string;
     id: string;
+    /**
+     * Share format: 1 or 2.
+     */
+    v: number;
 };
 
 export type HistoryShareCreated = {
@@ -5260,6 +5296,18 @@ export type SetOverrideRequest = {
      * Upload categories denied (absent: unchanged).
      */
     upload_deny?: Array<string> | null;
+};
+
+export type ShareKeyRequest = {
+    /**
+     * Signature of the device key over `"tavrn device share key v1" || 0x00 || share key || device key ||
+     * str16(device id)`, base64url (64 bytes).
+     */
+    share_key_signature: string;
+    /**
+     * The device's X25519 share key (ENCRYPTION.md §3.1), base64url (32 bytes).
+     */
+    share_public_key: string;
 };
 
 export type SharedRoom = {
@@ -14380,6 +14428,30 @@ export type UploadKeyPackagesResponses = {
 };
 
 export type UploadKeyPackagesResponse = UploadKeyPackagesResponses[keyof UploadKeyPackagesResponses];
+
+export type PutShareKeyData = {
+    body: ShareKeyRequest;
+    path: {
+        device_id: string;
+    };
+    query?: never;
+    url: '/api/v1/users/me/devices/{device_id}/share-key';
+};
+
+export type PutShareKeyErrors = {
+    400: ProblemDetails;
+    403: ProblemDetails;
+    409: ProblemDetails;
+    429: ProblemDetails;
+};
+
+export type PutShareKeyError = PutShareKeyErrors[keyof PutShareKeyErrors];
+
+export type PutShareKeyResponses = {
+    204: void;
+};
+
+export type PutShareKeyResponse = PutShareKeyResponses[keyof PutShareKeyResponses];
 
 export type ListPersonalData = {
     body?: never;
