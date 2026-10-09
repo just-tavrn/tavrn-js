@@ -447,6 +447,23 @@ describe("history shares v2 (ENCRYPTION.md §7b \"Format v2\")", () => {
     void bob;
   });
 
+  it("looks the recipient's devices up again when a device in the group is not in the cached lookup", async () => {
+    const { device, post, sync, shares, pending } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    await post(alice, "vorher");
+    await bob.mls.ensureJoined(CONV, { canCreate: false });
+    await alice.mls.catchUp(CONV);
+    await alice.mls.verifiedDevices(bob.address); // cached before the phone existed
+    const phone = device("bob", PHONE);
+    await phone.mls.ensureJoined(CONV, { canCreate: false });
+    await alice.mls.catchUp(CONV);
+    pending.push({ user: bob.address, since: new Date().toISOString() });
+    await sync(alice, undefined, [], { shares2: async () => true }).checkPending(CONV, { kind: "all" });
+    expect(Object.keys(shares[0]!.boxes ?? {}).sort()).toEqual([DEV.b, PHONE].sort());
+  });
+
   it("falls back to format 1 without the capability or a verified share key on every device of the recipient", async () => {
     for (const [phone, shares2] of [[{}, false], [{ shareKey: "none" as const }, true], [{ shareKey: "forged" as const }, true]] as const) {
       const { sync, shares, alice, bob, old } = await scenario(phone);

@@ -490,10 +490,17 @@ export class HistorySync {
     if (!(await this.deps.shares2?.(splitQualified(q).domain))) return null;
     const mls = this.deps.mls;
     await mls.catchUp(q).catch(() => undefined);
-    const attested = await mls.verifiedDevices(to).catch(() => null);
+    const inRoster = [...new Set(mls.roster(q).map(splitIdentity).filter((i) => i.address === to).map((i) => i.deviceId))];
+    let attested = await mls.verifiedDevices(to).catch(() => null);
+    // A device the cached lookup does not know yet (it joined since): look the user's devices up again.
+    const refresh = !attested || inRoster.some((d) => !attested!.has(d));
+    if (refresh) {
+      mls.forgetDevices(to);
+      attested = await mls.verifiedDevices(to).catch(() => null);
+    }
     const keys = await mls.verifiedShareKeys(to).catch(() => null);
     if (!attested || !keys) return null;
-    const devices = [...new Set(mls.roster(q).map(splitIdentity).filter((i) => i.address === to && attested.has(i.deviceId)).map((i) => i.deviceId))];
+    const devices = inRoster.filter((d) => attested!.has(d));
     if (!devices.length || devices.length > MAX_SHARE_BOXES || !devices.every((d) => keys.has(d))) return null;
     return Object.fromEntries(devices.map((d) => [d, keys.get(d)!]));
   }
