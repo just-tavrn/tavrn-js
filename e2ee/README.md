@@ -119,6 +119,14 @@ state (in the owning tab), and their private keys are not lost when that state i
 `contentAttachments(content, envelope)` (only entries matching the envelope), `safeFileName`. `plaintext.ts`
 (FEDERATION.md §10.3): `signedAttachments`, `envelopeFields`, `signatureNonce`, `plainMarker`.
 
+**Encrypted files channels** — `files.ts` (FILES.md §8, WebCrypto only): `encryptFileStream(blob)` (1 MiB chunks,
+one in memory at a time) → ciphertext `Blob` and the file key, `decryptFileChunks(key, part, storedSize)` (a
+`TransformStream` for downloads, also for ranges from `ciphertextRange`), `encryptFileBytes`/`decryptFileBytes`
+(thumbnails), `encryptedSize`/`plaintextSize`; entry records: `encryptFileRecord(manager, conversation, record)`
+(under the current epoch, forwarded to the owning tab), `decryptFileRecord` (local; `withheld` when the node serves
+no record), `parseFileRecord` (binds the record to its entry, kind and ciphertext size), `entryName`/`validEntryName`
+(FILES.md §2) and `recordSamples` (records as the samples of history key checks).
+
 ## How a bot uses it
 
 The bot runtime ([`@tavrn/bot`](../bot), `createBot()`) does, with an app token whose device id is `dev`:

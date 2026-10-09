@@ -1318,7 +1318,8 @@ export type CreateChannelRequest = {
     bitrate_kbps?: number | null;
     category_id?: string | null;
     /**
-     * Can be switched off only for text/announcement/forum. DMs and voice are always encrypted.
+     * Can be switched off only for text/announcement/forum. DMs and voice are always encrypted. Files channels:
+     * chosen here (default `true`) and fixed afterwards (FILES.md §1).
      */
     encrypted?: boolean | null;
     /**
@@ -1347,11 +1348,20 @@ export type CreateConversationRequest = {
 };
 
 export type CreateFolderRequest = {
-    name: string;
+    /**
+     * Encrypted channels: the client-chosen id (a fresh ULID), the entry record and its epoch (FILES.md §8.5).
+     */
+    id?: string | null;
+    /**
+     * Unencrypted channels: the name (refused in encrypted channels).
+     */
+    name?: string | null;
     /**
      * Parent folder (`null` or absent: top level).
      */
     parent_id?: string | null;
+    record?: string | null;
+    record_epoch?: number | null;
 };
 
 export type CreateGrantRequest = {
@@ -1593,7 +1603,17 @@ export type CreatedWebhook = {
 
 export type Crumb = {
     id: string;
+    /**
+     * Empty in encrypted channels (the name is in the folder's record).
+     */
     name: string;
+    /**
+     * Encrypted channels: the folder's record as in [`FileEntry`] (absent elsewhere).
+     */
+    record?: string | null;
+    record_author?: string | null;
+    record_device_id?: string | null;
+    record_epoch?: number | null;
 };
 
 /**
@@ -2189,6 +2209,21 @@ export type FileEntry = {
      */
     parent_id?: string | null;
     /**
+     * Encrypted channels: the entry record (content format 1 with name, type and file key, FILES.md §8.4);
+     * `null` in unencrypted channels and when it was written before the requester's history window (§8.7).
+     */
+    record?: string | null;
+    /**
+     * When the record was written.
+     */
+    record_at?: string | null;
+    /**
+     * Address of the user whose device wrote the record.
+     */
+    record_author?: string | null;
+    record_device_id?: string | null;
+    record_epoch?: number | null;
+    /**
      * SHA-256 of the content, base64url (files).
      */
     sha256: string;
@@ -2196,6 +2231,10 @@ export type FileEntry = {
      * Size in bytes (files; 0 for folders).
      */
     size: number;
+    /**
+     * Size of the stored thumbnail (encrypted channels; 0 = none).
+     */
+    thumbnail_size: number;
     updated_at: string;
 };
 
@@ -2232,6 +2271,15 @@ export type FilesInfo = {
      */
     backend: string;
     /**
+     * Members with `manage_channels`: the external store's host (`""` for the node's storage), for the deletion
+     * dialog (FILES.md §9); `null` for everybody else.
+     */
+    backend_host?: string | null;
+    /**
+     * Members with `manage_channels`: the object prefix on the external store (`""` for the node's storage).
+     */
+    backend_prefix?: string | null;
+    /**
      * The requester may configure the storage backend.
      */
     can_configure: boolean;
@@ -2251,6 +2299,10 @@ export type FilesInfo = {
      * External store with encryption (files unreadable outside tavrn).
      */
     encrypt_files: boolean;
+    /**
+     * The channel is end-to-end encrypted (FILES.md §8).
+     */
+    encrypted: boolean;
     executables_allowed: boolean;
     files: number;
     folders: number;
@@ -3030,6 +3082,20 @@ export type MessageSnapshot = {
     author: string;
     created_at: string;
     text: string;
+};
+
+export type MineList = {
+    bytes: number;
+    /**
+     * The requester's entries, oldest first, without records.
+     */
+    entries: Array<FileEntry>;
+    /**
+     * Totals of all the requester's entries in the channel (bytes: files and thumbnails).
+     */
+    files: number;
+    folders: number;
+    next_after?: string | null;
 };
 
 export type Mode = 'all' | 'mentions' | 'nothing';
@@ -4355,6 +4421,14 @@ export type Record = {
     version: number;
 };
 
+export type RecordList = {
+    /**
+     * Entries with a record inside the requester's history window, oldest record first.
+     */
+    entries: Array<FileEntry>;
+    next_after?: string | null;
+};
+
 export type RecoveryCodes = {
     /**
      * Ten single-use codes, shown once.
@@ -5409,13 +5483,18 @@ export type UpdateConversationRequest = {
 
 export type UpdateEntryRequest = {
     /**
-     * New name.
+     * New name (unencrypted channels).
      */
     name?: string | null;
     /**
      * New folder (`null`: top level; absent: unchanged).
      */
     parent_id?: string | null;
+    /**
+     * Encrypted channels: a new entry record (rename) and its epoch (FILES.md §8.5).
+     */
+    record?: string | null;
+    record_epoch?: number | null;
 };
 
 export type UpdateGrantRequest = {
@@ -10814,7 +10893,13 @@ export type DeleteRoom2Data = {
     path: {
         room_id: string;
     };
-    query?: never;
+    query?: {
+        /**
+         * Files channels on an external store that are not end-to-end encrypted: keep the objects on the store
+         * (FILES.md §9; ignored for encrypted channels, whose objects are unreadable without the channel's keys).
+         */
+        keep_external?: boolean;
+    };
     url: '/api/v1/rooms/{room_id}';
 };
 
@@ -11129,7 +11214,13 @@ export type DeleteChannelData = {
         room_id: string;
         channel_id: string;
     };
-    query?: never;
+    query?: {
+        /**
+         * Files channels on an external store that are not end-to-end encrypted: keep the objects on the store
+         * (FILES.md §9; ignored for encrypted channels, whose objects are unreadable without the channel's keys).
+         */
+        keep_external?: boolean;
+    };
     url: '/api/v1/rooms/{room_id}/channels/{channel_id}';
 };
 
@@ -11291,6 +11382,77 @@ export type CreateFolderResponses = {
 
 export type CreateFolderResponse = CreateFolderResponses[keyof CreateFolderResponses];
 
+export type MineData = {
+    body?: never;
+    path: {
+        room_id: string;
+        channel_id: string;
+    };
+    query?: {
+        /**
+         * 1–200, default 100.
+         */
+        limit?: number | null;
+        /**
+         * Cursor: the last entry id of the previous page.
+         */
+        after?: string | null;
+    };
+    url: '/api/v1/rooms/{room_id}/channels/{channel_id}/files/mine';
+};
+
+export type MineErrors = {
+    403: ProblemDetails;
+};
+
+export type MineError = MineErrors[keyof MineErrors];
+
+export type MineResponses = {
+    200: MineList;
+};
+
+export type MineResponse = MineResponses[keyof MineResponses];
+
+export type RecordsData = {
+    body?: never;
+    path: {
+        room_id: string;
+        channel_id: string;
+    };
+    query?: {
+        /**
+         * Only records of this epoch.
+         */
+        epoch?: number | null;
+        /**
+         * Only records written at or after this time (RFC 3339).
+         */
+        since?: string | null;
+        /**
+         * Cursor: the last entry id of the previous page.
+         */
+        after?: string | null;
+        /**
+         * 1–200, default 100.
+         */
+        limit?: number | null;
+    };
+    url: '/api/v1/rooms/{room_id}/channels/{channel_id}/files/records';
+};
+
+export type RecordsErrors = {
+    400: ProblemDetails;
+    403: ProblemDetails;
+};
+
+export type RecordsError = RecordsErrors[keyof RecordsErrors];
+
+export type RecordsResponses = {
+    200: RecordList;
+};
+
+export type RecordsResponse = RecordsResponses[keyof RecordsResponses];
+
 export type UploadData = {
     body: Array<number>;
     path: {
@@ -11444,6 +11606,57 @@ export type Download2Responses = {
      */
     206: unknown;
 };
+
+export type GetThumbnailData = {
+    body?: never;
+    path: {
+        room_id: string;
+        channel_id: string;
+        entry_id: string;
+    };
+    query?: never;
+    url: '/api/v1/rooms/{room_id}/channels/{channel_id}/files/{entry_id}/thumbnail';
+};
+
+export type GetThumbnailErrors = {
+    400: ProblemDetails;
+    404: ProblemDetails;
+};
+
+export type GetThumbnailError = GetThumbnailErrors[keyof GetThumbnailErrors];
+
+export type GetThumbnailResponses = {
+    /**
+     * Thumbnail ciphertext
+     */
+    200: unknown;
+};
+
+export type PutThumbnailData = {
+    body: Array<number>;
+    path: {
+        room_id: string;
+        channel_id: string;
+        entry_id: string;
+    };
+    query?: never;
+    url: '/api/v1/rooms/{room_id}/channels/{channel_id}/files/{entry_id}/thumbnail';
+};
+
+export type PutThumbnailErrors = {
+    400: ProblemDetails;
+    403: ProblemDetails;
+    404: ProblemDetails;
+    413: ProblemDetails;
+};
+
+export type PutThumbnailError = PutThumbnailErrors[keyof PutThumbnailErrors];
+
+export type PutThumbnailResponses = {
+    204: void;
+};
+
+export type PutThumbnailResponse = PutThumbnailResponses[keyof PutThumbnailResponses];
 
 export type ListMessagesData = {
     body?: never;
@@ -14667,7 +14880,7 @@ export type PutSceneResponses = {
 
 export type PutSceneResponse = PutSceneResponses[keyof PutSceneResponses];
 
-export type GetThumbnailData = {
+export type GetThumbnail2Data = {
     body?: never;
     path: {
         scene_id: string;
@@ -14676,20 +14889,20 @@ export type GetThumbnailData = {
     url: '/api/v1/users/me/whiteboards/{scene_id}/thumbnail';
 };
 
-export type GetThumbnailErrors = {
+export type GetThumbnail2Errors = {
     404: ProblemDetails;
 };
 
-export type GetThumbnailError = GetThumbnailErrors[keyof GetThumbnailErrors];
+export type GetThumbnail2Error = GetThumbnail2Errors[keyof GetThumbnail2Errors];
 
-export type GetThumbnailResponses = {
+export type GetThumbnail2Responses = {
     /**
      * Encrypted thumbnail (application/octet-stream)
      */
     200: unknown;
 };
 
-export type PutThumbnailData = {
+export type PutThumbnail2Data = {
     body: Array<number>;
     path: {
         scene_id: string;
@@ -14698,19 +14911,19 @@ export type PutThumbnailData = {
     url: '/api/v1/users/me/whiteboards/{scene_id}/thumbnail';
 };
 
-export type PutThumbnailErrors = {
+export type PutThumbnail2Errors = {
     400: ProblemDetails;
     404: ProblemDetails;
     413: ProblemDetails;
 };
 
-export type PutThumbnailError = PutThumbnailErrors[keyof PutThumbnailErrors];
+export type PutThumbnail2Error = PutThumbnail2Errors[keyof PutThumbnail2Errors];
 
-export type PutThumbnailResponses = {
+export type PutThumbnail2Responses = {
     204: void;
 };
 
-export type PutThumbnailResponse = PutThumbnailResponses[keyof PutThumbnailResponses];
+export type PutThumbnail2Response = PutThumbnail2Responses[keyof PutThumbnail2Responses];
 
 export type GetProfileData = {
     body?: never;

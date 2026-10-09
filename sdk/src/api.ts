@@ -185,7 +185,7 @@ import type { DeviceNonce, DeviceProof, PendingRemovalList, ReauthRequest, Reaut
 import type { GroupMapDocument, GroupMapUpdate, LogoutResponse, OidcIdentity, OidcStartRequest, OidcStartResponse, OidcTokenResponse } from "./generated/types.gen";
 import type { CreateHistoryShareRequest, HistoryPendingList, HistoryShareCreated, HistoryShareList } from "./generated/types.gen";
 import type { InboxKey, PublishInboxKeyRequest } from "./generated/types.gen";
-import type { BackendInfo, BackendRequest, BackendTest, DeleteResult, FileEntry, FileEntryDetail, FileList, FilesInfo, UpdateEntryRequest } from "./generated/types.gen";
+import type { BackendInfo, BackendRequest, BackendTest, DeleteResult, FileEntry, FileEntryDetail, FileList, FilesInfo, MineList, RecordList, UpdateEntryRequest } from "./generated/types.gen";
 import type { AdminApplication, AdminApplicationUpdate, ApplicationBlock, ApplicationBlockRequest, InstallIndexEntry, InstallRequest, Installation, PublicApplication } from "./generated/types.gen";
 import type { PeerResolution } from "./generated/types.gen";
 import type { PushRegistration, PushSubscriptionRequest, VapidInfo } from "./generated/types.gen";
@@ -1101,7 +1101,8 @@ export class TavrnApi {
     create: (req: CreateRoomRequest) => this.post<RoomDetail>("/rooms", req),
     get: (roomId: string) => this.get<RoomDetail>(`/rooms/${roomId}`),
     update: (roomId: string, req: UpdateRoomRequest) => this.patch<RoomDetail>(`/rooms/${roomId}`, req),
-    delete: (roomId: string) => this.del(`/rooms/${roomId}`),
+    /** Deletes the room; `keepExternal` keeps the objects of its unencrypted external files channels (FILES.md §9). */
+    delete: (roomId: string, opts: { keepExternal?: boolean } = {}) => this.del(`/rooms/${roomId}${opts.keepExternal ? "?keep_external=true" : ""}`),
     join: (roomId: string, req: JoinRequest = {}) => this.post<RoomDetail>(`/rooms/${roomId}/join`, req),
     leave: (roomId: string) => this.post<void>(`/rooms/${roomId}/leave`),
     /** Room icon (`manage_room`; PNG, JPEG, GIF, WebP, MP4, WebM; converted by the node). */
@@ -1166,7 +1167,9 @@ export class TavrnApi {
   channels = {
     create: (roomId: string, req: CreateChannelRequest) => this.post<Channel>(`/rooms/${roomId}/channels`, req),
     update: (roomId: string, channelId: string, req: UpdateChannelRequest) => this.patch<Channel>(`/rooms/${roomId}/channels/${channelId}`, req),
-    delete: (roomId: string, channelId: string) => this.del(`/rooms/${roomId}/channels/${channelId}`),
+    /** Deletes the channel; `keepExternal` keeps the objects of an unencrypted external files channel (FILES.md §9). */
+    delete: (roomId: string, channelId: string, opts: { keepExternal?: boolean } = {}) =>
+      this.del(`/rooms/${roomId}/channels/${channelId}${opts.keepExternal ? "?keep_external=true" : ""}`),
     createCategory: (roomId: string, req: CreateCategoryRequest) => this.post<Category>(`/rooms/${roomId}/categories`, req),
     updateCategory: (roomId: string, categoryId: string, req: UpdateCategoryRequest) => this.patch<Category>(`/rooms/${roomId}/categories/${categoryId}`, req),
     deleteCategory: (roomId: string, categoryId: string) => this.del(`/rooms/${roomId}/categories/${categoryId}`),
@@ -1215,7 +1218,9 @@ export class TavrnApi {
 
   /**
    * Files channels (design note 4.13 item 9, protocol/FILES.md): folders and files of a channel of kind `files`.
-   * Not end-to-end encrypted; uploads are streamed raw with the name in `Tavrn-File-Name`.
+   * Unencrypted channels: uploads are streamed raw with the name in `Tavrn-File-Name`. End-to-end encrypted channels
+   * (FILES.md §8): the client chooses the entry id, uploads ciphertext and sends the entry record instead of a name
+   * (`createFolderEncrypted`, `uploadEncrypted`, `update` with `record`); `@tavrn/e2ee` (`files.ts`) makes both.
    */
   files = {
     /** A folder's entries (`parent` absent: top level) or, with `q`, a name search across the channel. */
@@ -1232,6 +1237,48 @@ export class TavrnApi {
       if (opts.rename) headers["Tavrn-Conflict"] = "rename";
       const url = `${this.baseUrl}/api/v1/rooms/${roomId}/channels/${channelId}/files/upload`;
       return this.sendBlob<FileEntry>(url, file, headers, opts.onProgress, opts.signal);
+    },
+    /** Encrypted channels: a folder with a client-chosen id and its entry record. */
+    createFolderEncrypted: (roomId: string, channelId: string, req: { id: string; record: string; record_epoch: number; parent_id: string | null }) =>
+      this.post<FileEntry>(`/rooms/${roomId}/channels/${channelId}/files/folders`, req),
+    /** Encrypted channels: the ciphertext of a file with its client-chosen id, record and declared upload category. */
+    uploadEncrypted: (
+      roomId: string,
+      channelId: string,
+      ciphertext: Blob,
+      req: { id: string; record: string; recordEpoch: number; category: string; parentId?: string | null; onProgress?: (fraction: number) => void; signal?: AbortSignal },
+    ): Promise<FileEntry> => {
+      const headers: Record<string, string> = {
+        "Content-Type": "application/octet-stream",
+        "Tavrn-Entry-Id": req.id,
+        "Tavrn-Record": req.record,
+        "Tavrn-Record-Epoch": String(req.recordEpoch),
+        "Tavrn-Upload-Category": req.category,
+        ...this.authHeaders(),
+      };
+      if (req.parentId) headers["Tavrn-Parent"] = req.parentId;
+      const url = `${this.baseUrl}/api/v1/rooms/${roomId}/channels/${channelId}/files/upload`;
+      return this.sendBlob<FileEntry>(url, ciphertext, headers, req.onProgress, req.signal);
+    },
+    /** The raw response of a download (encrypted channels: the ciphertext as a stream), optionally of a byte range. */
+    downloadResponse: async (roomId: string, channelId: string, entryId: string, range?: { start: number; end: number }): Promise<Response> => {
+      const headers: Record<string, string> = range ? { Range: `bytes=${range.start}-${range.end}` } : {};
+      return (await this.binary("GET", `/rooms/${roomId}/channels/${channelId}/files/${entryId}/download`, { headers })) as Response;
+    },
+    /** The requester's own entries (no names or records) with totals, for deleting without keys (FILES.md §8.8). */
+    mine: (roomId: string, channelId: string, query: { limit?: number; after?: string | null } = {}) =>
+      this.get<MineList>(`/rooms/${roomId}/channels/${channelId}/files/mine`, { limit: query.limit, after: query.after ?? undefined }),
+    /** Encrypted channels: entries with records in the order they were written (history key checks, search sync). */
+    records: (roomId: string, channelId: string, query: { epoch?: number; since?: string; after?: string | null; limit?: number } = {}) =>
+      this.get<RecordList>(`/rooms/${roomId}/channels/${channelId}/files/records`, { epoch: query.epoch, since: query.since, after: query.after ?? undefined, limit: query.limit }),
+    /** Encrypted channels: stores the thumbnail ciphertext of a file (at most 1 MiB). */
+    putThumbnail: async (roomId: string, channelId: string, entryId: string, ciphertext: Uint8Array): Promise<void> => {
+      await this.binary("PUT", `/rooms/${roomId}/channels/${channelId}/files/${entryId}/thumbnail`, { body: ciphertext, headers: { "Content-Type": "application/octet-stream" } });
+    },
+    /** Encrypted channels: the thumbnail ciphertext, or null when the file has none. */
+    thumbnail: async (roomId: string, channelId: string, entryId: string): Promise<Uint8Array | null> => {
+      const resp = await this.binary("GET", `/rooms/${roomId}/channels/${channelId}/files/${entryId}/thumbnail`, { allow404: true });
+      return resp ? new Uint8Array(await resp.arrayBuffer()) : null;
     },
     /** The file's content (with the token); ranges are for streaming players and are not needed here. */
     download: async (roomId: string, channelId: string, entryId: string): Promise<Blob> => {
