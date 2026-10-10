@@ -3397,7 +3397,7 @@ export type MoveRequest = {
 
 export type MoveSkipped = {
     /**
-     * `channel_full` (the target's user limit), `target_forbidden` (no `connect` in the target),
+     * `channel_full` (the target's user limit), `target_forbidden` (below the target's age gate),
      * `outranked` (owner, node admin or an equal or higher role) or `move_forbidden` (no `move_members`
      * in the participant's channel).
      */
@@ -3461,6 +3461,21 @@ export type MyPresence = {
      * The chosen status: online | dnd | invisible
      */
     status: string;
+};
+
+export type MyVoiceRoom = {
+    /**
+     * Voice channels of the room with at least one participant that the requester can view.
+     */
+    channels: Array<VoiceChannelState>;
+    room_id: string;
+};
+
+export type MyVoiceStates = {
+    /**
+     * Rooms of this node the requester is a member of with at least one such channel.
+     */
+    rooms: Array<MyVoiceRoom>;
 };
 
 export type NodeBanRequest = {
@@ -6331,6 +6346,12 @@ export type VoiceParticipant = {
      * When LiveKit reported the participant (RFC 3339).
      */
     joined_at: string;
+    /**
+     * A moderator moved the user here (`VOICE.md` §7): they may be here without `view_channel` or `connect` for as
+     * long as this participation lasts. Clients may show "moved here". Always `false` in calls; absent from older
+     * nodes (= `false`).
+     */
+    moved?: boolean;
     /**
      * Microphone muted by the user (or by a moderator, see `server_muted`).
      */
@@ -15249,6 +15270,19 @@ export type AcceptTermsResponses = {
 };
 
 export type AcceptTermsResponse = AcceptTermsResponses[keyof AcceptTermsResponses];
+
+export type MyStatesData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/users/me/voice';
+};
+
+export type MyStatesResponses = {
+    200: MyVoiceStates;
+};
+
+export type MyStatesResponse = MyStatesResponses[keyof MyStatesResponses];
 
 export type ListScenesData = {
     body?: never;

@@ -57,6 +57,8 @@ describe("policy and windows", () => {
 
   it("selects the epochs to share per policy", () => {
     const known = [0, 1, 2, 3, 5, 7];
+    // since_join: the epochs of the messages since the member's join (posted before its device entered the group).
+    expect(epochsToShare({ kind: "since_join" }, known, 7, 3)).toEqual([3, 5]);
     expect(epochsToShare({ kind: "since_join" }, known, 7, null)).toEqual([]);
     expect(epochsToShare({ kind: "all" }, known, 7, null)).toEqual([0, 1, 2, 3, 5]);
     expect(epochsToShare({ kind: "days", days: 1 }, known, 7, 3)).toEqual([3, 5]);
@@ -196,12 +198,13 @@ function setup() {
       }
     },
     pending: async () => ({ items: [...pending] }),
-    messages: async (_c, q) =>
-      q.before
-        ? messages.filter((m) => m.id < q.before!).sort((a, b) => (a.id < b.id ? 1 : -1)).slice(0, q.limit ?? 50)
-        : messages
-            .filter((m) => (q.epoch === undefined || (m.encrypted && m.epoch === q.epoch)) && (!q.after || m.id > q.after))
-            .slice(0, q.limit ?? 50),
+    // The node's listing: without `threads=all` (or `epoch`) the channel's own messages only, thread messages left out.
+    messages: async (_c, q) => {
+      const listed = messages.filter((m) => q.epoch !== undefined || q.threads === "all" || !m.thread_id);
+      return q.before
+        ? listed.filter((m) => m.id < q.before!).sort((a, b) => (a.id < b.id ? 1 : -1)).slice(0, q.limit ?? 50)
+        : listed.filter((m) => (q.epoch === undefined || (m.encrypted && m.epoch === q.epoch)) && (!q.after || m.id > q.after)).slice(0, q.limit ?? 50);
+    },
   });
   const sync = (dev: Device, online: (a: string) => boolean = () => true, log: string[] = [], extra: Partial<HistorySyncDeps> = {}) =>
     new HistorySync({ mls: dev.mls, address: dev.address, deviceId: dev.deviceId, api: () => api(dev), isOnline: online, onLog: (e) => log.push(e), backoffMs: 50, ...extra });
@@ -243,6 +246,49 @@ describe("HistorySync", () => {
     expect(pending).toHaveLength(0);
     // The share never entered the decrypted-message cache.
     expect(bob.mls.peek(CONV, { id: "history:s1", author: alice.address, device_id: DEV.a, epoch: 1, content: "" })).toBeUndefined();
+  });
+
+  it("does not lose a share announced while a fetch is running: one more pass follows it", async () => {
+    const { device, sync, post, shares, pending, api } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    const old = await post(alice, "vor Bobs Beitritt");
+    await bob.mls.ensureJoined(CONV, { canCreate: false });
+    await alice.mls.catchUp(CONV);
+    pending.push({ user: bob.address, since: new Date().toISOString() });
+
+    // Bob opens the channel: his first fetch reads the (still empty) list and is slow to finish.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let calls = 0;
+    const slow = (): HistoryApi => {
+      const base = api(bob);
+      return {
+        ...base,
+        shares: async (c) => {
+          const list = await base.shares(c);
+          if (++calls === 1) await gate;
+          return list;
+        },
+      };
+    };
+    const bobSync = sync(bob, undefined, [], { api: slow });
+    const opening = bobSync.receive(CONV);
+    await Promise.resolve();
+    // Meanwhile Alice shares and the node announces it (`history.keys_available`): Bob asks again.
+    await sync(alice).checkPending(CONV, { kind: "all" });
+    expect(shares).toHaveLength(1);
+    const announced = bobSync.receive(CONV);
+    const again = bobSync.receive(CONV);
+    release();
+    expect(await opening).toBe(0);
+    expect(await announced).toBe(1);
+    // Several triggers during one run share the one extra pass.
+    expect(await again).toBe(1);
+    expect(calls).toBe(2);
+    expect(await bob.mls.decrypt(CONV, old)).toEqual({ ok: true, content: { type: "text", body: "vor Bobs Beitritt" } });
+    expect(shares).toHaveLength(0);
   });
 
   it("drops poisoned keys, rejects shares from devices outside the group and for others", async () => {
@@ -399,9 +445,54 @@ describe("HistorySync", () => {
     pending.push({ user: bob.address, since: "2026-10-05T00:00:00.000Z" });
     await sync(carol, (a) => a !== alice.address).checkPending(CONV, { kind: "all" });
     expect(shares).toHaveLength(1);
-    // since_join: nothing to do.
+    // since_join: members wait too (for the messages since their join), and the elected device shares.
+    await sync(alice).checkPending(CONV, { kind: "since_join" });
+    expect(shares).toHaveLength(2);
+  });
+
+  it("since_join: shares the epochs of the messages since the member's join, never older ones", async () => {
+    const { device, sync, post, shares, pending, messages } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    const joinedAt = Date.now() - 3_600_000;
+    // Epoch 0: a message from before Bob's room join; epoch 1: one after it, before his device entered the group.
+    const before = await post(alice, "vor Bobs Beitritt");
+    (before as { id: string }).id = ulidFloor(joinedAt - 3_600_000);
+    messages.sort((a, b) => (a.id < b.id ? -1 : 1));
+    await alice.mls.selfUpdate(CONV);
+    const gap = await post(alice, "nach Bobs Beitritt");
+    await bob.mls.ensureJoined(CONV, { canCreate: false });
+    await alice.mls.catchUp(CONV);
+    expect(await bob.mls.decrypt(CONV, gap)).toEqual({ ok: false, reason: "missing_key" });
+
+    pending.push({ user: bob.address, since: new Date(joinedAt).toISOString() });
     await sync(alice).checkPending(CONV, { kind: "since_join" });
     expect(shares).toHaveLength(1);
+    expect(shares[0]).toMatchObject({ to: bob.address, epoch_from: 1, epoch_to: 1 });
+    expect(await sync(bob).receive(CONV)).toBe(1);
+    expect(bob.mls.knownEpochs(CONV)).toEqual([1, 2]);
+    expect(await bob.mls.decrypt(CONV, gap)).toEqual({ ok: true, content: { type: "text", body: "nach Bobs Beitritt" } });
+    expect(await bob.mls.decrypt(CONV, before)).toEqual({ ok: false, reason: "missing_key" });
+    expect(pending).toHaveLength(0);
+  });
+
+  it("counts the messages of threads (forum posts) when it looks for the window's oldest epoch", async () => {
+    const { device, sync, post, shares, pending } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    const joinedAt = Date.now() - 1000;
+    // The only content since Bob's join is a forum post: a thread message, not part of the channel's own list.
+    const first = await post(alice, "Beitrag im Forum");
+    (first as { thread_id?: string }).thread_id = "01J9ZK3G5M8Q2W4E6R8T0Y2VT1";
+    await bob.mls.ensureJoined(CONV, { canCreate: false });
+    await alice.mls.catchUp(CONV);
+    pending.push({ user: bob.address, since: new Date(joinedAt).toISOString() });
+    await sync(alice).checkPending(CONV, { kind: "since_join" });
+    expect(shares[0]).toMatchObject({ epoch_from: 0, epoch_to: 0 });
+    expect(await sync(bob).receive(CONV)).toBe(1);
+    expect(await bob.mls.decrypt(CONV, first)).toEqual({ ok: true, content: { type: "text", body: "Beitrag im Forum" } });
   });
 });
 

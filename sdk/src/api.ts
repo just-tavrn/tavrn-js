@@ -152,6 +152,7 @@ import type {
   ModerateProfileRequest,
   BlockedUser,
   RoomVoiceStates,
+  MyVoiceStates,
   Sound,
   KeyInfo,
   Plan,
@@ -1395,6 +1396,8 @@ export class TavrnApi {
     updateState: (roomId: string, channelId: string, patch: VoiceStatePatch) => this.patch<VoiceChannelState>(`/rooms/${roomId}/channels/${channelId}/voice/state`, patch),
     /** Voice channels of a room with at least one participant (initial state; then `voice.state`). */
     roomStates: (roomId: string) => this.get<RoomVoiceStates>(`/rooms/${roomId}/voice`),
+    /** The same for every room of this node the user is a member of, in one request (after `ready` and a resync). */
+    mine: () => this.get<MyVoiceStates>("/users/me/voice"),
     serverMute: (roomId: string, channelId: string, address: string, muted: boolean) =>
       this.post<VoiceChannelState>(`/rooms/${roomId}/channels/${channelId}/voice/members/${encodeURIComponent(address)}/mute`, { muted }),
     disconnect: (roomId: string, channelId: string, address: string) => this.post<void>(`/rooms/${roomId}/channels/${channelId}/voice/members/${encodeURIComponent(address)}/disconnect`),

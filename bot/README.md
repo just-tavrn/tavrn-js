@@ -88,8 +88,10 @@ These variables belong to the bot process, not to the node.
 `bot.send(conversation, content, { replyTo, mentions })` sends text or a content object (`{ type: "text", body,
 embeds }`) to a conversation: `conversation` is the qualified id `<node>/<id>` of a received message
 (`m.conversation`) or the bare id of a conversation on the home node. In encrypted conversations the content is
-encrypted for the conversation's group (the bot joins first if needed); in unencrypted ones it is sent in plaintext,
-signed by the bot device. The bot's own messages are not delivered back to it. **Attachments are not supported yet.**
+encrypted for the conversation's group (the bot joins first if needed) together with its signed context (the thread
+and the reply the envelope carries, ENCRYPTION.md §5.2), so the node cannot move it into another thread or point it at
+another message; in unencrypted ones it is sent in plaintext, signed by the bot device. The bot's own messages are not
+delivered back to it. **Attachments are not supported yet.**
 
 **Threads** (PROTOCOL.md §7e): `m.threadId` names the thread a message belongs to (null in the channel itself);
 `m.reply()` answers in the same thread, `bot.send(conversation, content, { threadId })` writes into a thread, and
@@ -118,7 +120,10 @@ and `replyInThread` take `{ threadId }` to answer in another thread of the conve
 
 A handler that throws or never answers is answered with a generic error notice. In encrypted channels the arguments
 arrive encrypted: the runtime decrypts them, checks the signature of the invoker's device and refuses arguments made
-for another command, older than five minutes or replayed (§5.8); replies and follow-ups are encrypted for the channel.
+for another command, older than five minutes or replayed (§5.8); replies and follow-ups are encrypted for the channel
+and sign the interaction they answer (`ctx.interaction`, ENCRYPTION.md §5.2), so the node cannot present them as the
+answer to another invocation. Thread titles the runtime creates for `replyInThread` carry no signed context (the node
+chooses the thread id); clients accept them as titles of older clients.
 "Ephemeral" is a delivery property there, not a cryptographic one: any member of the epoch could decrypt an
 ephemeral reply if the node handed it over.
 
@@ -130,8 +135,9 @@ A bot is an ordinary participant of tavrn's encryption ([`ENCRYPTION.md`](https:
   an existing file is never replaced) and publishes the identity key derived from it. Every later start needs the same
   key: without it the runtime stops with `key_missing` ("restore the key file or ask the owner to reset the bot
   identity"), with another one with `key_mismatch`.
-- **Devices.** Every token is a device of the bot. The runtime attests the token's device with the identity key and
-  keeps KeyPackages uploaded, so people can add the bot to private channels and DMs.
+- **Devices.** Every token is a device of the bot. The runtime attests the token's device (and the device's share key,
+  ENCRYPTION.md §3.1) with the identity key and keeps KeyPackages uploaded, so people can add the bot to private
+  channels and DMs.
 - **Groups.** The bot joins the encryption group of every encrypted channel it can view (external commit) and accepts
   Welcomes for private channels and DMs. With `joinPolicy: "eager"` it joins right after an installation; with
   `"lazy"` only when it needs a channel (a message, a command, `send`), which avoids an epoch per channel in large
@@ -204,7 +210,7 @@ Bots that receive requests from the node (interactions URL, event subscriptions,
 
 ## Development
 
-```
+```sh
 pnpm --filter @tavrn/bot test          # unit tests (the integration tests are skipped without a node binary)
 pnpm --filter @tavrn/bot typecheck
 TAVRN_NODE_BIN=/path/to/tavrn-node pnpm --filter @tavrn/bot test   # also the tests against real nodes
