@@ -57,6 +57,8 @@ describe("policy and windows", () => {
 
   it("selects the epochs to share per policy", () => {
     const known = [0, 1, 2, 3, 5, 7];
+    // since_join: the epochs of the messages since the member's join (posted before its device entered the group).
+    expect(epochsToShare({ kind: "since_join" }, known, 7, 3)).toEqual([3, 5]);
     expect(epochsToShare({ kind: "since_join" }, known, 7, null)).toEqual([]);
     expect(epochsToShare({ kind: "all" }, known, 7, null)).toEqual([0, 1, 2, 3, 5]);
     expect(epochsToShare({ kind: "days", days: 1 }, known, 7, 3)).toEqual([3, 5]);
@@ -442,9 +444,36 @@ describe("HistorySync", () => {
     pending.push({ user: bob.address, since: "2026-10-05T00:00:00.000Z" });
     await sync(carol, (a) => a !== alice.address).checkPending(CONV, { kind: "all" });
     expect(shares).toHaveLength(1);
-    // since_join: nothing to do.
+    // since_join: members wait too (for the messages since their join), and the elected device shares.
+    await sync(alice).checkPending(CONV, { kind: "since_join" });
+    expect(shares).toHaveLength(2);
+  });
+
+  it("since_join: shares the epochs of the messages since the member's join, never older ones", async () => {
+    const { device, sync, post, shares, pending, messages } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    const joinedAt = Date.now() - 3_600_000;
+    // Epoch 0: a message from before Bob's room join; epoch 1: one after it, before his device entered the group.
+    const before = await post(alice, "vor Bobs Beitritt");
+    (before as { id: string }).id = ulidFloor(joinedAt - 3_600_000);
+    messages.sort((a, b) => (a.id < b.id ? -1 : 1));
+    await alice.mls.selfUpdate(CONV);
+    const gap = await post(alice, "nach Bobs Beitritt");
+    await bob.mls.ensureJoined(CONV, { canCreate: false });
+    await alice.mls.catchUp(CONV);
+    expect(await bob.mls.decrypt(CONV, gap)).toEqual({ ok: false, reason: "missing_key" });
+
+    pending.push({ user: bob.address, since: new Date(joinedAt).toISOString() });
     await sync(alice).checkPending(CONV, { kind: "since_join" });
     expect(shares).toHaveLength(1);
+    expect(shares[0]).toMatchObject({ to: bob.address, epoch_from: 1, epoch_to: 1 });
+    expect(await sync(bob).receive(CONV)).toBe(1);
+    expect(bob.mls.knownEpochs(CONV)).toEqual([1, 2]);
+    expect(await bob.mls.decrypt(CONV, gap)).toEqual({ ok: true, content: { type: "text", body: "nach Bobs Beitritt" } });
+    expect(await bob.mls.decrypt(CONV, before)).toEqual({ ok: false, reason: "missing_key" });
+    expect(pending).toHaveLength(0);
   });
 });
 
