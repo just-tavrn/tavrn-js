@@ -3,7 +3,8 @@
  * History for new members of encrypted channels (ENCRYPTION.md §7b, design note 4.13 item 11).
  *
  * Members hand the content keys of past epochs to a member who joined later, as far as the channel's policy
- * allows. A share is never a chat message: it is the canonical JSON payload
+ * allows; under every policy that includes the epochs between the member's room join and its device's first leaf
+ * (the device enters a channel's group only when the channel is opened or the room loaded). A share is never a chat message: it is the canonical JSON payload
  * `{type: "history_keys", v, conversation, to, epochs: [[epoch, key], …]}` encrypted and signed like
  * message content (§5.2), posted to `…/history-keys` of the node hosting the conversation. Format 2 (node capability
  * `history.shares2`): under a fresh key sealed to the verified share key of every device of the recipient, so only
@@ -41,6 +42,10 @@ export function parseHistoryPolicy(value: string | null | undefined): HistoryPol
   return { kind: "since_join" };
 }
 
+/**
+ * Does the policy give new members anything from before their join? Members wait for shares under every policy (the
+ * messages since their join that were posted before their device entered the group), this only tells the settings.
+ */
 export function grantsHistory(p: HistoryPolicy): boolean {
   return p.kind !== "since_join";
 }
@@ -70,11 +75,11 @@ export function ulidFloor(ms: number): string {
 
 /**
  * Epochs to share with a new member: the device's known epochs older than the current one (the member has
- * the current epoch itself), limited to `fromEpoch` and later for a day window. `since_join` shares nothing.
+ * the current epoch itself), limited to `fromEpoch` (the oldest epoch with a message in the window; null: none) and
+ * later for a day window and for `since_join` (the window starts at the join).
  */
 export function epochsToShare(p: HistoryPolicy, known: number[], current: number, fromEpoch: number | null): number[] {
-  if (!grantsHistory(p)) return [];
-  const lower = p.kind === "days" ? (fromEpoch ?? Number.POSITIVE_INFINITY) : 0;
+  const lower = p.kind === "all" ? 0 : (fromEpoch ?? Number.POSITIVE_INFINITY);
   return [...new Set(known)].filter((e) => Number.isSafeInteger(e) && e >= lower && e < current).sort((a, b) => a - b);
 }
 
@@ -253,7 +258,11 @@ export interface HistoryApi {
   shares(conversationId: string): Promise<HistoryShareList>;
   ack(conversationId: string, shareId: string): Promise<unknown>;
   pending(conversationId: string): Promise<HistoryPendingList>;
-  messages(conversationId: string, query: { limit?: number; after?: string; before?: string; epoch?: number }): Promise<Message[]>;
+  /**
+   * `GET …/messages`; `threads: "all"` includes the messages of the channel's threads (forum posts), which the window
+   * lookups need: a thread message is content of the channel like any other.
+   */
+  messages(conversationId: string, query: { limit?: number; after?: string; before?: string; epoch?: number; threads?: "all" }): Promise<Message[]>;
 }
 
 /** Channel kinds whose content is messages (others, such as files channels, keep records, FILES.md §8.7). */
@@ -340,7 +349,7 @@ export class HistorySync {
    * and only if they still wait.
    */
   async checkPending(q: string, policy: HistoryPolicy): Promise<void> {
-    if (this.disposed || !grantsHistory(policy) || !this.deps.mls.hasGroup(q)) return;
+    if (this.disposed || !this.deps.mls.hasGroup(q)) return;
     const { api, id } = this.api(q);
     const { items } = await api.pending(id);
     if (!items.length) return;
@@ -404,11 +413,11 @@ export class HistorySync {
     const mls = this.deps.mls;
     const current = mls.epoch(q);
     if (current === null) return 0;
-    const after = await api.messages(id, { after: ulidFloor(resetAtMs), limit: 20 });
+    const after = await api.messages(id, { after: ulidFloor(resetAtMs), limit: 20, threads: "all" });
     const since = after.filter((m) => m.encrypted && typeof m.epoch === "number").map((m) => m.epoch as number);
     let lower = minEpoch;
     if (lower === null) {
-      const before = await api.messages(id, { before: ulidFloor(resetAtMs), limit: 1 });
+      const before = await api.messages(id, { before: ulidFloor(resetAtMs), limit: 1, threads: "all" });
       const last = before.find((m) => m.encrypted && typeof m.epoch === "number");
       lower = last ? (last.epoch as number) + 1 : 0;
     }
@@ -420,7 +429,7 @@ export class HistorySync {
   private async firstEpoch(q: string, channel: RestoreChannel): Promise<number | null | undefined> {
     const { api, id } = this.api(q);
     if (MESSAGE_KINDS.has(channel.kind)) {
-      const page = await api.messages(id, { after: ulidFloor(channel.windowStart ?? 0), limit: 20 });
+      const page = await api.messages(id, { after: ulidFloor(channel.windowStart ?? 0), limit: 20, threads: "all" });
       const epochs = page.filter((m) => m.encrypted && typeof m.epoch === "number").map((m) => m.epoch as number);
       return epochs.length ? Math.min(...epochs) : null;
     }
@@ -463,17 +472,21 @@ export class HistorySync {
     return { ...plan, sent, skipped: false };
   }
 
-  /** Sends the keys of the policy's window to `to` (chunked); an empty share if there is nothing to send. */
+  /**
+   * Sends the keys of the policy's window to `to` (chunked); an empty share if there is nothing to send. The window
+   * starts `n` days before the join (`days:n`), at the join (`since_join`: the messages posted before the member's
+   * device entered the group) or nowhere (`all`).
+   */
   async shareWith(q: string, to: string, joinedAtMs: number, policy: HistoryPolicy): Promise<number> {
     const { api, id } = this.api(q);
     const mls = this.deps.mls;
     const current = mls.epoch(q);
     if (current === null) return 0;
     let fromEpoch: number | null = null;
-    if (policy.kind === "days") {
+    if (policy.kind !== "all") {
       // The oldest epoch with a message in the window (ascending page after the window start).
       const start = historyWindowStart(policy, Number.isFinite(joinedAtMs) ? joinedAtMs : Date.now()) ?? 0;
-      const page = await api.messages(id, { after: ulidFloor(start), limit: 20 });
+      const page = await api.messages(id, { after: ulidFloor(start), limit: 20, threads: "all" });
       const epochs = page.filter((m) => m.encrypted && typeof m.epoch === "number").map((m) => m.epoch as number);
       fromEpoch = epochs.length ? Math.min(...epochs) : null;
     }
