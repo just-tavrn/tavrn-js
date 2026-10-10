@@ -3397,7 +3397,7 @@ export type MoveRequest = {
 
 export type MoveSkipped = {
     /**
-     * `channel_full` (the target's user limit), `target_forbidden` (no `connect` in the target),
+     * `channel_full` (the target's user limit), `target_forbidden` (below the target's age gate),
      * `outranked` (owner, node admin or an equal or higher role) or `move_forbidden` (no `move_members`
      * in the participant's channel).
      */
@@ -6331,6 +6331,12 @@ export type VoiceParticipant = {
      * When LiveKit reported the participant (RFC 3339).
      */
     joined_at: string;
+    /**
+     * A moderator moved the user here (`VOICE.md` §7): they may be here without `view_channel` or `connect` for as
+     * long as this participation lasts. Clients may show "moved here". Always `false` in calls; absent from older
+     * nodes (= `false`).
+     */
+    moved?: boolean;
     /**
      * Microphone muted by the user (or by a moderator, see `server_muted`).
      */
