@@ -245,6 +245,49 @@ describe("HistorySync", () => {
     expect(bob.mls.peek(CONV, { id: "history:s1", author: alice.address, device_id: DEV.a, epoch: 1, content: "" })).toBeUndefined();
   });
 
+  it("does not lose a share announced while a fetch is running: one more pass follows it", async () => {
+    const { device, sync, post, shares, pending, api } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    const old = await post(alice, "vor Bobs Beitritt");
+    await bob.mls.ensureJoined(CONV, { canCreate: false });
+    await alice.mls.catchUp(CONV);
+    pending.push({ user: bob.address, since: new Date().toISOString() });
+
+    // Bob opens the channel: his first fetch reads the (still empty) list and is slow to finish.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let calls = 0;
+    const slow = (): HistoryApi => {
+      const base = api(bob);
+      return {
+        ...base,
+        shares: async (c) => {
+          const list = await base.shares(c);
+          if (++calls === 1) await gate;
+          return list;
+        },
+      };
+    };
+    const bobSync = sync(bob, undefined, [], { api: slow });
+    const opening = bobSync.receive(CONV);
+    await Promise.resolve();
+    // Meanwhile Alice shares and the node announces it (`history.keys_available`): Bob asks again.
+    await sync(alice).checkPending(CONV, { kind: "all" });
+    expect(shares).toHaveLength(1);
+    const announced = bobSync.receive(CONV);
+    const again = bobSync.receive(CONV);
+    release();
+    expect(await opening).toBe(0);
+    expect(await announced).toBe(1);
+    // Several triggers during one run share the one extra pass.
+    expect(await again).toBe(1);
+    expect(calls).toBe(2);
+    expect(await bob.mls.decrypt(CONV, old)).toEqual({ ok: true, content: { type: "text", body: "vor Bobs Beitritt" } });
+    expect(shares).toHaveLength(0);
+  });
+
   it("drops poisoned keys, rejects shares from devices outside the group and for others", async () => {
     const { device, sync, post, shares } = setup();
     const alice = device("alice", DEV.a);
