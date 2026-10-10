@@ -349,7 +349,8 @@ describe("MlsManager", () => {
     const out = alice.client().addMembers(CONV, kps);
     await node.ds(alice.address, DEV.a).postCommit(ID, { epoch: out.epoch, commit: b64urlEncode(out.commit), group_info: b64urlEncode(out.groupInfo), welcome: null });
     alice.client().mergePendingCommit(CONV);
-    expect(await alice.mls.ghostCheck(CONV, memberSet(alice, bob))).toEqual([{ identity: `${bob.address}/${DEV.b}`, reason: "duplicate" }]);
+    // The leaf with Bob's attested key is his; the other one under his name is unattested, whichever comes first.
+    expect(await alice.mls.ghostCheck(CONV, memberSet(alice, bob))).toEqual([{ identity: `${bob.address}/${DEV.b}`, reason: "unattested" }]);
     twin.free();
   });
 
@@ -1030,15 +1031,38 @@ describe("encrypt() catches up first and refuses to send otherwise (ENCRYPTION.m
     // A device of a non-member joins while Alice types (the node let it in).
     await mallory.mls.ensureJoined(CONV, { canCreate: false });
     await expect(alice.mls.encrypt(CONV, { type: "text", body: "secret" })).rejects.toMatchObject({ name: "MlsError", code: "ghost" });
-    // A retry is refused as well until the violation was shown (a ghost check of the caller) or the caller names it.
+    // A retry is refused as well, also with the caller's member list, until the user acknowledged the leaf.
     await expect(alice.mls.encrypt(CONV, { type: "text", body: "secret" })).rejects.toMatchObject({ code: "ghost" });
     const guard = { members: memberSet(alice, bob), noBots: false };
-    await expect(alice.mls.encrypt(CONV, { type: "text", body: "secret" }, { ...guard, knownGhosts: [] })).rejects.toMatchObject({ code: "ghost" });
-    await expect(alice.mls.encrypt(CONV, { type: "text", body: "after the warning" }, { ...guard, knownGhosts: [`${mallory.address}/${DEV.c}`] })).resolves.toBeTruthy();
-    // Shown by the caller's ghost check: known from then on, also after further commits.
+    await expect(alice.mls.encrypt(CONV, { type: "text", body: "secret" }, guard)).rejects.toMatchObject({ code: "ghost" });
+    // A ghost check shows it, but acknowledges nothing.
     expect(await alice.mls.ghostCheck(CONV, memberSet(alice, bob))).toEqual([{ identity: `${mallory.address}/${DEV.c}`, reason: "not_member" }]);
+    expect(alice.mls.unacknowledgedGhosts(CONV)).toEqual([{ identity: `${mallory.address}/${DEV.c}`, reason: "not_member" }]);
+    await expect(alice.mls.encrypt(CONV, { type: "text", body: "secret" })).rejects.toMatchObject({ code: "ghost" });
+    // The warning's button: acknowledged from then on, also after further commits.
+    await alice.mls.acknowledgeGhosts(CONV, [`${mallory.address}/${DEV.c}`]);
+    expect(alice.mls.unacknowledgedGhosts(CONV)).toEqual([]);
+    await expect(alice.mls.encrypt(CONV, { type: "text", body: "after the warning" }, guard)).resolves.toBeTruthy();
     await bob.mls.selfUpdate(CONV);
     await expect(alice.mls.encrypt(CONV, { type: "text", body: "after the warning" })).resolves.toBeTruthy();
+  });
+
+  it("refuses every write path while a ghost is not acknowledged, even without an earlier ghost check (fail closed)", async () => {
+    const { device } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    const forged = device("bob", DEV.d, { forgedAttestation: true });
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    await bob.mls.ensureJoined(CONV, { canCreate: true });
+    await forged.mls.ensureJoined(CONV, { canCreate: false });
+    await alice.mls.catchUp(CONV);
+    // No view ever ran a ghost check here (a forum post, a file record, a whiteboard scene, a thread title).
+    await expect(alice.mls.encrypt(CONV, { type: "text", body: "forum post" })).rejects.toMatchObject({ code: "ghost" });
+    await expect(alice.mls.encryptThreadTitle(CONV, "a title")).rejects.toMatchObject({ code: "ghost" });
+    await expect(alice.mls.encryptEphemeral(CONV, { type: "whiteboard.scene", elements: [] })).rejects.toMatchObject({ code: "ghost" });
+    await alice.mls.acknowledgeGhosts(CONV, [`${bob.address}/${DEV.d}`]);
+    await expect(alice.mls.encrypt(CONV, { type: "text", body: "forum post" })).resolves.toBeTruthy();
+    await expect(alice.mls.encryptEphemeral(CONV, { type: "whiteboard.scene", elements: [] })).resolves.toBeTruthy();
   });
 });
 
