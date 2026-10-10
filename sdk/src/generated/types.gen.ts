@@ -3463,6 +3463,21 @@ export type MyPresence = {
     status: string;
 };
 
+export type MyVoiceRoom = {
+    /**
+     * Voice channels of the room with at least one participant that the requester can view.
+     */
+    channels: Array<VoiceChannelState>;
+    room_id: string;
+};
+
+export type MyVoiceStates = {
+    /**
+     * Rooms of this node the requester is a member of with at least one such channel.
+     */
+    rooms: Array<MyVoiceRoom>;
+};
+
 export type NodeBanRequest = {
     reason?: string;
     subject: string;
@@ -15255,6 +15270,19 @@ export type AcceptTermsResponses = {
 };
 
 export type AcceptTermsResponse = AcceptTermsResponses[keyof AcceptTermsResponses];
+
+export type MyStatesData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/users/me/voice';
+};
+
+export type MyStatesResponses = {
+    200: MyVoiceStates;
+};
+
+export type MyStatesResponse = MyStatesResponses[keyof MyStatesResponses];
 
 export type ListScenesData = {
     body?: never;

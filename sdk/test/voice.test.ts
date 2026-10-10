@@ -33,6 +33,15 @@ describe("voice API (VOICE.md)", () => {
     expect(calls[3]!.url).toBe("https://n.example/api/v1/rooms/R/voice");
   });
 
+  it("loads the voice state of all rooms at once (GET /users/me/voice)", async () => {
+    const rooms = [{ room_id: "R", channels: [{ room_id: "R", channel_id: "C", epoch: 1, participants: [] }] }];
+    const { impl, calls } = fetchMock([{ status: 200, body: { rooms } }]);
+    const api = new TavrnApi({ baseUrl: "https://n.example", getToken: () => "tok", fetchImpl: impl });
+    expect((await api.voice.mine()).rooms).toEqual(rooms);
+    expect(calls[0]!.url).toBe("https://n.example/api/v1/users/me/voice");
+    expect(calls[0]!.init.method ?? "GET").toBe("GET");
+  });
+
   it("moderates by user address (encoded) and passes problem codes with meta through", async () => {
     const { impl, calls } = fetchMock([
       { status: 200, body: { participants: [] } },
