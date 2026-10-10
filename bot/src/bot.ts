@@ -28,7 +28,7 @@ import { consoleLogger, type BotLogger } from "./logger";
 import { NodeLink } from "./node-link";
 import { appTokenClaims, type AppTokenClaims } from "./token";
 
-export const BOT_VERSION = "0.1.0";
+export const BOT_VERSION = "0.2.1";
 /** Default state directory (`TAVRN_BOT_STATE_DIR`, APPLICATIONS.md §3.3). */
 export const DEFAULT_STATE_DIR = ".tavrn-state";
 /** Channel kinds whose MLS groups the bot joins (voice groups only carry frame keys). */
