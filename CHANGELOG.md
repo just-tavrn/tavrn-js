@@ -21,3 +21,10 @@ package instead of a git dependency.
 - **`@tavrn/bot`**: the bot runtime for Node.js (its own key file, full encryption membership, events, commands,
   replies in threads, signed answers to interactions, token rotation, installations on other nodes) and the example
   bots.
+
+### Security
+
+- The npm token and the provenance permission live only in a publish job of a protected `release` environment that
+  publishes the tarballs of a credential-free build job, without checkout or install.
+- The self-hosted bot integration job uses no Actions cache and refuses `dependabot/*` branches.
+- The publication check prints only file and line of a private match, never the matching text.
