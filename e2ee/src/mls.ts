@@ -238,6 +238,7 @@ export const FORWARDED_OPERATIONS = [
   "removeLeaves",
   "addMissingDevices",
   "encrypt",
+  "acknowledgeGhosts",
   "encryptHistory",
   "importHistoryKeys",
   "publishInboxKey",
@@ -355,12 +356,11 @@ export interface EncryptOptions {
   ctx?: MessageContext;
   /**
    * The ghost check after the catch-up (§4.6): the conversation's members as the caller knows them and its effective
-   * "no bots" flag. Without them the members of this manager's last {@link MlsManager.ghostCheck} are used.
+   * "no bots" flag. Without them the members of this manager's last {@link MlsManager.ghostCheck} are used, and
+   * without such a check every leaf's user counts as a member (only attestation is judged).
    */
   members?: string[];
   noBots?: boolean;
-  /** Ghost identities the user was already shown (they do not stop the message again). */
-  knownGhosts?: string[];
 }
 
 const ENVELOPE_MISMATCH: Decrypted = Object.freeze({ ok: false, reason: "envelope_mismatch" }) as Decrypted;
@@ -462,8 +462,6 @@ function encryptOptions(v: unknown): EncryptOptions {
   const members = strings(o.members);
   if (members) out.members = members;
   if (o.noBots !== undefined) out.noBots = o.noBots === true;
-  const known = strings(o.knownGhosts);
-  if (known) out.knownGhosts = known;
   return out;
 }
 
@@ -482,10 +480,12 @@ export class MlsManager {
   private readonly decrypted = new Map<string, Decrypted>();
   /** The signed context of decrypted messages (stripped from their content), "malformed" when invalid. */
   private readonly contexts = new WeakMap<Decrypted, MessageContext | "malformed">();
-  /** The last ghost check per conversation: its members and the violations shown (§4.6, re-checked by encrypt). */
-  private readonly lastGhosts = new Map<string, { members: string[]; noBots: boolean; known: Set<string> }>();
-  /** Conversations where encrypt found a ghost nobody was shown yet: checked again on every try. */
-  private readonly ghostDirty = new Set<string>();
+  /** The members of the last ghost check per conversation (§4.6), used by the checks before encrypting. */
+  private readonly lastGhosts = new Map<string, { members: string[]; noBots: boolean }>();
+  /** Ghost leaves the user acknowledged per conversation ({@link acknowledgeGhosts}); nothing else lets content out. */
+  private readonly acknowledged = new Map<string, Set<string>>();
+  /** The violations of the last check per conversation and the epoch it ran in (ephemeral events reuse it). */
+  private readonly ghostCache = new Map<string, { epoch: number; found: GhostViolation[] }>();
   private readonly nonces = new Map<string, string>();
   private readonly backupTried = new Set<string>();
   private readonly plainChecked = new Map<string, PlainStatus>();
@@ -558,6 +558,8 @@ export class MlsManager {
           return this.addMissingDevices(str(a), strs(b));
         case "encrypt":
           return this.encrypt(str(a), obj(b), encryptOptions(args[2]));
+        case "acknowledgeGhosts":
+          return this.acknowledgeGhosts(str(a), strs(b));
         case "encryptHistory": {
           const keys = args[2];
           if (keys === undefined) return this.encryptHistory(str(a), str(b));
@@ -1074,14 +1076,13 @@ export class MlsManager {
       const q = conversationId;
       // Senders use the current epoch (§5.2): pick up commits whose events may still be on the way. Without them the
       // message would go out under an epoch the node may refuse, or one that removed members still hold: no sending.
-      let progressed: boolean;
       try {
-        progressed = await this.catchUpInner(conversationId);
+        await this.catchUpInner(conversationId);
       } catch {
         throw new MlsError("catch_up_failed");
       }
       if (!this.client.hasGroup(q)) throw new MlsError("not_joined");
-      await this.recheckGhosts(q, opts, progressed);
+      await this.assertNoGhosts(q, opts);
       if (this.rotationDue(conversationId)) {
         try {
           await this.commitInner(conversationId, () => (this.client.hasGroup(q) ? this.client.selfUpdate(q) : null));
@@ -1098,19 +1099,46 @@ export class MlsManager {
   }
 
   /**
-   * §4.6 again after commits were processed before encrypting (a processed commit may have brought a device): a
-   * violation the user was not shown yet refuses the message (`MlsError("ghost")`), until a ghost check showed it or
-   * the caller names it in `knownGhosts`. Without members (neither passed nor from an earlier check) nothing to do.
+   * §4.6 before any content leaves this device (fail closed): the leaves are checked again after the catch-up, and a
+   * violation the user did not acknowledge ({@link acknowledgeGhosts}) refuses the content with `MlsError("ghost")`.
+   * A view that never showed the warning therefore cannot send to a ghost. Members: passed, from the last
+   * {@link ghostCheck}, or every leaf's user (then only attestation and duplicates are judged).
    */
-  private async recheckGhosts(q: string, opts: EncryptOptions, progressed: boolean): Promise<void> {
-    const guard = opts.members ? { members: opts.members, noBots: !!opts.noBots, known: new Set(opts.knownGhosts ?? []) } : this.lastGhosts.get(q);
-    if (!guard || !(progressed || this.ghostDirty.has(q))) return;
-    const found = await this.ghostCheckInner(q, guard.members, { noBots: guard.noBots });
-    if (found.some((v) => !guard.known.has(v.identity))) {
-      this.ghostDirty.add(q);
-      throw new MlsError("ghost");
-    }
-    this.ghostDirty.delete(q);
+  private async assertNoGhosts(q: string, opts: { members?: string[]; noBots?: boolean } = {}): Promise<void> {
+    const found = await this.checkGhostsNow(q, opts);
+    if (this.unacknowledged(q, found).length) throw new MlsError("ghost");
+  }
+
+  private async checkGhostsNow(q: string, opts: { members?: string[]; noBots?: boolean } = {}): Promise<GhostViolation[]> {
+    const last = this.lastGhosts.get(q);
+    const members = opts.members ?? last?.members ?? this.rosterIdentities(q).map((i) => splitIdentity(i).address);
+    const noBots = opts.members ? !!opts.noBots : (last?.noBots ?? !!opts.noBots);
+    const found = await this.ghostCheckInner(q, members, { noBots });
+    if (this.client.hasGroup(q)) this.ghostCache.set(q, { epoch: this.client.currentEpoch(q), found });
+    return found;
+  }
+
+  private unacknowledged(q: string, found: GhostViolation[]): GhostViolation[] {
+    const acked = this.acknowledged.get(q);
+    return found.filter((v) => !acked?.has(v.identity));
+  }
+
+  /**
+   * The user saw the ghost warning of `q` and chose to continue anyway (§4.6): content may go out to these leaves
+   * from now on. Called by the warning's button only; a ghost check alone never acknowledges anything. Applied in
+   * this tab and in the tab that owns the state (which encrypts).
+   */
+  async acknowledgeGhosts(q: string, identities: string[]): Promise<void> {
+    const set = this.acknowledged.get(q) ?? new Set<string>();
+    for (const i of identities) set.add(i);
+    this.acknowledged.set(q, set);
+    const remote = this.forwarded<void>("acknowledgeGhosts", [q, identities]);
+    if (remote) await remote;
+  }
+
+  /** Ghost leaves of `q` found by the last check that the user has not acknowledged yet. */
+  unacknowledgedGhosts(q: string): GhostViolation[] {
+    return this.unacknowledged(q, this.ghostCache.get(q)?.found ?? []);
   }
 
   /**
@@ -1254,8 +1282,14 @@ export class MlsManager {
    */
   encryptEphemeral(conversationId: string, content: Record<string, unknown>): Promise<string> {
     return this.run(async () => {
-      if (!this.client.hasGroup(conversationId)) throw new MlsError("not_joined");
-      return this.client.encryptContent(conversationId, JSON.stringify(content));
+      const q = conversationId;
+      if (!this.client.hasGroup(q)) throw new MlsError("not_joined");
+      // The ghost check of this epoch (§4.6, fail closed): run once per epoch, not per event.
+      const cached = this.ghostCache.get(q);
+      const found = cached && cached.epoch === this.client.currentEpoch(q) ? cached.found : await this.checkGhostsNow(q);
+      if (this.unacknowledged(q, found).length) throw new MlsError("ghost");
+      if (!this.client.hasGroup(q)) throw new MlsError("not_joined");
+      return this.client.encryptContent(q, JSON.stringify(content));
     });
   }
 
@@ -1682,9 +1716,9 @@ export class MlsManager {
   async ghostCheck(q: string, members: Iterable<string>, opts: GhostCheckOptions = {}): Promise<GhostViolation[]> {
     const list = [...members];
     const out = await this.ghostCheckInner(q, list, opts);
-    // What the caller was shown: encrypt() refuses only violations beyond these (§4.6 after its catch-up).
-    this.lastGhosts.set(q, { members: list, noBots: !!opts.noBots, known: new Set(out.map((v) => v.identity)) });
-    this.ghostDirty.delete(q);
+    // The members guard the checks before encrypting; the violations stay unacknowledged until acknowledgeGhosts.
+    this.lastGhosts.set(q, { members: list, noBots: !!opts.noBots });
+    if (this.client.hasGroup(q)) this.ghostCache.set(q, { epoch: this.client.currentEpoch(q), found: out });
     return out;
   }
 
@@ -1696,16 +1730,18 @@ export class MlsManager {
       return r;
     });
     const allowed = new Set(members);
-    const seen = new Set<string>();
+    /** Identities whose attested leaf was seen: a second leaf with the attested key is a duplicate. */
+    const matched = new Set<string>();
     const refreshed = new Set<string>();
     const out: GhostViolation[] = [];
+    const ownKey = this.client.devicePublicKey;
     for (const e of entries) {
-      if (seen.has(e.identity)) {
-        out.push({ identity: e.identity, reason: "duplicate" });
+      const { address, deviceId } = splitIdentity(e.identity);
+      // This device's own leaf is never a ghost (another leaf under its name is judged like any other).
+      if (e.identity === this.client.identity && sameBytes(e.key, ownKey) && !matched.has(e.identity)) {
+        matched.add(e.identity);
         continue;
       }
-      seen.add(e.identity);
-      const { address, deviceId } = splitIdentity(e.identity);
       if (!allowed.has(address)) {
         out.push({ identity: e.identity, reason: "not_member" });
         continue;
@@ -1725,8 +1761,13 @@ export class MlsManager {
         out.push({ identity: e.identity, reason: "bot" });
         continue;
       }
+      // A leaf naming an attested device with another key (planted or disguised) is unattested, whichever comes first.
       if (!key || !sameBytes(key, e.key)) out.push({ identity: e.identity, reason: "unattested" });
-      else if (this.deps.pins[address]?.changed) out.push({ identity: e.identity, reason: "key_changed" });
+      else if (matched.has(e.identity)) out.push({ identity: e.identity, reason: "duplicate" });
+      else if (this.deps.pins[address]?.changed) {
+        matched.add(e.identity);
+        out.push({ identity: e.identity, reason: "key_changed" });
+      } else matched.add(e.identity);
     }
     return out;
   }
