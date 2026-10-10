@@ -1,3 +1,0 @@
-
-[patch."https://github.com/just-tavrn/tavrn-crypto"]
-tavrn-crypto = { path = "/workspace/tavrn-crypto" }

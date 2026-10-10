@@ -44,3 +44,6 @@ perf/results/
 
 # Private pattern list of the pre-publication check
 .publish-check.private
+
+# Local cargo patches of a developer machine (a stray one was committed once).
+/Cargo.toml
