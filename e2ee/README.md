@@ -1,9 +1,9 @@
 # @tavrn/e2ee
 
 The client side of tavrn's end-to-end encryption ([`ENCRYPTION.md`](https://github.com/just-tavrn/tavrn-protocol/blob/main/ENCRYPTION.md)),
-shared by the web client and bots (the bot runtime [`@tavrn/bot`](../bot), [`APPLICATIONS.md`](https://github.com/just-tavrn/tavrn-protocol/blob/main/APPLICATIONS.md)
+shared by the web client and bots (the bot runtime [`@tavrn/bot`](../bot/README.md), [`APPLICATIONS.md`](https://github.com/just-tavrn/tavrn-protocol/blob/main/APPLICATIONS.md)
 §3). It builds on the WebAssembly core [`@tavrn/crypto`](https://github.com/just-tavrn/tavrn-crypto) and the API client
-[`@tavrn/sdk`](../sdk), and runs unchanged in browsers and in Node.js (24+). Everything that needs the DOM
+[`@tavrn/sdk`](../sdk/README.md), and runs unchanged in browsers and in Node.js (24+). Everything that needs the DOM
 (WebAuthn ceremonies, React hooks, UI stores, IndexedDB) stays in the web client
 ([tavrn-web](https://github.com/just-tavrn/tavrn-web)).
 
@@ -46,8 +46,9 @@ Every function of this package awaits it itself; call it before using `@tavrn/cr
 **Account flows** (`account.ts`, ENCRYPTION.md §2.4, §3, §8, §9) — all take an `E2eeContext { api, username,
 address, deviceId, store, clientName?, keyPackages? }`, where `api` needs the `keys` and `secretStorage` routes of a
 `TavrnApi`:
-`ensureDevice` (create the MLS client, attest the device, keep ≥ `KEY_PACKAGE_MIN` KeyPackages, uploading up to
-`KEY_PACKAGE_BATCH`), `setupAccount`, `unlockWithRecoveryKey`, `unlockWithPasskeyPrf`, `addPasskeySecret`,
+`ensureDevice` (create the MLS client, attest the device together with its share key (§3.1; a device attested
+before share keys existed publishes it once with `keys.putShareKey`), keep ≥ `KEY_PACKAGE_MIN` KeyPackages, uploading
+up to `KEY_PACKAGE_BATCH`), `setupAccount`, `unlockWithRecoveryKey`, `unlockWithPasskeyPrf`, `addPasskeySecret`,
 `regenerateRecoveryKey`, `resetIdentity`, `passkeyEntryIds(api)`; store-only helpers `localStatus(store, address,
 deviceId)`, `loadClient(store)` / `saveClient(store, client)` (secret `CLIENT_STATE = "mls-client"`),
 `localIdentityKey(store)`, `forgetIdentityKeepDevice(store, address)`, `wipeLocal(store, address)`. Errors:
@@ -64,12 +65,21 @@ Conversation ids are qualified (`qualify(domain, ulid)`, `splitQualified`). Meth
 
 - joining: `ensureJoined(q, { canCreate })`, `processWelcomes(domain)`, `catchUp(q)`, `addMissingDevices(q, members)`,
   `removeLeaves(q, identities)`, `selfUpdate(q)`, `hasGroup`, `epoch`;
-- content: `encrypt(q, content)`, `decrypt(q, envelope)` → `Decrypted`, `peek`, `encryptEphemeral`,
-  `decryptEphemeral` (replay window), `voiceKey(q)`, `contentHeader(content)`;
+- content: `encrypt(q, content, opts?)`, `decrypt(q, envelope)` → `Decrypted`, `peek`, `encryptEphemeral`,
+  `decryptEphemeral` (replay window), `voiceKey(q)`, `contentHeader(content)`. `opts.ctx` is the message's **signed
+  context** (`{ thread_id, reply_to }`, for answers of applications also `interaction`; ENCRYPTION.md §5.2): it is
+  encrypted and signed with the content, and `decrypt` answers `{ ok: false, reason: "envelope_mismatch" }` when the
+  envelope the node delivers names another thread or reply. `opts.members`, `opts.noBots` and `opts.knownGhosts`
+  feed the ghost check that runs again after the catch-up before anything is sent;
 - plaintext signatures: `signPlaintext(q, fields, content)`, `verifyPlaintext(q, envelope)` → `PlainStatus`;
-- identities: `verifiedDevices(address)`, `ghostCheck(q, members)`, `changedKeys()`, `acknowledgeKeyChange`,
-  `identityChanged`, `forgetDevices`, `safetyNumber`, `comparePayload`, `markVerified`, `removeVerification`,
-  `acceptNewKey`, `verification(address)`, `verificationStates()`;
+- identities: `verifiedDevices(address)`, `ghostCheck(q, members)` (a member whose security key changed stays a
+  ghost with the reason `key_changed` until the user acknowledges the change; no device is added automatically
+  meanwhile), `changedKeys()`, `acknowledgeKeyChange`, `identityChanged`, `forgetDevices`, `safetyNumber`,
+  `comparePayload`, `markVerified`, `removeVerification`, `acceptNewKey`, `verification(address)`,
+  `verificationStates()`;
+- share keys: `verifiedShareKeys(address)` (the share keys of a user's devices whose attestation by the device key
+  checks out), `ownShareKey()`, `encryptHistory(q, json, shareKeys?)` (format 2 with sealed boxes per recipient device
+  when `shareKeys` is given, format 1 under the current epoch otherwise);
 - backups: `flushBackups()`, `hasPendingBackups()`, `restoreBackups()`; `dispose()`;
 - KeyPackages: `createKeyPackages(count)` (in the manager's state; `ensureDevice` tops up through it when its context
   has `keyPackages`, see below).
@@ -127,9 +137,43 @@ one in memory at a time) → ciphertext `Blob` and the file key, `decryptFileChu
 no record), `parseFileRecord` (binds the record to its entry, kind and ciphertext size), `entryName`/`validEntryName`
 (FILES.md §2) and `recordSamples` (records as the samples of history key checks).
 
+**History for new members** — `history.ts` (ENCRYPTION.md §7b): members hand the content keys of past epochs to a
+member who joined later, as far as the channel's policy allows (`parseHistoryPolicy`: `since_join`, `days:<n>`,
+`all`; `historyWindowStart`, `epochsToShare`). Every policy, `since_join` included, covers the epochs between the
+member's room join and its device's first leaf in the group, whose keys reach that device only through a share. `HistorySync` runs the flows of one device: `checkPending(q, policy)`
+(which pending members this device shares with, elected by `sharerDelay` so that one online device does it),
+`shareWith(q, to, joinedAtMs, policy)`, `receive(q)` (fetches the shares addressed to this device, checks every key
+against a stored message of its epoch signed by its author's attested device, keeps accepted keys and acknowledges
+the share), `noteAdded`, `dispose`. With the node capability `history.shares2` a share is **format 2**: a fresh key
+sealed to the verified share key of every device of the recipient (at most `MAX_SHARE_BOXES`), so only those devices
+can read it; format 1 (under the current epoch) is the fallback for older nodes. The payload codec is
+`encodeHistoryPayload` / `parseHistoryPayload`, the key check `epochKeyOpens` with `pickSamples`.
+
+**History after a key reset** — also `history.ts` (capability `history.restore`): `restorePlan(q, channel)` lists the
+epochs of a requester's pre-reset range this device can share, `restore(q, to, channel)` sends them after an approved
+request, and `shareSinceReset` / `epochsSinceReset` share the epochs since the reset. The requests themselves (ask,
+approve, deny) are routes of `@tavrn/sdk` (`api.historyRequests`).
+
+**Other codecs and helpers**
+
+- `sealed.ts`: the stored form of sealed webhook posts in encrypted channels (`sealedContent`, `webhookPayload`,
+  `validWebhookName`; APPLICATIONS.md §6.1a, ENCRYPTION.md §5b). The box is opened with the epoch's inbox key inside
+  `decrypt`.
+- `commands.ts`: encrypted command arguments (`encryptCommandArgs`, `CommandArgsVerifier`, which refuses payloads for
+  another command, stale or future ones and replays; APPLICATIONS.md §5.8).
+- `embeds.ts`: the embed rules of `text` content (`assertEmbeds` before encrypting, `withValidEmbeds` after
+  decrypting, `readEmbeds` for renderers; APPLICATIONS.md §6.4).
+- `cleanup.ts`: `LeafCleaner` removes ghost leaves the node allows and the client verified (ENCRYPTION.md §4.7), with an
+  election among the devices that may do it.
+- `identity.ts`: the current identity key and its rotation with continuity (`rotateIdentity`, `syncIdentity`,
+  `resolveIdentity`; ENCRYPTION.md §9a).
+- `search/`: the local encrypted search index (`SearchIndex` over a `SearchBackend`, `MemorySearchBackend` for tests;
+  keys from `searchKeysFromStore`; SEARCH.md). Every stored value is sealed under the local key and every lookup key
+  is an HMAC token, never an id or a word; the web client provides the IndexedDB backend.
+
 ## How a bot uses it
 
-The bot runtime ([`@tavrn/bot`](../bot), `createBot()`) does, with an app token whose device id is `dev`:
+The bot runtime ([`@tavrn/bot`](../bot/README.md), `createBot()`) does, with an app token whose device id is `dev`:
 
 ```ts
 import { ensureDevice, mlsApiOf, openMlsManager } from "@tavrn/e2ee";

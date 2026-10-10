@@ -14,7 +14,7 @@ A small bot built with `@tavrn/bot`:
 3. Open the application's add link and add the bot to a room (its default channel is encrypted).
 4. Start the bot from the repository root:
 
-```
+```sh
 TAVRN_BOT_NODE=http://127.0.0.1:8080 \
 TAVRN_BOT_TOKEN=<the secret> \
 TAVRN_BOT_KEY_FILE=./tavrn-key-echo.txt \
