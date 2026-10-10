@@ -318,6 +318,7 @@ export class HistorySync {
   private readonly timers = new Map<string, unknown>();
   private readonly preferred = new Map<string, Set<string>>();
   private readonly receiving = new Map<string, Promise<number>>();
+  private readonly receiveQueued = new Map<string, Promise<number>>();
   private disposed = false;
 
   constructor(private readonly deps: HistorySyncDeps) {}
@@ -529,10 +530,28 @@ export class HistorySync {
     return sent;
   }
 
-  /** Fetches, checks and stores the shares addressed to this user; returns the number of new keys. */
+  /**
+   * Fetches, checks and stores the shares addressed to this user; returns the number of new keys. A call while a pass
+   * runs (`history.keys_available` arriving after that pass read the list) queues one more pass after it, shared by
+   * every call meanwhile: the running pass may have read the list before the announced share existed.
+   */
   receive(q: string): Promise<number> {
     const running = this.receiving.get(q);
-    if (running) return running;
+    if (!running) return this.startReceive(q);
+    const queued = this.receiveQueued.get(q);
+    if (queued) return queued;
+    const next = running
+      .catch(() => 0)
+      .then(() => {
+        this.receiveQueued.delete(q);
+        // A pass started since the running one ended began after this call: it sees what this call was about.
+        return this.receiving.get(q) ?? this.startReceive(q);
+      });
+    this.receiveQueued.set(q, next);
+    return next;
+  }
+
+  private startReceive(q: string): Promise<number> {
     const p = this.receiveInner(q).finally(() => this.receiving.delete(q));
     this.receiving.set(q, p);
     return p;
