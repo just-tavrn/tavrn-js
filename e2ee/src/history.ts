@@ -258,7 +258,11 @@ export interface HistoryApi {
   shares(conversationId: string): Promise<HistoryShareList>;
   ack(conversationId: string, shareId: string): Promise<unknown>;
   pending(conversationId: string): Promise<HistoryPendingList>;
-  messages(conversationId: string, query: { limit?: number; after?: string; before?: string; epoch?: number }): Promise<Message[]>;
+  /**
+   * `GET …/messages`; `threads: "all"` includes the messages of the channel's threads (forum posts), which the window
+   * lookups need: a thread message is content of the channel like any other.
+   */
+  messages(conversationId: string, query: { limit?: number; after?: string; before?: string; epoch?: number; threads?: "all" }): Promise<Message[]>;
 }
 
 /** Channel kinds whose content is messages (others, such as files channels, keep records, FILES.md §8.7). */
@@ -409,11 +413,11 @@ export class HistorySync {
     const mls = this.deps.mls;
     const current = mls.epoch(q);
     if (current === null) return 0;
-    const after = await api.messages(id, { after: ulidFloor(resetAtMs), limit: 20 });
+    const after = await api.messages(id, { after: ulidFloor(resetAtMs), limit: 20, threads: "all" });
     const since = after.filter((m) => m.encrypted && typeof m.epoch === "number").map((m) => m.epoch as number);
     let lower = minEpoch;
     if (lower === null) {
-      const before = await api.messages(id, { before: ulidFloor(resetAtMs), limit: 1 });
+      const before = await api.messages(id, { before: ulidFloor(resetAtMs), limit: 1, threads: "all" });
       const last = before.find((m) => m.encrypted && typeof m.epoch === "number");
       lower = last ? (last.epoch as number) + 1 : 0;
     }
@@ -425,7 +429,7 @@ export class HistorySync {
   private async firstEpoch(q: string, channel: RestoreChannel): Promise<number | null | undefined> {
     const { api, id } = this.api(q);
     if (MESSAGE_KINDS.has(channel.kind)) {
-      const page = await api.messages(id, { after: ulidFloor(channel.windowStart ?? 0), limit: 20 });
+      const page = await api.messages(id, { after: ulidFloor(channel.windowStart ?? 0), limit: 20, threads: "all" });
       const epochs = page.filter((m) => m.encrypted && typeof m.epoch === "number").map((m) => m.epoch as number);
       return epochs.length ? Math.min(...epochs) : null;
     }
@@ -482,7 +486,7 @@ export class HistorySync {
     if (policy.kind !== "all") {
       // The oldest epoch with a message in the window (ascending page after the window start).
       const start = historyWindowStart(policy, Number.isFinite(joinedAtMs) ? joinedAtMs : Date.now()) ?? 0;
-      const page = await api.messages(id, { after: ulidFloor(start), limit: 20 });
+      const page = await api.messages(id, { after: ulidFloor(start), limit: 20, threads: "all" });
       const epochs = page.filter((m) => m.encrypted && typeof m.epoch === "number").map((m) => m.epoch as number);
       fromEpoch = epochs.length ? Math.min(...epochs) : null;
     }

@@ -198,12 +198,13 @@ function setup() {
       }
     },
     pending: async () => ({ items: [...pending] }),
-    messages: async (_c, q) =>
-      q.before
-        ? messages.filter((m) => m.id < q.before!).sort((a, b) => (a.id < b.id ? 1 : -1)).slice(0, q.limit ?? 50)
-        : messages
-            .filter((m) => (q.epoch === undefined || (m.encrypted && m.epoch === q.epoch)) && (!q.after || m.id > q.after))
-            .slice(0, q.limit ?? 50),
+    // The node's listing: without `threads=all` (or `epoch`) the channel's own messages only, thread messages left out.
+    messages: async (_c, q) => {
+      const listed = messages.filter((m) => q.epoch !== undefined || q.threads === "all" || !m.thread_id);
+      return q.before
+        ? listed.filter((m) => m.id < q.before!).sort((a, b) => (a.id < b.id ? 1 : -1)).slice(0, q.limit ?? 50)
+        : listed.filter((m) => (q.epoch === undefined || (m.encrypted && m.epoch === q.epoch)) && (!q.after || m.id > q.after)).slice(0, q.limit ?? 50);
+    },
   });
   const sync = (dev: Device, online: (a: string) => boolean = () => true, log: string[] = [], extra: Partial<HistorySyncDeps> = {}) =>
     new HistorySync({ mls: dev.mls, address: dev.address, deviceId: dev.deviceId, api: () => api(dev), isOnline: online, onLog: (e) => log.push(e), backoffMs: 50, ...extra });
@@ -474,6 +475,24 @@ describe("HistorySync", () => {
     expect(await bob.mls.decrypt(CONV, gap)).toEqual({ ok: true, content: { type: "text", body: "nach Bobs Beitritt" } });
     expect(await bob.mls.decrypt(CONV, before)).toEqual({ ok: false, reason: "missing_key" });
     expect(pending).toHaveLength(0);
+  });
+
+  it("counts the messages of threads (forum posts) when it looks for the window's oldest epoch", async () => {
+    const { device, sync, post, shares, pending } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    const joinedAt = Date.now() - 1000;
+    // The only content since Bob's join is a forum post: a thread message, not part of the channel's own list.
+    const first = await post(alice, "Beitrag im Forum");
+    (first as { thread_id?: string }).thread_id = "01J9ZK3G5M8Q2W4E6R8T0Y2VT1";
+    await bob.mls.ensureJoined(CONV, { canCreate: false });
+    await alice.mls.catchUp(CONV);
+    pending.push({ user: bob.address, since: new Date(joinedAt).toISOString() });
+    await sync(alice).checkPending(CONV, { kind: "since_join" });
+    expect(shares[0]).toMatchObject({ epoch_from: 0, epoch_to: 0 });
+    expect(await sync(bob).receive(CONV)).toBe(1);
+    expect(await bob.mls.decrypt(CONV, first)).toEqual({ ok: true, content: { type: "text", body: "Beitrag im Forum" } });
   });
 });
 
