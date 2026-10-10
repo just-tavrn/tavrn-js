@@ -11,7 +11,7 @@ bots.
 | Package | Directory | What it is for | License |
 |---|---|---|---|
 | [`@tavrn/sdk`](sdk) | `sdk/` | The protocol client: typed HTTP API client (types generated from the protocol's `openapi.json`), WebSocket client with reconnection, permission evaluation, federation discovery, hook and directory signature checks, JCS. Browsers and Node.js. | Apache-2.0 |
-| [`@tavrn/e2ee`](e2ee) | `e2ee/` | The client side of the end-to-end encryption: MLS session manager across nodes, account and device setup, recovery keys and passkeys, key storage (in memory, or a state directory in Node.js), message, attachment and command codecs, sealed webhooks, the encrypted local search index. Builds on [`@tavrn/crypto`](https://github.com/just-tavrn/tavrn-crypto) (WebAssembly). | MPL-2.0 |
+| [`@tavrn/e2ee`](e2ee) | `e2ee/` | The client side of the end-to-end encryption: MLS session manager across nodes, account and device setup, recovery keys and passkeys, key storage (in memory, or a state directory in Node.js), message, attachment and command codecs, encrypted files channels, history keys for new members (sealed to each recipient device) and history restore after a key reset, sealed webhooks, the encrypted local search index. Builds on [`@tavrn/crypto`](https://github.com/just-tavrn/tavrn-crypto) (WebAssembly). | MPL-2.0 |
 | [`@tavrn/bot`](bot) | `bot/` | The bot runtime for Node.js: turns an app token into a running bot with its own key file, full end-to-end encryption membership, events, commands, token rotation and installations on other nodes. Example bots in [`bot/examples/`](bot/examples). | Apache-2.0 |
 
 The protocol they implement lives in [tavrn-protocol](https://github.com/just-tavrn/tavrn-protocol)
@@ -26,10 +26,11 @@ submodule `protocol/`: the SDK types are generated from its `openapi.json`, and 
 The packages ship TypeScript sources (no build step): use them through a bundler or a TypeScript-aware runner (Vite,
 Vitest, esbuild, `tsx`, `vite-node`). The packages are tested on Node.js 24 (and in browsers through the web client's end-to-end suite).
 
-During the private phase, install them from this repository by tag with pnpm:
+During the private phase, install them from this repository by tag with pnpm (the examples use `v0.2.1`; take the
+newest release tag):
 
 ```sh
-pnpm add "github:just-tavrn/tavrn-js#v0.1.0&path:sdk"
+pnpm add "github:just-tavrn/tavrn-js#v0.2.1&path:sdk"
 ```
 
 `@tavrn/e2ee` and `@tavrn/bot` depend on their siblings (`workspace:*` inside this repository) and on the git
@@ -40,12 +41,12 @@ git dependencies below the top level (pnpm blocks them by default) in its `pnpm-
 # Private phase: the @tavrn packages are git dependencies of each other.
 blockExoticSubdeps: false
 overrides:
-  "@tavrn/sdk": "github:just-tavrn/tavrn-js#v0.1.0&path:sdk"
-  "@tavrn/e2ee": "github:just-tavrn/tavrn-js#v0.1.0&path:e2ee"
+  "@tavrn/sdk": "github:just-tavrn/tavrn-js#v0.2.1&path:sdk"
+  "@tavrn/e2ee": "github:just-tavrn/tavrn-js#v0.2.1&path:e2ee"
 ```
 
 ```sh
-pnpm add "github:just-tavrn/tavrn-js#v0.1.0&path:bot"     # or &path:e2ee
+pnpm add "github:just-tavrn/tavrn-js#v0.2.1&path:bot"     # or &path:e2ee
 ```
 
 While the repositories are private, git needs read access to `just-tavrn` (your GitHub credentials, for example
