@@ -77,7 +77,8 @@ from `scripts/github-labels.sh` (idempotent; rerun it after editing the list).
 - [ ] Actions access: while `just-tavrn/.github` is private, its Settings → Actions → General → Access must be
       "Accessible from repositories in the just-tavrn organization", or every push shows a failed run with
       "workflow file issue".
-- [ ] Discussions: questions are routed to the organization's Discussions (`ISSUE_TEMPLATE/config.yml`).
+- [ ] Discussions: questions are routed to the Discussions of the umbrella repository `just-tavrn/tavrn`
+      (`ISSUE_TEMPLATE/config.yml`); nothing to switch on here.
 - [ ] Team `@just-tavrn/maintainers` must exist for `CODEOWNERS`.
 - [ ] Once public: branch protection or a ruleset for `main` (require pull requests with one review from
       `@just-tavrn/maintainers`, the checks `JavaScript`, `Publication hygiene`, `gitleaks`, `Dependency review`,
