@@ -21,3 +21,18 @@ package instead of a git dependency.
 - **`@tavrn/bot`**: the bot runtime for Node.js (its own key file, full encryption membership, events, commands,
   replies in threads, signed answers to interactions, token rotation, installations on other nodes) and the example
   bots.
+
+### Security
+
+- `@tavrn/e2ee`: content (messages, thread titles, ephemeral events) waits for an explicit `acknowledgeGhosts` while
+  the roster has a ghost leaf; a ghost check alone no longer counts as shown, and `encrypt` lost `knownGhosts`.
+- `@tavrn/e2ee`: a claimed KeyPackage is added only when its leaf carries the attested key and identity of its device.
+- `@tavrn/e2ee`: the ghost cleanup attests a leaf key again as retired only when the account recorded that device key
+  itself; leaves are removed by identity and signature key.
+- `@tavrn/e2ee`: history shares are sent only in format 2 (sealed per attested recipient device); the window of an
+  automatic share is bounded by the client's own knowledge of the member.
+- `@tavrn/e2ee`: the plaintext signature cache keys on the signed input, so an altered envelope is verified again.
+- `@tavrn/e2ee`: pins, verified contacts and own devices are kept as an encrypted trust record with the backups and
+  survive a sign-out.
+- `@tavrn/e2ee`: `setupAccount` refuses to replace an existing account's local data (`already_set_up`).
+- `@tavrn/e2ee`: `verifyPlainAttachment` checks plaintext attachment bytes against their signed hash.
