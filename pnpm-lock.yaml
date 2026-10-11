@@ -172,8 +172,8 @@ importers:
   bot:
     dependencies:
       '@tavrn/crypto':
-        specifier: file:/workspace/tavrn-crypto/.claude/worktrees/crypto-ds/pkg
-        version: file:../../../../tavrn-crypto/.claude/worktrees/crypto-ds/pkg
+        specifier: github:just-tavrn/tavrn-crypto#19ac87b4b42b13ec07e0eec5f8c17a2b47f70f37&path:pkg
+        version: git+https://github.com/just-tavrn/tavrn-crypto.git#19ac87b4b42b13ec07e0eec5f8c17a2b47f70f37&path:pkg
       '@tavrn/e2ee':
         specifier: workspace:*
         version: link:../e2ee
@@ -197,8 +197,8 @@ importers:
   e2ee:
     dependencies:
       '@tavrn/crypto':
-        specifier: file:/workspace/tavrn-crypto/.claude/worktrees/crypto-ds/pkg
-        version: file:../../../../tavrn-crypto/.claude/worktrees/crypto-ds/pkg
+        specifier: github:just-tavrn/tavrn-crypto#19ac87b4b42b13ec07e0eec5f8c17a2b47f70f37&path:pkg
+        version: git+https://github.com/just-tavrn/tavrn-crypto.git#19ac87b4b42b13ec07e0eec5f8c17a2b47f70f37&path:pkg
       '@tavrn/sdk':
         specifier: workspace:*
         version: link:../sdk
@@ -371,8 +371,9 @@ packages:
   '@rolldown/pluginutils@1.0.1':
     resolution: {integrity: sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==}
 
-  '@tavrn/crypto@file:../../../../tavrn-crypto/.claude/worktrees/crypto-ds/pkg':
-    resolution: {directory: ../../../../tavrn-crypto/.claude/worktrees/crypto-ds/pkg, type: directory}
+  '@tavrn/crypto@git+https://github.com/just-tavrn/tavrn-crypto.git#19ac87b4b42b13ec07e0eec5f8c17a2b47f70f37&path:pkg':
+    resolution: {commit: 19ac87b4b42b13ec07e0eec5f8c17a2b47f70f37, path: pkg, repo: https://github.com/just-tavrn/tavrn-crypto.git, type: git}
+    version: 0.1.0
 
   '@types/chai@5.2.3':
     resolution: {integrity: sha512-Mw558oeA9fFbv65/y4mHtXDs9bPnFMZAL/jxdPFUpOHHIXX91mcgEHbS5Lahr+pwZFR8A7GQleRWeI6cGFC2UA==}
@@ -942,7 +943,7 @@ snapshots:
 
   '@rolldown/pluginutils@1.0.1': {}
 
-  '@tavrn/crypto@file:../../../../tavrn-crypto/.claude/worktrees/crypto-ds/pkg': {}
+  '@tavrn/crypto@git+https://github.com/just-tavrn/tavrn-crypto.git#19ac87b4b42b13ec07e0eec5f8c17a2b47f70f37&path:pkg': {}
 
   '@types/chai@5.2.3':
     dependencies:
