@@ -233,6 +233,8 @@ export interface MlsMeta {
    * ever attested again as retired (ENCRYPTION.md §4.7).
    */
   ownDevices?: Record<string, string>;
+  /** The trust record was synced with the home node once on this device (first-use pins wait for it). */
+  trustSynced?: boolean;
 }
 
 /**
@@ -366,7 +368,15 @@ export function isBotKind(kind: string | null | undefined): boolean {
 export interface GhostViolation {
   identity: string;
   reason: GhostReason;
+  /**
+   * The leaf's signature key (base64url): an acknowledgement covers this leaf only, so a later leaf under the same
+   * device id with another key warns again (§4.6).
+   */
+  key: string;
 }
+
+/** A leaf to acknowledge: a violation with its key, or an identity (its leaves in the roster at that moment). */
+export type GhostLeafRef = string | Pick<GhostViolation, "identity" | "key">;
 
 /** The parts of a message envelope the codec needs. */
 export interface EncryptedEnvelope {
@@ -459,6 +469,8 @@ const MAX_TRIES = 3;
 const KEY_REFETCH_MS = 2_000;
 /** Device lists are looked up again after this (the key cache TTL of nodes, FEDERATION.md §3.5). */
 export const KEY_TTL_MS = 3600 * 1000;
+/** A failed trust sync before a first-use pin is tried again after this. */
+export const TRUST_RETRY_MS = 60_000;
 /** Ephemeral events whose nonces are remembered for replay detection. */
 export const EPHEMERAL_REPLAY_WINDOW = 4096;
 
@@ -614,8 +626,14 @@ export class MlsManager {
           return this.addMissingDevices(str(a), strs(b));
         case "encrypt":
           return this.encrypt(str(a), obj(b), encryptOptions(args[2]));
-        case "acknowledgeGhosts":
-          return this.acknowledgeGhosts(str(a), strs(b));
+        case "acknowledgeGhosts": {
+          if (!Array.isArray(b)) throw new MlsError("invalid_id");
+          const refs = b.map((r) => {
+            const o = obj(r);
+            return { identity: str(o.identity), key: str(o.key) };
+          });
+          return this.acknowledgeGhosts(str(a), refs);
+        }
         case "encryptHistory": {
           const keys = args[2];
           if (!keys || typeof keys !== "object" || Array.isArray(keys) || !Object.values(keys).every((k) => k instanceof Uint8Array)) throw new MlsError("invalid_id");
@@ -1147,7 +1165,11 @@ export class MlsManager {
     } catch (e) {
       return Promise.reject(e);
     }
-    const remote = this.forwarded<{ content: string; epoch: number }>("encrypt", [conversationId, content, opts]);
+    // Forwarded to the tab that owns the state: this tab's last ghost check names the members, so the owner never
+    // falls back to "every leaf's user is a member" for a caller without a member list (§4.6).
+    const last = this.lastGhosts.get(conversationId);
+    const forwardOpts = !opts.members && last ? { ...opts, members: last.members, noBots: last.noBots } : opts;
+    const remote = this.forwarded<{ content: string; epoch: number }>("encrypt", [conversationId, content, forwardOpts]);
     if (remote) return remote;
     return this.run(async () => {
       const q = conversationId;
@@ -1197,7 +1219,7 @@ export class MlsManager {
 
   private unacknowledged(q: string, found: GhostViolation[]): GhostViolation[] {
     const acked = this.acknowledged.get(q);
-    return found.filter((v) => !acked?.has(v.identity));
+    return found.filter((v) => !acked?.has(`${v.identity}|${v.key}`));
   }
 
   /**
@@ -1205,11 +1227,16 @@ export class MlsManager {
    * from now on. Called by the warning's button only; a ghost check alone never acknowledges anything. Applied in
    * this tab and in the tab that owns the state (which encrypts).
    */
-  async acknowledgeGhosts(q: string, identities: string[]): Promise<void> {
+  async acknowledgeGhosts(q: string, leaves: GhostLeafRef[]): Promise<void> {
+    // An identity stands for its leaves in this tab's roster now; a leaf that appears later is not covered.
+    const entries = leaves.some((l) => typeof l === "string") ? this.rosterEntries(q) : [];
+    const refs = leaves.flatMap((l) =>
+      typeof l === "string" ? entries.filter((e) => e.identity === l).map((e) => ({ identity: l, key: b64urlEncode(e.key) })) : [{ identity: l.identity, key: l.key }],
+    );
     const set = this.acknowledged.get(q) ?? new Set<string>();
-    for (const i of identities) set.add(i);
+    for (const r of refs) set.add(`${r.identity}|${r.key}`);
     this.acknowledged.set(q, set);
-    const remote = this.forwarded<void>("acknowledgeGhosts", [q, identities]);
+    const remote = this.forwarded<void>("acknowledgeGhosts", [q, refs]);
     if (remote) await remote;
   }
 
@@ -1644,6 +1671,8 @@ export class MlsManager {
     if (address === this.deps.address) {
       trusted = this.deps.ownIdentityKey();
     } else {
+      // First use: the trust record may hold a pin from before a sign-out (§7); it is synced before anything is pinned.
+      if (!this.deps.pins[address]) await this.trustBeforePinning();
       const pin = this.deps.pins[address];
       if (!pin) {
         this.deps.pins[address] = { key: published };
@@ -1824,7 +1853,7 @@ export class MlsManager {
         continue;
       }
       if (!allowed.has(address)) {
-        out.push({ identity: e.identity, reason: "not_member" });
+        out.push({ identity: e.identity, reason: "not_member", key: b64urlEncode(e.key) });
         continue;
       }
       let key: Uint8Array | undefined;
@@ -1839,15 +1868,15 @@ export class MlsManager {
         key = undefined;
       }
       if (opts.noBots && isBotKind(this.kinds.get(address))) {
-        out.push({ identity: e.identity, reason: "bot" });
+        out.push({ identity: e.identity, reason: "bot", key: b64urlEncode(e.key) });
         continue;
       }
       // A leaf naming an attested device with another key (planted or disguised) is unattested, whichever comes first.
-      if (!key || !sameBytes(key, e.key)) out.push({ identity: e.identity, reason: "unattested" });
-      else if (matched.has(e.identity)) out.push({ identity: e.identity, reason: "duplicate" });
+      if (!key || !sameBytes(key, e.key)) out.push({ identity: e.identity, reason: "unattested", key: b64urlEncode(e.key) });
+      else if (matched.has(e.identity)) out.push({ identity: e.identity, reason: "duplicate", key: b64urlEncode(e.key) });
       else if (this.deps.pins[address]?.changed) {
         matched.add(e.identity);
-        out.push({ identity: e.identity, reason: "key_changed" });
+        out.push({ identity: e.identity, reason: "key_changed", key: b64urlEncode(e.key) });
       } else matched.add(e.identity);
     }
     return out;
@@ -1857,6 +1886,23 @@ export class MlsManager {
 
   private trustTimer: ReturnType<typeof setTimeout> | null = null;
   private trustRun: Promise<void> | null = null;
+  /** The last failed trust sync before a first-use pin (retried at most every {@link TRUST_RETRY_MS}). */
+  private trustFailedAt = 0;
+
+  /**
+   * Holds first-use pinning until the trust record was synced once on this device (a restored pin then counts instead
+   * of whatever key the node serves first). A sync that fails is retried at most every minute; meanwhile pins are taken
+   * on first use and checked against the record at the next sync (conflicts count as changed keys).
+   */
+  private async trustBeforePinning(): Promise<void> {
+    if (this.deps.meta.trustSynced || this.now() - this.trustFailedAt < TRUST_RETRY_MS) return;
+    try {
+      await this.syncTrust();
+    } catch {
+      this.trustFailedAt = this.now();
+    }
+  }
+
   /** Verified contacts removed on this device since the last upload (not taken back from the stored record). */
   private readonly removedVerified = new Set<string>();
 
@@ -1929,6 +1975,41 @@ export class MlsManager {
     return run;
   }
 
+  private async trustDone(): Promise<void> {
+    if (this.deps.meta.trustSynced) return;
+    this.deps.meta.trustSynced = true;
+    await this.deps.saveMeta(this.deps.meta);
+  }
+
+  /**
+   * A pin here and another key in the stored record for the same user: the stored key was seen first (before a
+   * sign-out, or on another device). A continuity chain from the stored key to this one is a rotation (kept); one from
+   * this key to the stored one means the record is newer (taken, as a rotation); anything else is a changed key the
+   * user has to acknowledge (`changed`, §3.3). True when a pin changed.
+   */
+  private async resolvePinConflicts(pins: Record<string, Pin>, stored: Record<string, Pin>): Promise<boolean> {
+    let changed = false;
+    for (const [address, theirs] of Object.entries(stored)) {
+      const ours = pins[address];
+      if (!ours || ours.key === theirs.key) continue;
+      const chain = await this.deps.api
+        .keys(address)
+        .then((k) => (k.user === address ? k.continuity : null))
+        .catch(() => null);
+      if (chainReaches(chain, theirs.key, ours.key)) continue;
+      if (chainReaches(chain, ours.key, theirs.key)) {
+        pins[address] = { ...theirs, rotated: true };
+      } else {
+        if (ours.changed) continue;
+        pins[address] = { key: ours.key, changed: true };
+        this.deps.onEvent?.({ type: "key_changed", address });
+      }
+      this.keyCache.delete(address);
+      changed = true;
+    }
+    return changed;
+  }
+
   private async syncTrustInner(): Promise<void> {
     const home = this.deps.homeDomain;
     const key = this.deps.backupKey();
@@ -1937,7 +2018,8 @@ export class MlsManager {
         const remote = await this.deps.api.backupGet(home, TRUST_BACKUP_ULID);
         const stored = remote ? await openTrust(key, this.deps.address, remote.blob) : null;
         const local: TrustRecord = { pins: this.deps.pins, verified: this.verified, devices: (this.deps.meta.ownDevices ??= {}) };
-        if (stored && mergeTrust(local, stored, this.removedVerified)) {
+        const resolved = stored ? await this.resolvePinConflicts(local.pins, stored.pins) : false;
+        if (stored && (mergeTrust(local, stored, this.removedVerified) || resolved)) {
           await this.deps.savePins(this.deps.pins);
           await this.deps.saveVerified?.(this.verified);
           await this.deps.saveMeta(this.deps.meta);
@@ -1947,12 +2029,14 @@ export class MlsManager {
         if (stored) mergeTrust(upload, stored, this.removedVerified);
         if (stored && jcs(upload) === jcs(stored)) {
           this.removedVerified.clear();
+          await this.trustDone();
           return;
         }
         const blob = await sealTrust(key, this.deps.address, upload);
         try {
           await this.deps.api.backupPut(home, TRUST_BACKUP_ULID, blob, remote?.etag ?? null);
           this.removedVerified.clear();
+          await this.trustDone();
           return;
         } catch (e) {
           if (apiCode(e) !== "backup.etag_mismatch") throw e;
@@ -2054,6 +2138,11 @@ export class MlsManager {
     if (remote) return remote;
     return this.run(async () => {
       if (this.deps.meta.restored) return 0;
+      // The trust record first (pins, verified contacts, own devices, §7): a failure keeps `restored` false (retried).
+      let trusted = true;
+      await this.syncTrust().catch(() => {
+        trusted = false;
+      });
       const { items } = await this.deps.api.backupList();
       const key = this.deps.backupKey();
       let n = 0;
@@ -2074,8 +2163,7 @@ export class MlsManager {
         key.fill(0);
       }
       await this.persist();
-      // The trust record (pins, verified contacts, own devices) comes back with the backups (§7).
-      await this.syncTrust().catch(() => undefined);
+      if (!trusted) return n;
       this.deps.meta.restored = true;
       await this.deps.saveMeta(this.deps.meta);
       return n;

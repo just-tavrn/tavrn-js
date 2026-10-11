@@ -331,8 +331,8 @@ describe("MlsManager", () => {
     await bob.mls.ensureJoined(CONV, { canCreate: true });
     await mallory.mls.ensureJoined(CONV, { canCreate: true });
     await alice.mls.catchUp(CONV);
-    expect(await alice.mls.ghostCheck(CONV, memberSet(alice, bob, mallory))).toEqual([{ identity: `${mallory.address}/${DEV.d}`, reason: "unattested" }]);
-    expect(await alice.mls.ghostCheck(CONV, memberSet(alice, mallory))).toEqual([
+    expect(await alice.mls.ghostCheck(CONV, memberSet(alice, bob, mallory))).toMatchObject([{ identity: `${mallory.address}/${DEV.d}`, reason: "unattested" }]);
+    expect(await alice.mls.ghostCheck(CONV, memberSet(alice, mallory))).toMatchObject([
       { identity: `${bob.address}/${DEV.b}`, reason: "not_member" },
       { identity: `${mallory.address}/${DEV.d}`, reason: "unattested" },
     ]);
@@ -350,7 +350,7 @@ describe("MlsManager", () => {
     await node.ds(alice.address, DEV.a).postCommit(ID, { epoch: out.epoch, commit: b64urlEncode(out.commit), group_info: b64urlEncode(out.groupInfo), welcome: null });
     alice.client().mergePendingCommit(CONV);
     // The leaf with Bob's attested key is his; the other one under his name is unattested, whichever comes first.
-    expect(await alice.mls.ghostCheck(CONV, memberSet(alice, bob))).toEqual([{ identity: `${bob.address}/${DEV.b}`, reason: "unattested" }]);
+    expect(await alice.mls.ghostCheck(CONV, memberSet(alice, bob))).toMatchObject([{ identity: `${bob.address}/${DEV.b}`, reason: "unattested" }]);
     twin.free();
   });
 
@@ -562,7 +562,7 @@ describe("MlsManager", () => {
     net.node(DOMAIN).users.get("alice")!.devices.delete(DEV.a2);
     alice.mls.forgetDevices(alice.address);
     const ghost = `${alice.address}/${DEV.a2}`;
-    expect(await alice.mls.ghostCheck(CONV, memberSet(alice, bob))).toEqual([{ identity: ghost, reason: "unattested" }]);
+    expect(await alice.mls.ghostCheck(CONV, memberSet(alice, bob))).toMatchObject([{ identity: ghost, reason: "unattested" }]);
     const cleaner = new LeafCleaner({ mls: alice.mls, sleep: async () => undefined });
     const r = await cleaner.clean({ q: CONV, members: memberSet(alice, bob), mayManage: false, pending: [{ identity: ghost, reason: "deleted" }] });
     expect(r).toEqual({ outcome: "removed", removed: [ghost], ghosts: [] });
@@ -583,11 +583,11 @@ describe("MlsManager", () => {
     // Without the flag a bot is a member like any other.
     expect(await alice.mls.ghostCheck(CONV, members)).toEqual([]);
     // With the flag it is a ghost even though the node lists it as a member; users are not affected.
-    expect(await alice.mls.ghostCheck(CONV, members, { noBots: true })).toEqual([{ identity: botLeaf, reason: "bot" }]);
+    expect(await alice.mls.ghostCheck(CONV, members, { noBots: true })).toMatchObject([{ identity: botLeaf, reason: "bot" }]);
     // A kind this client does not know counts like a bot (§1.5).
     net.node(DOMAIN).users.get("bob")!.kind = "robot";
     alice.mls.forgetDevices(bob.address);
-    expect(await alice.mls.ghostCheck(CONV, members, { noBots: true })).toEqual([
+    expect(await alice.mls.ghostCheck(CONV, members, { noBots: true })).toMatchObject([
       { identity: `${bob.address}/${DEV.b}`, reason: "bot" },
       { identity: botLeaf, reason: "bot" },
     ]);
@@ -597,7 +597,7 @@ describe("MlsManager", () => {
     // Removal follows rule 3 of §4.7: only members who may manage the conversation commit it.
     const cleaner = new LeafCleaner({ mls: alice.mls, sleep: async () => undefined });
     const refused = await cleaner.clean({ q: CONV, members, mayManage: false, noBots: true });
-    expect(refused).toEqual({ outcome: "not_allowed", removed: [], ghosts: [{ identity: botLeaf, reason: "bot" }] });
+    expect(refused).toMatchObject({ outcome: "not_allowed", removed: [], ghosts: [{ identity: botLeaf, reason: "bot" }] });
     expect(alice.mls.roster(CONV)).toContain(botLeaf);
     // Without the flag the cleaner leaves the bot alone.
     expect((await cleaner.clean({ q: CONV, members, mayManage: true })).outcome).toBe("clean");
@@ -733,7 +733,7 @@ describe("MlsManager across nodes (FEDERATION.md §3.5, §3.6, §6)", () => {
     await bob.mls.ensureJoined(channel, { canCreate: true });
     await mallory.mls.ensureJoined(channel, { canCreate: true });
     await bob.mls.catchUp(channel);
-    expect(await bob.mls.ghostCheck(channel, [bob.address, mallory.address])).toEqual([{ identity: `${mallory.address}/${DEV.d}`, reason: "unattested" }]);
+    expect(await bob.mls.ghostCheck(channel, [bob.address, mallory.address])).toMatchObject([{ identity: `${mallory.address}/${DEV.d}`, reason: "unattested" }]);
     const m = await send(mallory, channel, "vertrau mir", "m1");
     expect(await bob.mls.decrypt(channel, m)).toEqual({ ok: false, reason: "unknown_device" });
     expect(net.keyLookups).toContain(`${mallory.address}→${A}`);
@@ -994,11 +994,11 @@ describe("changed identity keys hold back the new devices until acknowledged (EN
     await alice.mls.catchUp(CONV);
     alice.mls.identityChanged(bob.address);
     const ghosts = await alice.mls.ghostCheck(CONV, memberSet(alice, bob));
-    expect(ghosts).toContainEqual({ identity: `${bob.address}/${DEV.d}`, reason: "key_changed" });
+    expect(ghosts).toContainEqual(expect.objectContaining({ identity: `${bob.address}/${DEV.d}`, reason: "key_changed" }));
     // Bob's old device is not attested under the new key either.
-    expect(ghosts).toContainEqual({ identity: `${bob.address}/${DEV.b}`, reason: "unattested" });
+    expect(ghosts).toContainEqual(expect.objectContaining({ identity: `${bob.address}/${DEV.b}`, reason: "unattested" }));
     await alice.mls.acknowledgeKeyChange(bob.address);
-    expect(await alice.mls.ghostCheck(CONV, memberSet(alice, bob))).toEqual([{ identity: `${bob.address}/${DEV.b}`, reason: "unattested" }]);
+    expect(await alice.mls.ghostCheck(CONV, memberSet(alice, bob))).toMatchObject([{ identity: `${bob.address}/${DEV.b}`, reason: "unattested" }]);
   });
 
   it("a rotation with a valid continuity statement is not held back", async () => {
@@ -1045,8 +1045,8 @@ describe("encrypt() catches up first and refuses to send otherwise (ENCRYPTION.m
     const guard = { members: memberSet(alice, bob), noBots: false };
     await expect(alice.mls.encrypt(CONV, { type: "text", body: "secret" }, guard)).rejects.toMatchObject({ code: "ghost" });
     // A ghost check shows it, but acknowledges nothing.
-    expect(await alice.mls.ghostCheck(CONV, memberSet(alice, bob))).toEqual([{ identity: `${mallory.address}/${DEV.c}`, reason: "not_member" }]);
-    expect(alice.mls.unacknowledgedGhosts(CONV)).toEqual([{ identity: `${mallory.address}/${DEV.c}`, reason: "not_member" }]);
+    expect(await alice.mls.ghostCheck(CONV, memberSet(alice, bob))).toMatchObject([{ identity: `${mallory.address}/${DEV.c}`, reason: "not_member" }]);
+    expect(alice.mls.unacknowledgedGhosts(CONV)).toMatchObject([{ identity: `${mallory.address}/${DEV.c}`, reason: "not_member" }]);
     await expect(alice.mls.encrypt(CONV, { type: "text", body: "secret" })).rejects.toMatchObject({ code: "ghost" });
     // The warning's button: acknowledged from then on, also after further commits.
     await alice.mls.acknowledgeGhosts(CONV, [`${mallory.address}/${DEV.c}`]);
