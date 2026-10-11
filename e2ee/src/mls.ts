@@ -235,6 +235,8 @@ export interface MlsMeta {
   ownDevices?: Record<string, string>;
   /** The trust record was synced with the home node once on this device (first-use pins wait for it). */
   trustSynced?: boolean;
+  /** Users pinned on first use before that first sync: their pins are checked against the record (§7). */
+  unconfirmedPins?: string[];
 }
 
 /**
@@ -1683,6 +1685,11 @@ export class MlsManager {
       const pin = this.deps.pins[address];
       if (!pin) {
         this.deps.pins[address] = { key: published };
+        // Pinned before the trust record could be synced: checked against it at the first sync (§7).
+        if (!this.deps.meta.trustSynced) {
+          this.deps.meta.unconfirmedPins = [...new Set([...(this.deps.meta.unconfirmedPins ?? []), address])];
+          await this.deps.saveMeta(this.deps.meta);
+        }
         await this.savePins();
       } else if (pin.key !== published && chainReaches(keys.continuity, pin.key, published)) {
         // Rotation with continuity (§9a): signed by the pinned key, pinned at once with a soft notice. An earlier,
@@ -1985,12 +1992,13 @@ export class MlsManager {
   private async trustDone(): Promise<void> {
     if (this.deps.meta.trustSynced) return;
     this.deps.meta.trustSynced = true;
+    delete this.deps.meta.unconfirmedPins;
     await this.deps.saveMeta(this.deps.meta);
   }
 
   /**
-   * A pin here and another key in the stored record for the same user: the stored key was seen first (before a
-   * sign-out, or on another device). A continuity chain from the stored key to this one is a rotation (kept); one from
+   * A pin taken here on first use before the first sync and another key in the stored record for the same user: the
+   * stored key was seen first (before a sign-out, or on another device). A continuity chain from the stored key to this one is a rotation (kept); one from
    * this key to the stored one means the record is newer (taken, as a rotation); anything else is a changed key the
    * user has to acknowledge (`changed`, §3.3). True when a pin changed.
    */
@@ -1998,7 +2006,8 @@ export class MlsManager {
     let changed = false;
     for (const [address, theirs] of Object.entries(stored)) {
       const ours = pins[address];
-      if (!ours || ours.key === theirs.key) continue;
+      // Only pins taken on first use before the record was synced; a key the user accepted here is a decision.
+      if (!ours || ours.key === theirs.key || !this.deps.meta.unconfirmedPins?.includes(address)) continue;
       const chain = await this.deps.api
         .keys(address)
         .then((k) => (k.user === address ? k.continuity : null))

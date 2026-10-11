@@ -299,6 +299,24 @@ describe("the trust record survives a sign-out (ENCRYPTION.md §7)", () => {
     expect(again.mls.changedKeys()).toEqual([bob.address]);
   });
 
+  it("a new key the user accepted is not flagged again by the older stored record", async () => {
+    const { node, device, masters } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    await alice.mls.verifiedDevices(bob.address);
+    await alice.mls.syncTrust();
+    const fresh = MasterSecret.generate();
+    node.users.get("bob")!.identity = b64urlEncode(fresh.identityPublicKey());
+    masters.set(bob.address, fresh);
+    alice.mls.identityChanged(bob.address);
+    await alice.mls.verifiedDevices(bob.address);
+    expect(alice.mls.changedKeys()).toEqual([bob.address]);
+    await alice.mls.acceptNewKey(bob.address);
+    await alice.mls.syncTrust();
+    expect(alice.mls.changedKeys()).toEqual([]);
+    expect(alice.pins[bob.address]!.key).toBe(b64urlEncode(fresh.identityPublicKey()));
+  });
+
   it("is sealed: a record the node edits or moves to another account does not open", async () => {
     const { node, device } = setup();
     const alice = device("alice", DEV.a);
