@@ -64,6 +64,20 @@ describe.each(kinds)("account flows (%s store)", (_kind, makeStore) => {
     expect(user().kps.get(DEV_A)).toHaveLength(20);
   });
 
+  it("refuses a second setup when this device holds the account's master secret or the node has a recovery entry", async () => {
+    const { ctx, user, node } = account();
+    await setupAccount(ctx, RecoveryKey.generate());
+    const identity = user().identity;
+    // A lying node reports "no identity key": the locked device is not replaced, it unlocks instead.
+    ctx.store.lock();
+    await expect(setupAccount(ctx, RecoveryKey.generate())).rejects.toMatchObject({ name: "E2eeError", code: "already_set_up" });
+    expect(await ctx.store.status(ctx.address)).toBe("locked");
+    expect(user().identity).toBe(identity);
+    // Another device without local data: the recovery entry on the node tells that the account is set up.
+    const other: E2eeContext = { ...ctx, deviceId: DEV_B, store: makeStore(), api: node.accountApi(ctx.username) };
+    await expect(setupAccount(other, RecoveryKey.generate())).rejects.toMatchObject({ code: "already_set_up" });
+  });
+
   it("publishes the device's share key with the device key, and once later for a device attested without one", async () => {
     const { ctx, user, node } = account();
     await setupAccount(ctx, RecoveryKey.generate());

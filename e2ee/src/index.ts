@@ -45,6 +45,7 @@ export {
 } from "./account";
 export * from "./mls";
 export * from "./cleanup";
+export * from "./trust";
 export { META, PINS, VERIFIED, openMlsManager, reloadOwnIdentity, type OpenMlsOptions } from "./session";
 export { TAB_TIMEOUT_MS, TabCoordinator, type TabChannel, type TabHost, type TabLockManager, type TabOptions } from "./tabs";
 export * from "./content";

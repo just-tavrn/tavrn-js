@@ -9,7 +9,9 @@ export type E2eeErrorCode =
   | "no_passkey_entry"
   | "identity_mismatch"
   | "rotation_devices"
-  | "locked";
+  | "locked"
+  /** Setup refused: this device holds the account's master secret, or the node has its recovery entry (unlock). */
+  | "already_set_up";
 
 export class E2eeError extends Error {
   constructor(readonly code: E2eeErrorCode) {
