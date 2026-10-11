@@ -1483,12 +1483,13 @@ export class MlsManager {
    */
   async verifyPlaintext(conversationId: string, m: PlainEnvelope): Promise<PlainStatus> {
     if (!m.signature) return "unsigned";
-    const cacheKey = `${conversationId}|${m.id}|${m.signature}`;
-    const cached = this.plainChecked.get(cacheKey);
-    if (cached) return cached;
     const fields = envelopeFields(conversationId, m);
     const nonce = signatureNonce(m.signature);
     if (!fields || !nonce || !m.content || typeof m.content !== "object" || Array.isArray(m.content)) return "invalid";
+    // Cached by the signed input itself: an envelope changed under the same id and signature is checked again.
+    const cacheKey = `${m.id}|${m.signature}|${JSON.stringify(fields)}|${jcs(m.content)}`;
+    const cached = this.plainChecked.get(cacheKey);
+    if (cached) return cached;
     let key: Uint8Array | undefined;
     try {
       key = (await this.verifiedDevices(m.author))?.get(fields.device_id) ?? (await this.verifiedDevices(m.author, true))?.get(fields.device_id);

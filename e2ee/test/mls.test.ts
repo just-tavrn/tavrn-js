@@ -453,6 +453,11 @@ describe("MlsManager", () => {
     // Unsigned (older clients, bots) and unknown devices are only "unverified".
     expect(await bob.mls.verifyPlaintext(CONV, { ...envelope, id: "p8", signature: null })).toBe("unsigned");
     expect(await bob.mls.verifyPlaintext(CONV, { ...envelope, id: "p9", device_id: DEV.a2 })).toBe("unverifiable");
+    // An edit the node fakes under the same id and signature (message.updated) is checked again, never taken from the
+    // cache of the genuine message (§10.3).
+    expect(await bob.mls.verifyPlaintext(CONV, { ...envelope, content: { ...envelope.content, body: "neue IBAN" } })).toBe("invalid");
+    expect(await bob.mls.verifyPlaintext(CONV, { ...envelope, mentions: [] })).toBe("invalid");
+    expect(await bob.mls.verifyPlaintext(CONV, envelope)).toBe("valid");
     expect(await bob.mls.verifyPlaintext(CONV, { ...envelope, id: "p10", author: "eve@other.example" })).toBe("unverifiable");
     // An edit is signed anew (fresh nonce) and verifies for the same message id.
     const edited = { ...envelope, content: { type: "text", body: "bearbeitet" } };
