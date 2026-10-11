@@ -36,3 +36,5 @@ package instead of a git dependency.
   survive a sign-out.
 - `@tavrn/e2ee`: `setupAccount` refuses to replace an existing account's local data (`already_set_up`).
 - `@tavrn/e2ee`: `verifyPlainAttachment` checks plaintext attachment bytes against their signed hash.
+- `@tavrn/bot`: unknown devices in an encryption group follow the new `ghostPolicy` option (`strict` by default: only
+  retired devices awaiting cleanup are accepted, anything else refuses with `BotError("ghost")`; `accept` sends and logs).

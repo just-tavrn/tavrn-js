@@ -25,6 +25,7 @@ import { CommandRouter, type CommandCrypto, type CommandHandler, type InvokeCont
 import { BotError } from "./errors";
 import { createKeyFile, defaultKeyFile, identityKeyOf, readKey } from "./keyfile";
 import { consoleLogger, type BotLogger } from "./logger";
+import { sealUnderPolicy, type GhostPolicy } from "./ghosts";
 import { NodeLink } from "./node-link";
 import { appTokenClaims, type AppTokenClaims } from "./token";
 
@@ -54,6 +55,13 @@ export interface BotOptions {
    * large rooms, because every join creates an epoch.
    */
   joinPolicy?: "eager" | "lazy";
+  /**
+   * Unknown devices in an encrypted conversation's group (`ENCRYPTION.md` §4.6; nobody can acknowledge the warning for
+   * a bot). `strict` (default): leaves of retired devices awaiting cleanup are accepted, anything else (a key never
+   * attested, a changed identity key without a continuity chain, a non-member) refuses the message with
+   * `BotError("ghost")`. `accept`: send anyway and log every accepted leaf as a warning.
+   */
+  ghostPolicy?: GhostPolicy;
   /** Defer commands automatically when the handler did not answer after this long (default 2000 ms). */
   autoDeferMs?: number;
   /** Allow `http://`/`ws://` endpoints of other nodes (development); default: when `node` is an `http://` URL. */
@@ -830,7 +838,7 @@ export class Bot {
       ? {
           hasGroup: (q) => mls.hasGroup(q),
           decrypt: (q, envelope) => mls.decrypt(q, envelope),
-          encrypt: (q, content, opts) => mls.encrypt(q, content, opts),
+          encrypt: (q, content, opts) => this.seal(q, () => mls.encrypt(q, content, opts)),
           join: (q) => void this.track(this.join(q, false)),
         }
       : null;
@@ -844,6 +852,11 @@ export class Bot {
   }
 
   // ---- Sending --------------------------------------------------------------------------------
+
+  /** An encryption under the bot's ghost policy (see {@link BotOptions.ghostPolicy}). */
+  private seal<T>(q: string, fn: () => Promise<T>): Promise<T> {
+    return sealUnderPolicy(this.mls!, q, this.opts.ghostPolicy ?? "strict", this.logger, fn);
+  }
 
   /** `<node>/<id>` for a qualified id, a bare id of the home node, or a received message's conversation. */
   private qualified(conversation: string | { conversation: string }): string {
@@ -891,7 +904,7 @@ export class Bot {
       if (!(await this.join(q, true))) throw new BotError("not_member", `The bot could not join the encryption group of ${q}`);
       // Thread and reply are signed inside the content (ENCRYPTION.md §5.2); a stale epoch (§5.3) is caught up once.
       const post = async () => {
-        const sealed = await mls.encrypt(q, object, { ctx: { thread_id: threadId, reply_to: replyTo } });
+        const sealed = await this.seal(q, () => mls.encrypt(q, object, { ctx: { thread_id: threadId, reply_to: replyTo } }));
         return link.api.conversations.send(id, { content: sealed.content, epoch: sealed.epoch, mentions, reply_to_id: replyTo, ...thread });
       };
       try {
@@ -917,7 +930,8 @@ export class Bot {
     const title = threadTitle(opts.title ?? text);
     const encrypted = await this.isEncrypted(link, q, id);
     if (encrypted && !(await this.join(q, true))) throw new BotError("not_member", `The bot could not join the encryption group of ${q}`);
-    const sealedTitle = encrypted ? await this.mls!.encryptThreadTitle(q, title) : { title };
+    const mls = this.mls!;
+    const sealedTitle = encrypted ? await this.seal(q, () => mls.encryptThreadTitle(q, title)) : { title };
     let threadId: string;
     try {
       threadId = (await link.api.threads.create(roomId, id, { ...sealedTitle, root_message_id: m.id })).id;
