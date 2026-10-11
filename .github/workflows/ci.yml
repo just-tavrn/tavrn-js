@@ -23,11 +23,39 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    # Docs-only changes (Markdown, docs/) run the hygiene jobs only; the builds report themselves as skipped
+    # (a passed check). The website picks the documentation up through its source submodules.
+    name: What changed
+    if: ${{ vars.CI_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.classify.outputs.code }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - id: classify
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          code=true
+          if [ -n "$BASE" ] && git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            files="$(git diff --name-only "$BASE" "$HEAD")"
+            if [ -n "$files" ] && ! printf '%s\n' "$files" | grep -qvE '(^|/)[^/]+\.md$|^docs/'; then code=false; fi
+            printf '%s\n' "$files" | head -100
+          fi
+          echo "code=$code" | tee -a "$GITHUB_OUTPUT"
+
   js:
     name: JavaScript
+    needs: changes
     if: ${{ vars.CI_ENABLED == 'true' }}
     uses: just-tavrn/.github/.github/workflows/js-ci.yml@main
     with:
+      skip: ${{ needs.changes.outputs.code != 'true' }}
       runner: tavrn-heavy
       # The generated SDK types must match protocol/openapi.json; then SPDX headers, dependency licenses, typecheck,
       # Vitest (sdk, e2ee with the WebAssembly module of @tavrn/crypto, bot unit tests) and the npm tarballs.
@@ -61,7 +89,8 @@ jobs:
   bot-node:
     name: Bot integration tests (real nodes)
     # Never for Dependabot or dependabot/* branches, even when a person dispatches the run (the runner executes the code).
-    if: ${{ vars.CI_ENABLED == 'true' && vars.BOT_NODE_TESTS == 'true' && github.event_name != 'pull_request' && github.actor != 'dependabot[bot]' && !startsWith(github.ref, 'refs/heads/dependabot/') }}
+    needs: changes
+    if: ${{ vars.CI_ENABLED == 'true' && vars.BOT_NODE_TESTS == 'true' && github.event_name != 'pull_request' && github.actor != 'dependabot[bot]' && !startsWith(github.ref, 'refs/heads/dependabot/') && needs.changes.outputs.code == 'true' }}
     runs-on: [self-hosted, tavrn-e2e]
     timeout-minutes: 30
     permissions:
