@@ -24,6 +24,8 @@ package instead of a git dependency.
 
 ### Security
 
+### Security
+
 - `@tavrn/e2ee`: content (messages, thread titles, ephemeral events) waits for an explicit `acknowledgeGhosts` while
   the roster has a ghost leaf; a ghost check alone no longer counts as shown, and `encrypt` lost `knownGhosts`.
 - `@tavrn/e2ee`: a claimed KeyPackage is added only when its leaf carries the attested key and identity of its device.
@@ -38,3 +40,8 @@ package instead of a git dependency.
 - `@tavrn/e2ee`: `verifyPlainAttachment` checks plaintext attachment bytes against their signed hash.
 - `@tavrn/bot`: unknown devices in an encryption group follow the new `ghostPolicy` option (`strict` by default: only
   retired devices awaiting cleanup are accepted, anything else refuses with `BotError("ghost")`; `accept` sends and logs).
+- The npm token and the provenance permission live only in a publish job of a protected `release` environment that
+  publishes the tarballs of a credential-free build job after comparing them with the tag, without any install.
+- The self-hosted bot integration job uses no Actions cache and refuses `dependabot/*` branches.
+- The publication check prints only file and line of a private match, never the matching text.
+
