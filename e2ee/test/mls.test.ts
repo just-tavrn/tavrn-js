@@ -891,7 +891,8 @@ describe("content of one purpose is never accepted for another (ENCRYPTION.md §
     const t = await alice.mls.encryptThreadTitle(CONV, "Plans");
     expect(await bob.mls.decrypt(CONV, { id: "m-title", author: alice.address, device_id: DEV.a, epoch: t.title_epoch, content: t.title })).toEqual({ ok: false, reason: "invalid" });
     // A history share (keys of past epochs for another member) must never become message content either.
-    const share = await alice.mls.encryptHistory(CONV, JSON.stringify({ type: "history_keys", v: 1, conversation: CONV, to: "carol@t.local", epochs: [[0, b64urlEncode(new Uint8Array(32))]] }));
+    // (Format 1 under the epoch key, as older clients sent it.)
+    const share = { epoch: alice.mls.epoch(CONV)!, content: alice.client().encryptContent(CONV, JSON.stringify({ type: "history_keys", v: 1, conversation: CONV, to: "carol@t.local", epochs: [[0, b64urlEncode(new Uint8Array(32))]] })) };
     expect(await bob.mls.decrypt(CONV, { id: "m-share", author: alice.address, device_id: DEV.a, epoch: share.epoch, content: share.content })).toEqual({ ok: false, reason: "invalid" });
     expect(await bob.mls.decryptEphemeral(CONV, alice.address, DEV.a, share.content)).toEqual({ ok: false, reason: "invalid" });
     // The genuine paths still work.
@@ -1022,7 +1023,9 @@ describe("encrypt() catches up first and refuses to send otherwise (ENCRYPTION.m
     await expect(alice.mls.encrypt(CONV, { type: "text", body: "second" })).rejects.toMatchObject({ name: "MlsError", code: "catch_up_failed" });
     expect((await alice.mls.encrypt(CONV, { type: "text", body: "second" })).epoch).toBe(alice.mls.epoch(CONV));
     node.failLog = 1;
-    await expect(alice.mls.encryptHistory(CONV, "{}")).rejects.toMatchObject({ code: "catch_up_failed" });
+    await expect(alice.mls.encryptHistory(CONV, "{}", { [DEV.b]: new Uint8Array(32) })).rejects.toMatchObject({ code: "catch_up_failed" });
+    // Format 1 (no share keys) is not sent any more.
+    await expect(alice.mls.encryptHistory(CONV, "{}", {})).rejects.toMatchObject({ code: "invalid_id" });
   });
 
   it("checks the roster again after commits it processed: a new ghost stops the message", async () => {

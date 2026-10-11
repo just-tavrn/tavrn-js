@@ -618,7 +618,6 @@ export class MlsManager {
           return this.acknowledgeGhosts(str(a), strs(b));
         case "encryptHistory": {
           const keys = args[2];
-          if (keys === undefined) return this.encryptHistory(str(a), str(b));
           if (!keys || typeof keys !== "object" || Array.isArray(keys) || !Object.values(keys).every((k) => k instanceof Uint8Array)) throw new MlsError("invalid_id");
           return this.encryptHistory(str(a), str(b), keys as Record<string, Uint8Array>);
         }
@@ -2098,12 +2097,14 @@ export class MlsManager {
 
   /**
    * Encrypts a history share payload (canonical JSON) like message content under the group's current epoch, after
-   * catching up, without rotating. Format 1 (no `shareKeys`): under the epoch's content key, so every current member
-   * could read it. Format 2 (`shareKeys`: device id → verified share public key of each recipient device, ENCRYPTION.md
-   * §7b): under a fresh key, sealed to every given device in `boxes`; the key never leaves this call.
+   * catching up, without rotating, in format 2 (`shareKeys`: device id → verified share public key of each recipient
+   * device, ENCRYPTION.md §7b): under a fresh key, sealed to every given device in `boxes`; the key never leaves this
+   * call. Format 1 (under the epoch's content key, readable by every leaf) is not sent any more.
    */
-  encryptHistory(q: string, json: string, shareKeys?: Record<string, Uint8Array>): Promise<{ content: string; epoch: number; boxes?: Record<string, string> }> {
-    const remote = this.forwarded<{ content: string; epoch: number; boxes?: Record<string, string> }>("encryptHistory", shareKeys ? [q, json, shareKeys] : [q, json]);
+  encryptHistory(q: string, json: string, shareKeys: Record<string, Uint8Array>): Promise<{ content: string; epoch: number; boxes: Record<string, string> }> {
+    // Format 2 only (§7b): format 1 under the epoch key would be readable by every leaf, unattested ones included.
+    if (!shareKeys || typeof shareKeys !== "object" || Object.keys(shareKeys).length === 0) return Promise.reject(new MlsError("invalid_id"));
+    const remote = this.forwarded<{ content: string; epoch: number; boxes: Record<string, string> }>("encryptHistory", [q, json, shareKeys]);
     if (remote) return remote;
     return this.run(async () => {
       try {
@@ -2112,7 +2113,6 @@ export class MlsManager {
         throw new MlsError("catch_up_failed");
       }
       if (!this.client.hasGroup(q)) throw new MlsError("not_joined");
-      if (!shareKeys) return { content: this.client.encryptContent(q, json), epoch: this.client.currentEpoch(q) };
       const devices = Object.entries(shareKeys);
       const share = this.client.encryptShare(q, json, devices.map(([, pk]) => pk));
       try {
