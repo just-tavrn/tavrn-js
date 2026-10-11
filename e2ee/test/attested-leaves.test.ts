@@ -147,6 +147,22 @@ describe("claimed KeyPackages are held against the attested device before an Add
   });
 });
 
+describe("the check before encrypting does not mistake a device attested a moment ago for a ghost", () => {
+  it("looks the user up again before refusing a new, unknown leaf", async () => {
+    const { device } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    await alice.mls.addMissingDevices(CONV, [alice.address, bob.address]);
+    await bob.mls.processWelcomes(DOMAIN);
+    await alice.mls.encrypt(CONV, { type: "text", body: "first" });
+    // Bob's new device is attested and joins right after Alice's lookup of his devices.
+    const phone = device("bob", DEV.c);
+    expect(await phone.mls.ensureJoined(CONV, { canCreate: false })).toBe("joined");
+    await expect(alice.mls.encrypt(CONV, { type: "text", body: "to both of Bob's devices" })).resolves.toBeTruthy();
+  });
+});
+
 describe("the ghost cleanup attests only the account's own device keys again (§4.7)", () => {
   /** A cleaner that signs with the master secret, as tavrn-web's lib/leafCleanup.ts does. */
   const cleanerOf = (dev: Device, master: MasterSecret, signed: { deviceId: string; key: Uint8Array }[]) =>

@@ -1212,7 +1212,14 @@ export class MlsManager {
     const last = this.lastGhosts.get(q);
     const members = opts.members ?? last?.members ?? this.rosterIdentities(q).map((i) => splitIdentity(i).address);
     const noBots = opts.members ? !!opts.noBots : (last?.noBots ?? !!opts.noBots);
-    const found = await this.ghostCheckInner(q, members, { noBots });
+    let found = await this.ghostCheckInner(q, members, { noBots });
+    // An unattested leaf nobody acknowledged may be a device that was attested a moment ago (its user's devices were
+    // looked up just before): look those users up once more before refusing.
+    const stale = new Set(this.unacknowledged(q, found).filter((v) => v.reason === "unattested").map((v) => splitIdentity(v.identity).address));
+    if (stale.size) {
+      for (const a of stale) if (!this.keyCache.get(a)?.pending) this.keyCache.delete(a);
+      found = await this.ghostCheckInner(q, members, { noBots });
+    }
     if (this.client.hasGroup(q)) this.ghostCache.set(q, { epoch: this.client.currentEpoch(q), found });
     return found;
   }
