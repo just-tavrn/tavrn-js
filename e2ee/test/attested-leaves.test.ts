@@ -118,6 +118,22 @@ describe("claimed KeyPackages are held against the attested device before an Add
     expect(b64urlEncode(leaf.key)).toBe(b64urlEncode(bob.client().devicePublicKey));
   });
 
+  it("does not add a KeyPackage whose key is attested but whose leaf names another device", async () => {
+    const { node, device, masters } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    // Bob's key is (also) attested under a second device id; the node serves his DEV.b KeyPackage as that device's.
+    const other = "01J9ZK3G5M8Q2W4E6R8T0Y2VB2";
+    const record = node.users.get("bob")!;
+    const pk = bob.client().devicePublicKey;
+    record.devices.set(other, { pk: b64urlEncode(pk), sig: b64urlEncode(masters.get(bob.address)!.attestDevice(bob.address, other, pk)) });
+    record.kps.set(other, [record.kps.get(DEV.b)![0]!]);
+    record.kps.set(DEV.b, []);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    await alice.mls.addMissingDevices(CONV, [alice.address, bob.address]);
+    expect(alice.mls.roster(CONV)).toEqual([`${alice.address}/${DEV.a}`]);
+  });
+
   it("does not add a KeyPackage of another identity labelled with a verified device id", async () => {
     const { node, device } = setup();
     const alice = device("alice", DEV.a);
@@ -176,7 +192,7 @@ describe("the ghost cleanup attests only the account's own device keys again (§
     await ds.postCommit(ID, { epoch: out.epoch, commit: b64urlEncode(out.commit), group_info: b64urlEncode(out.groupInfo), welcome: null });
     out.free();
     await alice.mls.catchUp(CONV);
-    expect(await alice.mls.ghostCheck(CONV, [alice.address])).toEqual([{ identity: `${alice.address}/${DEV.a}`, reason: "unattested" }]);
+    expect(await alice.mls.ghostCheck(CONV, [alice.address])).toMatchObject([{ identity: `${alice.address}/${DEV.a}`, reason: "unattested" }]);
     const signed: { deviceId: string; key: Uint8Array }[] = [];
     const r = await cleanerOf(alice, masters.get(alice.address)!, signed).clean({ q: CONV, members: [alice.address], mayManage: false });
     expect(signed).toEqual([]);
@@ -237,6 +253,33 @@ describe("the trust record survives a sign-out (ENCRYPTION.md §7)", () => {
     const again = device("alice", DEV.a3);
     await again.mls.restoreBackups();
     await again.mls.verifiedDevices(bob.address);
+    expect(again.mls.changedKeys()).toEqual([bob.address]);
+  });
+
+  it("a key pinned on first use while the record was unreachable is a changed key once the record arrives", async () => {
+    const { node, device, masters } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    await alice.mls.verifiedDevices(bob.address);
+    await alice.mls.flushBackups();
+    await alice.mls.syncTrust();
+    const fake = MasterSecret.generate();
+    node.users.get("bob")!.identity = b64urlEncode(fake.identityPublicKey());
+    masters.set(bob.address, fake);
+    // The record cannot be fetched at first: Bob's swapped key is pinned on first use, the restore is not done.
+    const again = device("alice", DEV.a3);
+    const get = node.backups.get.bind(node.backups);
+    node.backups.get = () => {
+      throw new Error("offline");
+    };
+    await again.mls.verifiedDevices(bob.address);
+    await again.mls.restoreBackups();
+    expect(again.meta.restored).toBeFalsy();
+    expect(again.mls.changedKeys()).toEqual([]);
+    // Reachable again: the retried restore brings the stored pin, which conflicts without a continuity chain.
+    node.backups.get = get;
+    await again.mls.restoreBackups();
+    expect(again.meta.restored).toBe(true);
     expect(again.mls.changedKeys()).toEqual([bob.address]);
   });
 

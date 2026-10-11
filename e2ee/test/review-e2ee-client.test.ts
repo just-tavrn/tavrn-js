@@ -7,11 +7,10 @@
 // from each user's home node, KeyPackages of other nodes' users are claimed through the hosting node.
 import { beforeAll, describe, expect, it } from "vitest";
 import { Client, MasterSecret } from "@tavrn/crypto";
-import { b64urlDecode, b64urlEncode } from "@tavrn/sdk";
+import { b64urlEncode } from "@tavrn/sdk";
 import { ensureCrypto } from "../src/wasm";
-import { MlsManager, keyPackageLeaf, qualify, type MlsEvent, type MlsMeta, type Pin } from "../src/mls";
+import { MlsManager, qualify, type MlsEvent, type MlsMeta, type Pin } from "../src/mls";
 import { Network, domainOf } from "./fake-node";
-import { LeafCleaner } from "../src/cleanup";
 
 const DOMAIN = "t.local";
 const ID = "01J9ZK3G5M8Q2W4E6R8T0Y2V00";

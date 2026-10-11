@@ -204,9 +204,9 @@ describe("re-attesting own deleted devices before their leaves go", () => {
 describe("labelGhosts", () => {
   it("labels unattested leaves of deleted devices as removed", () => {
     const ghosts: GhostViolation[] = [
-      { identity: myOld, reason: "unattested" },
-      { identity: bob, reason: "unattested" },
-      { identity: carol, reason: "not_member" },
+      { identity: myOld, reason: "unattested", key: "k1" },
+      { identity: bob, reason: "unattested", key: "k2" },
+      { identity: carol, reason: "not_member", key: "k3" },
     ];
     expect(labelGhosts(ghosts, [{ identity: myOld, reason: "deleted" }, { identity: carol, reason: "deleted" }]).map((g) => g.reason)).toEqual(["removed", "unattested", "not_member"]);
     expect(labelGhosts(ghosts, null)).toBe(ghosts);

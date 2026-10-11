@@ -176,7 +176,7 @@ describe("restart from the file store", () => {
     // The pending backup of the join survived the restart.
     expect(restarted.hasPendingBackups()).toBe(true);
     await restarted.flushBackups();
-    expect(net.node(DOMAIN).backups.size).toBe(1);
+    expect([...net.node(DOMAIN).backups.keys()].filter((k) => !k.endsWith("/00000000000000000000000000"))).toHaveLength(1);
     restarted.dispose();
     await store.close();
   });
