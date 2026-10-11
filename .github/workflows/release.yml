@@ -4,7 +4,13 @@
 # carries version X.Y.Z in all three package.json files: the workflow checks the tag, the generated types and the
 # tests, packs the three npm tarballs (pnpm pack replaces workspace:* with the version) and attaches them to a
 # GitHub release. Publishing to npm (with provenance) additionally needs the repository variable PUBLISH_ENABLED and
-# the secret NPM_TOKEN, and refuses git dependencies (they must become version ranges first). Gated by CI_ENABLED.
+# the secret NPM_TOKEN of the environment `release`, and refuses git dependencies (they must become version ranges
+# first). Gated by CI_ENABLED.
+#
+# Three jobs, so that no dependency code ever runs next to a publishing credential: `build` installs, tests and packs
+# without the npm token (and with read-only repository contents), `release` attaches the tarballs to the GitHub
+# release, and `publish` (environment `release`: tags v*, the owner's approval) publishes exactly those tarballs after
+# comparing them with `npm pack --ignore-scripts` of the tag; it installs nothing and runs no code of the repository.
 name: Release
 
 on:
@@ -15,13 +21,10 @@ permissions:
   contents: read
 
 jobs:
-  release:
-    name: Release ${{ github.ref_name }}
+  build:
+    name: Build ${{ github.ref_name }}
     if: ${{ vars.CI_ENABLED == 'true' }}
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      id-token: write
     steps:
       - name: Access to private organization repositories
         env:
@@ -38,13 +41,11 @@ jobs:
           token: ${{ secrets.TAVRN_READ_PAT || github.token }}
           persist-credentials: false
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      # No Actions cache in a release build.
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
-          cache: pnpm
-          registry-url: https://registry.npmjs.org
       - name: Tag matches the package versions
-        id: version
         env:
           TAG: ${{ github.ref_name }}
         run: |
@@ -56,7 +57,6 @@ jobs:
               exit 1
             fi
           done
-          echo "version=$v" >> "$GITHUB_OUTPUT"
       - run: pnpm install --frozen-lockfile
       - name: Checks (generated types, SPDX headers, dependency licenses, typecheck, tests)
         run: |
@@ -70,26 +70,89 @@ jobs:
           mkdir -p release
           for p in sdk e2ee bot; do (cd "$p" && pnpm pack --pack-destination ../release); done
           ls -l release
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: npm-packages
+          path: release/
+          retention-days: 7
+
+  release:
+    name: GitHub release ${{ github.ref_name }}
+    needs: build
+    if: ${{ vars.CI_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: npm-packages
+          path: release
       - name: GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes --verify-tag release/*.tgz
+
+  publish:
+    name: Publish to npm
+    needs: release
+    if: ${{ vars.CI_ENABLED == 'true' && vars.PUBLISH_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      # No install, no cache: npm publishes the tarballs the build job packed, after checking them against the tag.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: npm-packages
+          path: ${{ runner.temp }}/release
+      - name: The tarballs to publish are the tag's files
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
-          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes --verify-tag release/*.tgz
-      - name: Publish to npm
-        if: ${{ vars.PUBLISH_ENABLED == 'true' }}
+          # npm pack without scripts from the tag; pnpm pack of the build job only replaced workspace:* with the version.
+          version="${TAG#v}" built="$RUNNER_TEMP/release" fresh="$RUNNER_TEMP/from-tag"
+          mkdir -p "$fresh"
+          for p in sdk e2ee bot; do (cd "$p" && npm pack --ignore-scripts --pack-destination "$fresh" >/dev/null); done
+          for p in sdk e2ee bot; do
+            n="tavrn-$p-$version.tgz"
+            rm -rf "$RUNNER_TEMP/a" "$RUNNER_TEMP/b"; mkdir -p "$RUNNER_TEMP/a" "$RUNNER_TEMP/b"
+            tar -xzf "$built/$n" -C "$RUNNER_TEMP/a"; tar -xzf "$fresh/$n" -C "$RUNNER_TEMP/b"
+            diff -r --exclude=package.json "$RUNNER_TEMP/a" "$RUNNER_TEMP/b"
+            node -e '
+              const fs = require("fs");
+              const [packed, fromTag] = process.argv.slice(1, 3).map((f) => JSON.parse(fs.readFileSync(f, "utf8")));
+              for (const k of ["dependencies", "peerDependencies", "optionalDependencies", "devDependencies"])
+                for (const [d, r] of Object.entries(fromTag[k] ?? {})) if (r === "workspace:*") fromTag[k][d] = process.argv[3];
+              require("assert").deepStrictEqual(packed, fromTag);
+            ' "$RUNNER_TEMP/a/package/package.json" "$RUNNER_TEMP/b/package/package.json" "$version"
+            echo "$n: the tag's files"
+          done
+      - name: Publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ github.ref_name }}
         run: |
+          version="${TAG#v}"
           # Published packages must not point at git repositories (private-phase references such as
-          # github:just-tavrn/tavrn-crypto#v0.1.0&path:pkg become version ranges first).
+          # github:just-tavrn/tavrn-crypto#v0.1.0&path:pkg become version ranges first): read from the packed manifests.
           for p in sdk e2ee bot; do
-            if node -e "const d=require('./$p/package.json').dependencies??{};process.exit(Object.values(d).some(s=>/^(github:|git\+|git:|https?:)/.test(s))?0:1)"; then
-              echo "$p/package.json still has git dependencies; switch them to version ranges before publishing" >&2
+            tgz="$RUNNER_TEMP/release/tavrn-$p-$version.tgz"
+            if tar -xOzf "$tgz" package/package.json | node -e "const d=JSON.parse(require('fs').readFileSync(0,'utf8')).dependencies??{};process.exit(Object.values(d).some(s=>/^(github:|git\+|git:|https?:)/.test(s))?0:1)"; then
+              echo "$p still has git dependencies; switch them to version ranges before publishing" >&2
               exit 1
             fi
           done
           for p in sdk e2ee bot; do
-            npm publish "release/tavrn-$p-$VERSION.tgz" --provenance --access public
+            npm publish "$RUNNER_TEMP/release/tavrn-$p-$version.tgz" --provenance --access public
           done
