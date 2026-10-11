@@ -25,6 +25,6 @@ package instead of a git dependency.
 ### Security
 
 - The npm token and the provenance permission live only in a publish job of a protected `release` environment that
-  publishes the tarballs of a credential-free build job, without checkout or install.
+  publishes the tarballs of a credential-free build job after comparing them with the tag, without any install.
 - The self-hosted bot integration job uses no Actions cache and refuses `dependabot/*` branches.
 - The publication check prints only file and line of a private match, never the matching text.
