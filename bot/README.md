@@ -68,6 +68,7 @@ Node.js 22 and newer have a global `WebSocket`. On Node.js 20 start with `--expe
 | `joinPolicy` | `TAVRN_BOT_JOIN` (`lazy`) | `eager` (default) or `lazy` joining of encryption groups, see below. |
 | `logger` | | `{ debug, info, warn, error }(message, fields)`; default JSON lines on stderr (`TAVRN_BOT_DEBUG=1` adds debug). |
 | `autoDeferMs` | | Commands are deferred automatically when the handler has not answered after this long (default 2000 ms; the node waits 3 s). |
+| `ghostPolicy` | | `strict` (default) or `accept`: what the bot does about unknown devices in an encryption group, see "Unknown devices" below. |
 | `historyBackup` | | `false` (default): no history backup on the node. `true`: back up the epoch keys (encrypted) and restore them into a fresh state directory. See "History backups" below. |
 
 These variables belong to the bot process, not to the node.
@@ -153,6 +154,20 @@ A bot is an ordinary participant of tavrn's encryption ([`ENCRYPTION.md`](https:
   `allowed`). An installed bot therefore reaches only plaintext channels and the encrypted channels a room manager
   opened for it; the runtime joins such a channel as soon as it is opened (`channel.update`) and loses it when it is
   closed again. Every member sees in the room's welcome channel when a bot joins or leaves an encrypted channel.
+
+### Unknown devices
+
+Before anything is encrypted the runtime checks the conversation's group for devices that are not what their user's
+identity key confirms (`ENCRYPTION.md` §4.6). People see a warning and decide; nobody watches a bot, so `ghostPolicy`
+decides for it:
+
+- `strict` (default): the leaf of a device that was confirmed and is now retired (deleted, waiting for its owner's
+  cleanup) is accepted. Anything else refuses the message with `BotError("ghost")`, which names the conversation and
+  the devices: a key that was never confirmed, a member whose identity key changed without a continuity chain from the
+  old key (an identity reset; a rotation with a valid chain is fine), a device of a non-member. The bot sends again
+  once the group is clean (the members' clients remove such devices) or the change was confirmed.
+- `accept`: the message goes out anyway and every accepted device is logged as a warning. Use it only where reaching
+  the conversation matters more than the guarantee that nobody else reads along.
 
 ### History backups
 

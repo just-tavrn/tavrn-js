@@ -9,8 +9,8 @@ configured in the repository and what has to be set by hand.
 |---|---|---|
 | `ci.yml` → `JavaScript` | push to `main`, pull requests, by hand | the organization's `js-ci.yml`: install from the lockfile (with the private protocol submodule and the `@tavrn/crypto` git dependency), generated SDK types up to date (`scripts/check-generated.sh`), SPDX headers, dependency licenses, typecheck, Vitest in all three packages (bot unit tests only), `pnpm pack --dry-run` of the three packages |
 | `ci.yml` → `Publication hygiene` | same | `scripts/publish-check.sh`: no private files, domains or secrets |
-| `ci.yml` → `Bot integration tests (real nodes)` | push to `main`, by hand (never pull requests) | on the self-hosted runner `tavrn-e2e`: copies `tavrn-node` out of the node image and runs `@tavrn/bot`'s tests including `bot/test/node/` (`TAVRN_NODE_BIN`); additionally gated by `BOT_NODE_TESTS` |
-| `release.yml` | tag `v*.*.*` | checks that the tag equals the version of all three packages, runs the checks, packs the three npm tarballs and attaches them to a GitHub release; publishes to npm with provenance only with `PUBLISH_ENABLED` (and refuses git dependencies) |
+| `ci.yml` → `Bot integration tests (real nodes)` | push to `main`, by hand (never pull requests, Dependabot or `dependabot/*` branches; dispatch only branches you reviewed: the runner executes their code) | on the self-hosted runner `tavrn-e2e`: copies `tavrn-node` out of the node image and runs `@tavrn/bot`'s tests including `bot/test/node/` (`TAVRN_NODE_BIN`); additionally gated by `BOT_NODE_TESTS` |
+| `release.yml` | tag `v*.*.*` | job `build` (no publishing credential): checks that the tag equals the version of all three packages, runs the checks and packs the three npm tarballs; `release` attaches them to a GitHub release; `publish` (only with `PUBLISH_ENABLED`, environment `release`, after the owner's approval) publishes exactly those tarballs to npm with provenance after comparing them with `npm pack --ignore-scripts` of the tag (no install, no code of the repository runs), and refuses git dependencies |
 | `gitleaks.yml` | push to `main`, pull requests, by hand | the organization's `gitleaks.yml`: secret scan of the full history (`.gitleaks.toml`) |
 | `dependency-review.yml` | pull requests | refuses vulnerable dependencies and licenses outside the allow-list |
 | `cla.yml` | pull requests, comments | the organization's `cla.yml` (CLA bot) |
@@ -31,7 +31,8 @@ Every job carries `if: ${{ vars.CI_ENABLED == 'true' }}`.
 | `PUBLISH_CHECK_PRIVATE` | secret (repository or organization) | comma-separated private domains, hosts and addresses that must never appear in the tree (`Publication hygiene`). Without it the check fails on purpose. Locally the same list lives in an untracked `.publish-check.private` (in the repository or its parent directory). |
 | Dependabot secrets | secret (Dependabot) | Dependabot pull requests run with Dependabot's own secret store: add `TAVRN_READ_PAT` and `PUBLISH_CHECK_PRIVATE` again under Settings → Secrets and variables → Dependabot (or as organization Dependabot secrets), otherwise their CI fails at the private git dependencies and at the hygiene check. |
 | `PUBLISH_ENABLED` | variable | `true` lets the release workflow publish to npm (after the GitHub release). Leave unset until the repositories are public and the git dependencies have become version ranges. |
-| `NPM_TOKEN` | secret | npm automation token with publish rights for the `@tavrn` scope (only with `PUBLISH_ENABLED`). |
+| `NPM_TOKEN` | secret of the environment `release` (never a repository secret) | npm automation token with publish rights for the `@tavrn` scope (only with `PUBLISH_ENABLED`). |
+| environment `release` | Settings → Environments | deployment only from tags `v*`, required reviewer the owner; holds `NPM_TOKEN` (`gh secret set NPM_TOKEN --env release`). Only the job `publish` declares it. |
 | `CLA_PAT` | organization secret | the CLA bot's token (`contents: write` on `just-tavrn/cla-signatures`). Organization secrets do not reach private repositories on the free plan: until the repository is public, add it as a repository secret as well. |
 
 ## Bot integration tests on the self-hosted runner
@@ -53,7 +54,7 @@ The job never runs for pull requests: a self-hosted runner executes the code it 
 1. Bump `version` in `sdk/package.json`, `e2ee/package.json` and `bot/package.json` (and `SDK_VERSION` in
    `sdk/src/index.ts`, `BOT_VERSION` in `bot/src/bot.ts`) to the same `X.Y.Z`; if the protocol moved, bump the
    `protocol` submodule to its tag, run `just generate` and commit `sdk/src/generated`.
-2. `just check`, commit, tag `vX.Y.Z`, push the tag.
+2. `just check`, commit, tag `vX.Y.Z`, push the tag (only organization owners may create `v*` tags).
 3. With `CI_ENABLED` the release workflow attaches the three tarballs to a GitHub release. `v0.1.0` was tagged before
    the CI ran, without a GitHub release.
 

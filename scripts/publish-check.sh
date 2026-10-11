@@ -59,7 +59,8 @@ else
     [ -f "$f" ] || continue
     for p in "${patterns[@]}"; do
       if grep -qIF -- "$p" "$f"; then
-        report "private domain/address in $f: $(grep -nIF -- "$p" "$f" | head -n 1 | cut -c1-120)"
+        # File and line only: the CI log of a public repository must not repeat the private string.
+        report "private domain/address in $f:$(grep -nIF -- "$p" "$f" | head -n 1 | cut -d: -f1)"
       fi
     done
   done
@@ -72,7 +73,7 @@ for f in "${files[@]}"; do
   [ -f "$f" ] || continue
   # Documented example credentials (AWS's AKIAIOSFODNN7EXAMPLE and the like) are fine.
   hit=$(grep -nIE -- "$secret_re" "$f" | grep -v 'EXAMPLE' | head -n 1)
-  [ -n "$hit" ] && report "possible secret in $f: $(cut -c1-80 <<< "$hit")"
+  [ -n "$hit" ] && report "possible secret in $f:${hit%%:*}"
 done
 
 # 4. gitleaks, if installed: only what would be published (the files above, not ignored build or test output such as
