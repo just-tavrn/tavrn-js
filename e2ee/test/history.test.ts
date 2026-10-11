@@ -126,6 +126,8 @@ interface Device {
   address: string;
   deviceId: string;
   events: MlsEvent[];
+  /** A format 1 share (under the current epoch key) as older clients sent them: still read, never sent any more. */
+  format1(json: string): Promise<{ content: string }>;
 }
 
 /** A small node: delivery service from the fake network, plus messages, history shares and pending marks. */
@@ -174,7 +176,11 @@ function setup() {
       onEvent: (e) => events.push(e),
       backupDelayMs: 60_000,
     });
-    return { mls, address, deviceId, events };
+    const format1 = async (json: string) => {
+      await mls.catchUp(CONV);
+      return { content: client.encryptContent(CONV, json) };
+    };
+    return { mls, address, deviceId, events, format1 };
   };
   /** The history routes as one user sees them (the node's rules: only the addressed user reads). */
   const api = (dev: Device): HistoryApi => ({
@@ -207,7 +213,7 @@ function setup() {
     },
   });
   const sync = (dev: Device, online: (a: string) => boolean = () => true, log: string[] = [], extra: Partial<HistorySyncDeps> = {}) =>
-    new HistorySync({ mls: dev.mls, address: dev.address, deviceId: dev.deviceId, api: () => api(dev), isOnline: online, onLog: (e) => log.push(e), backoffMs: 50, ...extra });
+    new HistorySync({ mls: dev.mls, address: dev.address, deviceId: dev.deviceId, api: () => api(dev), isOnline: online, onLog: (e) => log.push(e), backoffMs: 50, shares2: () => true, ...extra });
   const post = async (dev: Device, body: string) => {
     const { content, epoch } = await dev.mls.encrypt(CONV, { type: "text", body });
     const m = { id: ulidFloor(Date.now()).slice(0, 10) + String(++counter).padStart(16, "0"), author: dev.address, device_id: dev.deviceId, epoch, content, encrypted: true } as unknown as Message;
@@ -305,10 +311,10 @@ describe("HistorySync", () => {
 
     // A member shares a forged key for epoch 0: it does not open Alice's message, Bob drops it.
     const forged = encodeHistoryPayload(CONV, bob.address, [[0, new Uint8Array(32).fill(9)]]);
-    const enc = await mallory.mls.encryptHistory(CONV, forged);
+    const enc = await mallory.format1(forged);
     shares.push({ id: "p1", to: bob.address, from_user: mallory.address, from_device: DEV.m, epoch_from: 0, epoch_to: 0, ciphertext: enc.content, created_at: "" });
     // A share meant for someone else (re-addressed by the node) is rejected as a whole.
-    const other = await alice.mls.encryptHistory(CONV, encodeHistoryPayload(CONV, mallory.address, alice.mls.exportEpochKeys(CONV, [0])));
+    const other = await alice.format1(encodeHistoryPayload(CONV, mallory.address, alice.mls.exportEpochKeys(CONV, [0])));
     shares.push({ id: "p2", to: bob.address, from_user: alice.address, from_device: DEV.a, epoch_from: 0, epoch_to: 0, ciphertext: other.content, created_at: "" });
     // A share claiming a device that is not in the group.
     shares.push({ id: "p3", to: bob.address, from_user: "carol@t.local", from_device: DEV.c, epoch_from: 0, epoch_to: 0, ciphertext: enc.content, created_at: "" });
@@ -351,7 +357,7 @@ describe("HistorySync", () => {
     const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce, additionalData: aad }, k, new Uint8Array([...new Uint8Array(64).fill(1), ...json])));
     const forgedContent = b64urlEncode(new Uint8Array([1, 0, 0, 0, 0, 0, 0, 0, 0, ...nonce, ...ct]));
     messages.unshift({ ...old, id: "01J9ZK3G5M8Q2W4E6R8T0Y2VF0", content: forgedContent } as Message);
-    const enc = await mallory.mls.encryptHistory(CONV, encodeHistoryPayload(CONV, bob.address, [[0, planted]]));
+    const enc = await mallory.format1(encodeHistoryPayload(CONV, bob.address, [[0, planted]]));
     shares.push({ id: "q1", to: bob.address, from_user: mallory.address, from_device: DEV.m, epoch_from: 0, epoch_to: 0, ciphertext: enc.content, created_at: "" });
 
     const log: string[] = [];
@@ -359,7 +365,7 @@ describe("HistorySync", () => {
     expect(bob.mls.knownEpochs(CONV)).not.toContain(0);
     expect(log).toContain("keys_rejected");
     // The real key still gets in later (a planted one would have blocked it for good: keys are never overwritten).
-    const real = await alice.mls.encryptHistory(CONV, encodeHistoryPayload(CONV, bob.address, alice.mls.exportEpochKeys(CONV, [0])));
+    const real = await alice.format1(encodeHistoryPayload(CONV, bob.address, alice.mls.exportEpochKeys(CONV, [0])));
     messages.shift();
     shares.push({ id: "q2", to: bob.address, from_user: alice.address, from_device: DEV.a, epoch_from: 0, epoch_to: 0, ciphertext: real.content, created_at: "" });
     expect(await sync(bob).receive(CONV)).toBe(1);
@@ -555,15 +561,15 @@ describe("history shares v2 (ENCRYPTION.md §7b \"Format v2\")", () => {
     expect(Object.keys(shares[0]!.boxes ?? {}).sort()).toEqual([DEV.b, PHONE].sort());
   });
 
-  it("falls back to format 1 without the capability or a verified share key on every device of the recipient", async () => {
+  it("sends nothing without the capability or a verified share key on every device of the recipient (no format 1)", async () => {
     for (const [phone, shares2] of [[{}, false], [{ shareKey: "none" as const }, true], [{ shareKey: "forged" as const }, true]] as const) {
       const { sync, shares, alice, bob, old } = await scenario(phone);
-      await sync(alice, undefined, [], { shares2: () => shares2 }).checkPending(CONV, { kind: "all" });
-      expect(shares, JSON.stringify(phone)).toHaveLength(1);
-      expect(shares[0]!.v ?? 1).toBe(1);
-      expect(shares[0]!.boxes).toBeUndefined();
-      expect(await sync(bob).receive(CONV)).toBe(1);
-      expect((await bob.mls.decrypt(CONV, old)).ok).toBe(true);
+      const log: string[] = [];
+      await sync(alice, undefined, log, { shares2: () => shares2 }).checkPending(CONV, { kind: "all" });
+      expect(shares, JSON.stringify(phone)).toEqual([]);
+      expect(log).toContain("share_skipped");
+      expect(await sync(bob).receive(CONV)).toBe(0);
+      expect((await bob.mls.decrypt(CONV, old)).ok).toBe(false);
     }
   });
 
