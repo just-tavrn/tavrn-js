@@ -125,7 +125,8 @@ describe.each(kinds)("two parties (%s store)", (_kind, makeStore) => {
     expect(await alice.mls.decrypt(CONV, old)).toMatchObject({ ok: true });
     await alice.mls.flushBackups();
     expect(alice.mls.hasPendingBackups()).toBe(false);
-    expect(net.node(DOMAIN).backups.size).toBe(1);
+    // The conversation's backup and the account's trust record (ENCRYPTION.md §7).
+    expect([...net.node(DOMAIN).backups.keys()].filter((k) => !k.endsWith("/00000000000000000000000000"))).toHaveLength(1);
 
     // Alice's second device: empty store, unlocked with the recovery key, attested, history restored.
     const store = makeStore();

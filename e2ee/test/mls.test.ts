@@ -743,7 +743,8 @@ describe("MlsManager across nodes (FEDERATION.md §3.5, §3.6, §6)", () => {
     await alice.mls.ensureJoined(channel, { canCreate: true });
     const m = await send(alice, channel, "für später", "m1");
     await alice.mls.flushBackups();
-    expect([...net.node(A).backups.keys()]).toEqual([`${alice.address}|${channel}`]);
+    // Next to the account's trust record (ENCRYPTION.md §7), which lives under the home node's domain.
+    expect([...net.node(A).backups.keys()].filter((k) => !k.endsWith("/00000000000000000000000000"))).toEqual([`${alice.address}|${channel}`]);
     expect(net.node(B).backups.size).toBe(0);
     const fresh = device(`alice@${A}`, DEV.a2);
     expect(await fresh.mls.restoreBackups()).toBe(1);

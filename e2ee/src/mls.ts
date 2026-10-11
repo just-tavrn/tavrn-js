@@ -48,6 +48,7 @@ import { chainKeys, chainReaches } from "./identity";
 import { envelopeFields, signatureNonce, type PlainEnvelope, type PlainStatus, type SignedFields } from "./plaintext";
 import { assertEmbeds, withValidEmbeds } from "./embeds";
 import { sealedContent, webhookPayload, type SealedBy, type SealedContent } from "./sealed";
+import { TRUST_BACKUP_ULID, mergeTrust, openTrust, sealTrust, type TrustRecord } from "./trust";
 
 /** Delivery-service routes of the node that hosts a conversation (ENCRYPTION.md §4.4); ids are bare ULIDs. */
 export interface MlsNodeApi {
@@ -129,6 +130,49 @@ export function mlsApiOf(deps: {
 const ULID = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 const DOMAIN = /^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$/;
 
+/**
+ * The leaf of a serialized KeyPackage (an `MLSMessage` with wire format `mls_key_package`, RFC 9420 §6, §10): its
+ * basic credential's identity and its signature key. Null for anything else. Read before an Add so that a claimed
+ * KeyPackage can be held against the attested device it claims to be (§3.3); the KeyPackage's own signature is
+ * checked by the MLS library when it is added.
+ */
+export function keyPackageLeaf(bytes: Uint8Array): { identity: string; signatureKey: Uint8Array } | null {
+  let i = 0;
+  const u16 = (): number => {
+    if (i + 2 > bytes.length) throw new RangeError("short");
+    const v = (bytes[i]! << 8) | bytes[i + 1]!;
+    i += 2;
+    return v;
+  };
+  const vec = (): Uint8Array => {
+    if (i >= bytes.length) throw new RangeError("short");
+    const prefix = bytes[i]! >> 6;
+    if (prefix > 2) throw new RangeError("varint");
+    const n = 1 << prefix;
+    if (i + n > bytes.length) throw new RangeError("short");
+    let len = bytes[i]! & 0x3f;
+    for (let k = 1; k < n; k++) len = len * 256 + bytes[i + k]!;
+    i += n;
+    if (i + len > bytes.length) throw new RangeError("short");
+    const out = bytes.slice(i, i + len);
+    i += len;
+    return out;
+  };
+  try {
+    if (u16() !== 1 || u16() !== 5) return null; // mls10, mls_key_package
+    if (u16() !== 1) return null; // KeyPackage.version
+    u16(); // cipher suite
+    vec(); // init_key
+    vec(); // leaf_node.encryption_key
+    const signatureKey = vec();
+    if (u16() !== 1) return null; // credential type basic
+    const identity = new TextDecoder("utf-8", { fatal: true }).decode(vec());
+    return { identity, signatureKey };
+  } catch {
+    return null;
+  }
+}
+
 /** Qualified conversation id `<domain>/<ulid>` (ENCRYPTION.md §0.1), also the MLS group id. */
 export function qualify(domain: string, conversationId: string): string {
   return `${domain}/${conversationId}`;
@@ -183,6 +227,12 @@ export interface MlsMeta {
   convs: Record<string, { rotatedAt: number; rotate?: boolean }>;
   /** Conversations with epoch keys not uploaded yet (survives a reload before the debounced upload). */
   pendingBackups?: string[];
+  /**
+   * Own devices this account attested (device id → base64url device key): this device and every own device whose
+   * attestation verified under the own identity key, merged with the trust record (`trust.ts`). Only these keys are
+   * ever attested again as retired (ENCRYPTION.md §4.7).
+   */
+  ownDevices?: Record<string, string>;
 }
 
 /**
@@ -502,6 +552,8 @@ export class MlsManager {
     this.client = deps.client;
     this.verified = deps.verified ?? {};
     normalizeMeta(deps.meta, deps.homeDomain);
+    // This device belongs to the account's own devices (the trust record, §4.7).
+    void this.recordOwnDevices([[deps.deviceId, deps.client.devicePublicKey]]).catch(() => undefined);
   }
 
   /** The delivery service of the node hosting the conversation `q` (qualified id). */
@@ -552,8 +604,12 @@ export class MlsManager {
           return this.catchUp(str(a));
         case "selfUpdate":
           return this.selfUpdate(str(a));
-        case "removeLeaves":
-          return this.removeLeaves(str(a), strs(b));
+        case "removeLeaves": {
+          const keys = args[2];
+          if (keys === undefined) return this.removeLeaves(str(a), strs(b));
+          if (!Array.isArray(keys) || !keys.every((k) => k instanceof Uint8Array)) throw new MlsError("invalid_id");
+          return this.removeLeaves(str(a), strs(b), keys as Uint8Array[]);
+        }
         case "addMissingDevices":
           return this.addMissingDevices(str(a), strs(b));
         case "encrypt":
@@ -949,9 +1005,15 @@ export class MlsManager {
     return { epoch, key: this.client.exportVoiceKey(q, epoch) };
   }
 
-  /** `mls.remove_needed`: removes the listed leaves that are still in the group (callers check rights). */
-  removeLeaves(q: string, identities: string[]): Promise<boolean> {
-    const remote = this.forwarded<boolean>("removeLeaves", [q, identities]);
+  /**
+   * `mls.remove_needed` and the ghost cleanup: removes the listed leaves that are still in the group (callers check
+   * rights). With `keys` (the leaves' signature keys, one per identity) exactly those leaves go, also when another
+   * leaf names the same device (a planted or disguised leaf next to the genuine one); without, every leaf of each
+   * identity. This device's own leaf is never removed.
+   */
+  removeLeaves(q: string, identities: string[], keys?: Uint8Array[]): Promise<boolean> {
+    if (keys && keys.length !== identities.length) return Promise.reject(new MlsError("invalid_id"));
+    const remote = this.forwarded<boolean>("removeLeaves", keys ? [q, identities, keys] : [q, identities]);
     if (remote) return remote;
     return this.run(async () => {
       if (!this.client.hasGroup(q)) return false;
@@ -959,6 +1021,15 @@ export class MlsManager {
       try {
         return await this.commitInner(q, () => {
           if (!this.client.hasGroup(q)) return null;
+          const own = this.client.devicePublicKey;
+          const isOwnLeaf = (identity: string, key: Uint8Array) => identity === this.client.identity && sameBytes(key, own);
+          if (keys) {
+            const present = this.rosterEntries(q);
+            const targets = identities
+              .map((identity, n) => ({ identity, key: keys[n]! }))
+              .filter((t) => !isOwnLeaf(t.identity, t.key) && present.some((e) => e.identity === t.identity && sameBytes(e.key, t.key)));
+            return targets.length ? this.client.removeLeaves(q, targets.map((t) => t.identity), targets.map((t) => t.key)) : null;
+          }
           const present = new Set(this.rosterIdentities(q));
           const targets = identities.filter((i) => present.has(i) && i !== this.client.identity);
           return targets.length ? this.client.removeMembers(q, targets) : null;
@@ -1000,7 +1071,14 @@ export class MlsManager {
           const claimed = await ds.api.claim(address);
           for (const kp of claimed.key_packages) {
             const identity = `${address}/${kp.device_id}`;
-            if (missing.includes(identity)) candidates.push({ identity, keyPackage: b64urlDecode(kp.key_package) });
+            if (!missing.includes(identity)) continue;
+            // The claim passes through the hosting node: only a KeyPackage whose leaf is exactly the attested device
+            // (its identity and its attested key) is added; anything else would be a ghost leaf (§3.3, §4.6).
+            const keyPackage = b64urlDecode(kp.key_package);
+            const leaf = keyPackageLeaf(keyPackage);
+            const attested = devices.get(kp.device_id);
+            if (!leaf || !attested || leaf.identity !== identity || !sameBytes(leaf.signatureKey, attested)) continue;
+            candidates.push({ identity, keyPackage });
           }
         } catch {
           /* unknown user or lookup failed: try again next time */
@@ -1464,7 +1542,7 @@ export class MlsManager {
     const v = this.verified[address];
     if (!v || this.verification(address) !== "refresh") return;
     v.refresh_dismissed = true;
-    await this.deps.saveVerified?.(this.verified);
+    await this.saveVerified();
     this.deps.onEvent?.({ type: "verification", address });
   }
 
@@ -1504,7 +1582,7 @@ export class MlsManager {
     const key = await this.contactKey(address);
     if (!key) return false;
     this.verified[address] = { address, identity_public_key: key, verified_at: new Date(this.now()).toISOString(), method };
-    await this.deps.saveVerified?.(this.verified);
+    await this.saveVerified();
     await this.acknowledgeKeyChange(address);
     this.deps.onEvent?.({ type: "verification", address });
     return true;
@@ -1513,7 +1591,8 @@ export class MlsManager {
   async removeVerification(address: string): Promise<void> {
     if (!this.verified[address]) return;
     delete this.verified[address];
-    await this.deps.saveVerified?.(this.verified);
+    this.removedVerified.add(address);
+    await this.saveVerified();
     this.deps.onEvent?.({ type: "verification", address });
   }
 
@@ -1568,22 +1647,22 @@ export class MlsManager {
       const pin = this.deps.pins[address];
       if (!pin) {
         this.deps.pins[address] = { key: published };
-        await this.deps.savePins(this.deps.pins);
+        await this.savePins();
       } else if (pin.key !== published && chainReaches(keys.continuity, pin.key, published)) {
         // Rotation with continuity (§9a): signed by the pinned key, pinned at once with a soft notice. An earlier,
         // unacknowledged change keeps its warning. A verified contact needs a fresh verification (not blocking).
         this.deps.pins[address] = pin.changed ? { key: published, changed: true, rotated: true } : { key: published, rotated: true };
-        await this.deps.savePins(this.deps.pins);
+        await this.savePins();
         const v = this.verified[address];
         if (v && (v.identity_public_key === pin.key || v.rotated_to === pin.key)) {
           v.rotated_to = published;
           delete v.refresh_dismissed;
-          await this.deps.saveVerified?.(this.verified);
+          await this.saveVerified();
         }
         this.deps.onEvent?.({ type: "key_rotated", address });
       } else if (pin.key !== published) {
         this.deps.pins[address] = { key: published, changed: true };
-        await this.deps.savePins(this.deps.pins);
+        await this.savePins();
         this.deps.onEvent?.({ type: "key_changed", address });
       }
     }
@@ -1607,6 +1686,8 @@ export class MlsManager {
       }
     }
     this.shareKeyMap.set(address, shareKeys);
+    // Own devices attested under the own identity key: evidence for a later retired re-attestation (§4.7).
+    if (address === this.deps.address) await this.recordOwnDevices(out).catch(() => undefined);
     // Retired devices (§2.3): verified under the same pinned key; only used for history (§5.2).
     const retired = new Map<string, { key: Uint8Array; deletedAt: number }>();
     for (const d of keys.retired ?? []) {
@@ -1696,7 +1777,7 @@ export class MlsManager {
     const pin = this.deps.pins[address];
     if (!pin?.changed && !pin?.rotated) return;
     this.deps.pins[address] = { key: pin.key };
-    await this.deps.savePins(this.deps.pins);
+    await this.savePins();
   }
 
   /**
@@ -1772,6 +1853,116 @@ export class MlsManager {
     return out;
   }
 
+  // ---- Trust record (ENCRYPTION.md §7 "Trust record", trust.ts) --------------------------------
+
+  private trustTimer: ReturnType<typeof setTimeout> | null = null;
+  private trustRun: Promise<void> | null = null;
+  /** Verified contacts removed on this device since the last upload (not taken back from the stored record). */
+  private readonly removedVerified = new Set<string>();
+
+  private get trustConversation(): string {
+    return qualify(this.deps.homeDomain, TRUST_BACKUP_ULID);
+  }
+
+  private async savePins(): Promise<void> {
+    await this.deps.savePins(this.deps.pins);
+    this.trustChanged();
+  }
+
+  private async saveVerified(): Promise<void> {
+    await this.deps.saveVerified?.(this.verified);
+    this.trustChanged();
+  }
+
+  private trustChanged(): void {
+    if (this.disposed) return;
+    if (this.trustTimer) clearTimeout(this.trustTimer);
+    this.trustTimer = setTimeout(() => {
+      this.trustTimer = null;
+      void this.syncTrust().catch(() => undefined);
+    }, this.deps.backupDelayMs ?? 1000);
+  }
+
+  private flushTrust(): Promise<void> {
+    if (this.trustTimer) clearTimeout(this.trustTimer);
+    this.trustTimer = null;
+    return this.syncTrust().catch(() => undefined);
+  }
+
+  /** Adds own devices to the record (an id that is already recorded keeps its key). */
+  private async recordOwnDevices(devices: Iterable<[string, Uint8Array]>): Promise<void> {
+    const record = (this.deps.meta.ownDevices ??= {});
+    let added = false;
+    for (const [deviceId, key] of devices) {
+      if (record[deviceId]) continue;
+      record[deviceId] = b64urlEncode(key);
+      added = true;
+    }
+    if (!added) return;
+    await this.deps.saveMeta(this.deps.meta);
+    this.trustChanged();
+  }
+
+  /**
+   * Whether `deviceId` with exactly `key` is one of the account's own devices (ENCRYPTION.md §4.7): recorded here or
+   * in the trust record on the home node, which is fetched again when the local record does not know it. Nothing the
+   * node says outside the encrypted record counts: a leaf it planted under the user's address is never vouched for.
+   */
+  async knownOwnDevice(deviceId: string, key: Uint8Array): Promise<boolean> {
+    const has = () => this.deps.meta.ownDevices?.[deviceId] === b64urlEncode(key);
+    if (has()) return true;
+    await this.syncTrust().catch(() => undefined);
+    return has();
+  }
+
+  /**
+   * Merges the trust record with the one stored on the home node in both directions: entries this device lacks are
+   * taken over, and the stored record is replaced (If-Match) when it lacks something this device has. Requires an
+   * unlocked store (the backup key). Concurrent calls share one run.
+   */
+  syncTrust(): Promise<void> {
+    if (this.trustRun) return this.trustRun;
+    const run = this.syncTrustInner().finally(() => {
+      this.trustRun = null;
+    });
+    this.trustRun = run;
+    return run;
+  }
+
+  private async syncTrustInner(): Promise<void> {
+    const home = this.deps.homeDomain;
+    const key = this.deps.backupKey();
+    try {
+      for (let attempt = 0; attempt < MAX_TRIES; attempt++) {
+        const remote = await this.deps.api.backupGet(home, TRUST_BACKUP_ULID);
+        const stored = remote ? await openTrust(key, this.deps.address, remote.blob) : null;
+        const local: TrustRecord = { pins: this.deps.pins, verified: this.verified, devices: (this.deps.meta.ownDevices ??= {}) };
+        if (stored && mergeTrust(local, stored, this.removedVerified)) {
+          await this.deps.savePins(this.deps.pins);
+          await this.deps.saveVerified?.(this.verified);
+          await this.deps.saveMeta(this.deps.meta);
+        }
+        // What this device has wins; the stored record keeps what only it has (other devices' entries).
+        const upload: TrustRecord = { pins: { ...local.pins }, verified: { ...local.verified }, devices: { ...local.devices } };
+        if (stored) mergeTrust(upload, stored, this.removedVerified);
+        if (stored && jcs(upload) === jcs(stored)) {
+          this.removedVerified.clear();
+          return;
+        }
+        const blob = await sealTrust(key, this.deps.address, upload);
+        try {
+          await this.deps.api.backupPut(home, TRUST_BACKUP_ULID, blob, remote?.etag ?? null);
+          this.removedVerified.clear();
+          return;
+        } catch (e) {
+          if (apiCode(e) !== "backup.etag_mismatch") throw e;
+        }
+      }
+    } finally {
+      key.fill(0);
+    }
+  }
+
   // ---- Backup ---------------------------------------------------------------------------------
 
   private markDirty(conversationId: string) {
@@ -1798,9 +1989,11 @@ export class MlsManager {
 
   /** Uploads the backups of conversations with new epoch keys (merge with the stored blob, If-Match). */
   flushBackups(): Promise<void> {
+    // The trust record is merged and uploaded by whichever tab changed it (If-Match keeps concurrent writers apart).
+    const trust = this.trustTimer ? this.flushTrust() : Promise.resolve();
     const remote = this.forwarded<void>("flushBackups", []);
-    if (remote) return remote;
-    return this.run(async () => {
+    if (remote) return trust.then(() => remote);
+    return trust.then(() => this.run(async () => {
       for (const c of this.deps.meta.pendingBackups ?? []) this.dirty.add(c);
       for (const c of [...this.dirty]) {
         this.dirty.delete(c);
@@ -1811,7 +2004,7 @@ export class MlsManager {
         }
       }
       this.savePending();
-    });
+    }));
   }
 
   /** Backups live on the home node under the hosting node's domain and the conversation ULID (§7). */
@@ -1866,6 +2059,7 @@ export class MlsManager {
       let n = 0;
       try {
         for (const item of items) {
+          if (item.conversation === this.trustConversation) continue;
           const slash = item.conversation.indexOf("/");
           const domain = item.conversation.slice(0, slash);
           const ulid = item.conversation.slice(slash + 1);
@@ -1880,6 +2074,8 @@ export class MlsManager {
         key.fill(0);
       }
       await this.persist();
+      // The trust record (pins, verified contacts, own devices) comes back with the backups (§7).
+      await this.syncTrust().catch(() => undefined);
       this.deps.meta.restored = true;
       await this.deps.saveMeta(this.deps.meta);
       return n;
@@ -2035,6 +2231,7 @@ export class MlsManager {
     this.disposed = true;
     this.deps.tabs?.close();
     if (this.backupTimer) clearTimeout(this.backupTimer);
+    if (this.trustTimer) clearTimeout(this.trustTimer);
     this.decrypted.clear();
     this.plainChecked.clear();
     this.ephemeralNonces.clear();
