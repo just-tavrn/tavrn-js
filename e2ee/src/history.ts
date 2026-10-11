@@ -8,7 +8,8 @@
  * `{type: "history_keys", v, conversation, to, epochs: [[epoch, key], …]}` encrypted and signed like
  * message content (§5.2), posted to `…/history-keys` of the node hosting the conversation. Format 2 (node capability
  * `history.shares2`): under a fresh key sealed to the verified share key of every device of the recipient, so only
- * those devices can read it; format 1 (fallback, to be removed): under the conversation's **current** epoch. The recipient verifies the signature against an attested device in the group,
+ * those devices can read it. Format 1 (under the conversation's current epoch, readable by every leaf) is never sent;
+ * it is still read for shares older clients left on the node. The recipient verifies the signature against an attested device in the group,
  * checks every key against a stored message of its epoch, signed by its author's attested device (no poisoned keys) and keeps accepted keys only
  * in the key store (the MLS client state, which is also what the history backup carries).
  *
@@ -93,6 +94,19 @@ export function epochsSinceReset(known: number[], current: number, fromEpoch: nu
   if (fromEpoch === null) return [];
   const lower = Math.max(fromEpoch, minEpoch ?? fromEpoch);
   return [...new Set(known)].filter((e) => Number.isSafeInteger(e) && e >= lower && e < current).sort((a, b) => a - b);
+}
+
+/**
+ * The longest gap between a member's room join and its first leaf that automatic shares fill (the lifetime of a
+ * pending mark, §7b): a `since` the node reports earlier than this before this device saw the member's first leaf is
+ * moved up to it.
+ */
+export const MAX_JOIN_GAP_MS = 30 * 24 * 3600 * 1000;
+
+/** The join used for a waiting member's window: the node's `since`, bounded by when this device saw the member. */
+export function boundedJoin(sinceMs: number, seenAtMs: number): number {
+  const floor = seenAtMs - MAX_JOIN_GAP_MS;
+  return Number.isFinite(sinceMs) ? Math.max(sinceMs, floor) : seenAtMs;
 }
 
 /**
@@ -305,12 +319,15 @@ export interface HistorySyncDeps {
    */
   firstEpoch?(conversation: string, kind: string, sinceMs: number): Promise<number | null>;
   /**
-   * Whether node `domain` announces `history.shares2` (ENCRYPTION.md §7b "Format v2"); without it (or false) shares
-   * go out in format 1.
+   * Whether node `domain` announces `history.shares2` (ENCRYPTION.md §7b "Format v2"); without it (or false) no share
+   * is sent at all (format 1 is not sent any more).
    */
   shares2?(domain: string): boolean | Promise<boolean>;
-  /** Something went wrong with a share; never carries keys or payloads. */
-  onLog?(event: "share_rejected" | "share_failed" | "keys_rejected", conversation: string): void;
+  /**
+   * Something went wrong with a share, or a share was not sent (`share_skipped`: no format 2 possible, the node lacks
+   * `history.shares2` or a device of the recipient has no verified share key); never carries keys or payloads.
+   */
+  onLog?(event: "share_rejected" | "share_failed" | "keys_rejected" | "share_skipped", conversation: string): void;
   backoffMs?: number;
   setTimer?(fn: () => void, ms: number): unknown;
   clearTimer?(t: unknown): void;
@@ -322,6 +339,8 @@ export interface HistorySyncDeps {
  * qualified ids; `policy` is the channel's current `history_for_new_members`.
  */
 export class HistorySync {
+  /** When this device first saw a leaf of a waiting member in a group (`q|address` → ms): bounds the node's `since`. */
+  private readonly firstSeen = new Map<string, number>();
   private readonly shared = new Set<string>();
   private readonly rejected = new Set<string>();
   private readonly timers = new Map<string, unknown>();
@@ -340,7 +359,10 @@ export class HistorySync {
   /** This device committed the Add of these users (MlsEvent `added`): it shares at once when they are pending. */
   noteAdded(q: string, addresses: string[]): void {
     const set = this.preferred.get(q) ?? new Set<string>();
-    for (const a of addresses) set.add(a);
+    for (const a of addresses) {
+      set.add(a);
+      this.seen(q, a);
+    }
     this.preferred.set(q, set);
   }
 
@@ -368,6 +390,8 @@ export class HistorySync {
         return a !== entry.user && (a === this.deps.address || this.deps.isOnline(a));
       });
       const delay = sharerDelay(self, candidates, !!this.preferred.get(q)?.has(entry.user), this.deps.backoffMs ?? SHARER_BACKOFF_MS);
+      // The join as the node reports it, but never earlier than this device's own knowledge allows (§7b step 2).
+      const joinedAt = boundedJoin(Date.parse(entry.since), this.seen(q, entry.user));
       const reset = await this.resetOf(entry);
       const go = async () => {
         this.timers.delete(key);
@@ -379,7 +403,7 @@ export class HistorySync {
         this.shared.add(key);
         try {
           if (reset) await this.shareSinceReset(q, entry.user, reset.at, reset.minEpoch);
-          else await this.shareWith(q, entry.user, Date.parse(entry.since), policy);
+          else await this.shareWith(q, entry.user, joinedAt, policy);
         } catch {
           this.deps.onLog?.("share_failed", q);
         }
@@ -387,6 +411,17 @@ export class HistorySync {
       if (delay === 0) await go();
       else this.timers.set(key, (this.deps.setTimer ?? setTimeout)(() => void go(), delay));
     }
+  }
+
+  /** When this device first saw `address` waiting in `q` with a leaf in the group (recorded now if not yet). */
+  private seen(q: string, address: string): number {
+    const k = `${q}|${address}`;
+    let at = this.firstSeen.get(k);
+    if (at === undefined) {
+      at = Date.now();
+      this.firstSeen.set(k, at);
+    }
+    return at;
   }
 
   /**
@@ -525,19 +560,24 @@ export class HistorySync {
     const mls = this.deps.mls;
     const chunks = epochs.length ? chunkEpochs(epochs) : [[]];
     const shareKeys = await this.shareKeysFor(q, to);
+    if (!shareKeys) {
+      // Format 1 would be readable by every leaf of the group, unattested ones included: nothing is sent.
+      this.deps.onLog?.("share_skipped", q);
+      return 0;
+    }
     let sent = 0;
     for (const chunk of chunks) {
       const keys = mls.exportEpochKeys(q, chunk);
       let json: string;
       try {
-        json = encodeHistoryPayload(q, to, keys, shareKeys ? 2 : 1);
+        json = encodeHistoryPayload(q, to, keys, 2);
       } finally {
         for (const [, k] of keys) k.fill(0);
       }
-      const { content, epoch, boxes } = await mls.encryptHistory(q, json, shareKeys ?? undefined);
+      const { content, epoch, boxes } = await mls.encryptHistory(q, json, shareKeys);
       const from = chunk[0] ?? epoch;
       const last = chunk[chunk.length - 1] ?? epoch;
-      await api.share(id, { to_user: to, epoch_from: from, epoch_to: last, ciphertext: content, ...(boxes ? { v: 2, boxes } : {}) });
+      await api.share(id, { to_user: to, epoch_from: from, epoch_to: last, ciphertext: content, v: 2, boxes });
       sent += keys.length;
     }
     return sent;

@@ -331,8 +331,8 @@ describe("MlsManager", () => {
     await bob.mls.ensureJoined(CONV, { canCreate: true });
     await mallory.mls.ensureJoined(CONV, { canCreate: true });
     await alice.mls.catchUp(CONV);
-    expect(await alice.mls.ghostCheck(CONV, memberSet(alice, bob, mallory))).toEqual([{ identity: `${mallory.address}/${DEV.d}`, reason: "unattested" }]);
-    expect(await alice.mls.ghostCheck(CONV, memberSet(alice, mallory))).toEqual([
+    expect(await alice.mls.ghostCheck(CONV, memberSet(alice, bob, mallory))).toMatchObject([{ identity: `${mallory.address}/${DEV.d}`, reason: "unattested" }]);
+    expect(await alice.mls.ghostCheck(CONV, memberSet(alice, mallory))).toMatchObject([
       { identity: `${bob.address}/${DEV.b}`, reason: "not_member" },
       { identity: `${mallory.address}/${DEV.d}`, reason: "unattested" },
     ]);
@@ -349,7 +349,8 @@ describe("MlsManager", () => {
     const out = alice.client().addMembers(CONV, kps);
     await node.ds(alice.address, DEV.a).postCommit(ID, { epoch: out.epoch, commit: b64urlEncode(out.commit), group_info: b64urlEncode(out.groupInfo), welcome: null });
     alice.client().mergePendingCommit(CONV);
-    expect(await alice.mls.ghostCheck(CONV, memberSet(alice, bob))).toEqual([{ identity: `${bob.address}/${DEV.b}`, reason: "duplicate" }]);
+    // The leaf with Bob's attested key is his; the other one under his name is unattested, whichever comes first.
+    expect(await alice.mls.ghostCheck(CONV, memberSet(alice, bob))).toMatchObject([{ identity: `${bob.address}/${DEV.b}`, reason: "unattested" }]);
     twin.free();
   });
 
@@ -452,6 +453,11 @@ describe("MlsManager", () => {
     // Unsigned (older clients, bots) and unknown devices are only "unverified".
     expect(await bob.mls.verifyPlaintext(CONV, { ...envelope, id: "p8", signature: null })).toBe("unsigned");
     expect(await bob.mls.verifyPlaintext(CONV, { ...envelope, id: "p9", device_id: DEV.a2 })).toBe("unverifiable");
+    // An edit the node fakes under the same id and signature (message.updated) is checked again, never taken from the
+    // cache of the genuine message (§10.3).
+    expect(await bob.mls.verifyPlaintext(CONV, { ...envelope, content: { ...envelope.content, body: "neue IBAN" } })).toBe("invalid");
+    expect(await bob.mls.verifyPlaintext(CONV, { ...envelope, mentions: [] })).toBe("invalid");
+    expect(await bob.mls.verifyPlaintext(CONV, envelope)).toBe("valid");
     expect(await bob.mls.verifyPlaintext(CONV, { ...envelope, id: "p10", author: "eve@other.example" })).toBe("unverifiable");
     // An edit is signed anew (fresh nonce) and verifies for the same message id.
     const edited = { ...envelope, content: { type: "text", body: "bearbeitet" } };
@@ -556,7 +562,7 @@ describe("MlsManager", () => {
     net.node(DOMAIN).users.get("alice")!.devices.delete(DEV.a2);
     alice.mls.forgetDevices(alice.address);
     const ghost = `${alice.address}/${DEV.a2}`;
-    expect(await alice.mls.ghostCheck(CONV, memberSet(alice, bob))).toEqual([{ identity: ghost, reason: "unattested" }]);
+    expect(await alice.mls.ghostCheck(CONV, memberSet(alice, bob))).toMatchObject([{ identity: ghost, reason: "unattested" }]);
     const cleaner = new LeafCleaner({ mls: alice.mls, sleep: async () => undefined });
     const r = await cleaner.clean({ q: CONV, members: memberSet(alice, bob), mayManage: false, pending: [{ identity: ghost, reason: "deleted" }] });
     expect(r).toEqual({ outcome: "removed", removed: [ghost], ghosts: [] });
@@ -577,11 +583,11 @@ describe("MlsManager", () => {
     // Without the flag a bot is a member like any other.
     expect(await alice.mls.ghostCheck(CONV, members)).toEqual([]);
     // With the flag it is a ghost even though the node lists it as a member; users are not affected.
-    expect(await alice.mls.ghostCheck(CONV, members, { noBots: true })).toEqual([{ identity: botLeaf, reason: "bot" }]);
+    expect(await alice.mls.ghostCheck(CONV, members, { noBots: true })).toMatchObject([{ identity: botLeaf, reason: "bot" }]);
     // A kind this client does not know counts like a bot (§1.5).
     net.node(DOMAIN).users.get("bob")!.kind = "robot";
     alice.mls.forgetDevices(bob.address);
-    expect(await alice.mls.ghostCheck(CONV, members, { noBots: true })).toEqual([
+    expect(await alice.mls.ghostCheck(CONV, members, { noBots: true })).toMatchObject([
       { identity: `${bob.address}/${DEV.b}`, reason: "bot" },
       { identity: botLeaf, reason: "bot" },
     ]);
@@ -591,7 +597,7 @@ describe("MlsManager", () => {
     // Removal follows rule 3 of §4.7: only members who may manage the conversation commit it.
     const cleaner = new LeafCleaner({ mls: alice.mls, sleep: async () => undefined });
     const refused = await cleaner.clean({ q: CONV, members, mayManage: false, noBots: true });
-    expect(refused).toEqual({ outcome: "not_allowed", removed: [], ghosts: [{ identity: botLeaf, reason: "bot" }] });
+    expect(refused).toMatchObject({ outcome: "not_allowed", removed: [], ghosts: [{ identity: botLeaf, reason: "bot" }] });
     expect(alice.mls.roster(CONV)).toContain(botLeaf);
     // Without the flag the cleaner leaves the bot alone.
     expect((await cleaner.clean({ q: CONV, members, mayManage: true })).outcome).toBe("clean");
@@ -727,7 +733,7 @@ describe("MlsManager across nodes (FEDERATION.md §3.5, §3.6, §6)", () => {
     await bob.mls.ensureJoined(channel, { canCreate: true });
     await mallory.mls.ensureJoined(channel, { canCreate: true });
     await bob.mls.catchUp(channel);
-    expect(await bob.mls.ghostCheck(channel, [bob.address, mallory.address])).toEqual([{ identity: `${mallory.address}/${DEV.d}`, reason: "unattested" }]);
+    expect(await bob.mls.ghostCheck(channel, [bob.address, mallory.address])).toMatchObject([{ identity: `${mallory.address}/${DEV.d}`, reason: "unattested" }]);
     const m = await send(mallory, channel, "vertrau mir", "m1");
     expect(await bob.mls.decrypt(channel, m)).toEqual({ ok: false, reason: "unknown_device" });
     expect(net.keyLookups).toContain(`${mallory.address}→${A}`);
@@ -742,7 +748,8 @@ describe("MlsManager across nodes (FEDERATION.md §3.5, §3.6, §6)", () => {
     await alice.mls.ensureJoined(channel, { canCreate: true });
     const m = await send(alice, channel, "für später", "m1");
     await alice.mls.flushBackups();
-    expect([...net.node(A).backups.keys()]).toEqual([`${alice.address}|${channel}`]);
+    // Next to the account's trust record (ENCRYPTION.md §7), which lives under the home node's domain.
+    expect([...net.node(A).backups.keys()].filter((k) => !k.endsWith("/00000000000000000000000000"))).toEqual([`${alice.address}|${channel}`]);
     expect(net.node(B).backups.size).toBe(0);
     const fresh = device(`alice@${A}`, DEV.a2);
     expect(await fresh.mls.restoreBackups()).toBe(1);
@@ -884,7 +891,8 @@ describe("content of one purpose is never accepted for another (ENCRYPTION.md §
     const t = await alice.mls.encryptThreadTitle(CONV, "Plans");
     expect(await bob.mls.decrypt(CONV, { id: "m-title", author: alice.address, device_id: DEV.a, epoch: t.title_epoch, content: t.title })).toEqual({ ok: false, reason: "invalid" });
     // A history share (keys of past epochs for another member) must never become message content either.
-    const share = await alice.mls.encryptHistory(CONV, JSON.stringify({ type: "history_keys", v: 1, conversation: CONV, to: "carol@t.local", epochs: [[0, b64urlEncode(new Uint8Array(32))]] }));
+    // (Format 1 under the epoch key, as older clients sent it.)
+    const share = { epoch: alice.mls.epoch(CONV)!, content: alice.client().encryptContent(CONV, JSON.stringify({ type: "history_keys", v: 1, conversation: CONV, to: "carol@t.local", epochs: [[0, b64urlEncode(new Uint8Array(32))]] })) };
     expect(await bob.mls.decrypt(CONV, { id: "m-share", author: alice.address, device_id: DEV.a, epoch: share.epoch, content: share.content })).toEqual({ ok: false, reason: "invalid" });
     expect(await bob.mls.decryptEphemeral(CONV, alice.address, DEV.a, share.content)).toEqual({ ok: false, reason: "invalid" });
     // The genuine paths still work.
@@ -986,11 +994,11 @@ describe("changed identity keys hold back the new devices until acknowledged (EN
     await alice.mls.catchUp(CONV);
     alice.mls.identityChanged(bob.address);
     const ghosts = await alice.mls.ghostCheck(CONV, memberSet(alice, bob));
-    expect(ghosts).toContainEqual({ identity: `${bob.address}/${DEV.d}`, reason: "key_changed" });
+    expect(ghosts).toContainEqual(expect.objectContaining({ identity: `${bob.address}/${DEV.d}`, reason: "key_changed" }));
     // Bob's old device is not attested under the new key either.
-    expect(ghosts).toContainEqual({ identity: `${bob.address}/${DEV.b}`, reason: "unattested" });
+    expect(ghosts).toContainEqual(expect.objectContaining({ identity: `${bob.address}/${DEV.b}`, reason: "unattested" }));
     await alice.mls.acknowledgeKeyChange(bob.address);
-    expect(await alice.mls.ghostCheck(CONV, memberSet(alice, bob))).toEqual([{ identity: `${bob.address}/${DEV.b}`, reason: "unattested" }]);
+    expect(await alice.mls.ghostCheck(CONV, memberSet(alice, bob))).toMatchObject([{ identity: `${bob.address}/${DEV.b}`, reason: "unattested" }]);
   });
 
   it("a rotation with a valid continuity statement is not held back", async () => {
@@ -1015,7 +1023,9 @@ describe("encrypt() catches up first and refuses to send otherwise (ENCRYPTION.m
     await expect(alice.mls.encrypt(CONV, { type: "text", body: "second" })).rejects.toMatchObject({ name: "MlsError", code: "catch_up_failed" });
     expect((await alice.mls.encrypt(CONV, { type: "text", body: "second" })).epoch).toBe(alice.mls.epoch(CONV));
     node.failLog = 1;
-    await expect(alice.mls.encryptHistory(CONV, "{}")).rejects.toMatchObject({ code: "catch_up_failed" });
+    await expect(alice.mls.encryptHistory(CONV, "{}", { [DEV.b]: new Uint8Array(32) })).rejects.toMatchObject({ code: "catch_up_failed" });
+    // Format 1 (no share keys) is not sent any more.
+    await expect(alice.mls.encryptHistory(CONV, "{}", {})).rejects.toMatchObject({ code: "invalid_id" });
   });
 
   it("checks the roster again after commits it processed: a new ghost stops the message", async () => {
@@ -1030,15 +1040,38 @@ describe("encrypt() catches up first and refuses to send otherwise (ENCRYPTION.m
     // A device of a non-member joins while Alice types (the node let it in).
     await mallory.mls.ensureJoined(CONV, { canCreate: false });
     await expect(alice.mls.encrypt(CONV, { type: "text", body: "secret" })).rejects.toMatchObject({ name: "MlsError", code: "ghost" });
-    // A retry is refused as well until the violation was shown (a ghost check of the caller) or the caller names it.
+    // A retry is refused as well, also with the caller's member list, until the user acknowledged the leaf.
     await expect(alice.mls.encrypt(CONV, { type: "text", body: "secret" })).rejects.toMatchObject({ code: "ghost" });
     const guard = { members: memberSet(alice, bob), noBots: false };
-    await expect(alice.mls.encrypt(CONV, { type: "text", body: "secret" }, { ...guard, knownGhosts: [] })).rejects.toMatchObject({ code: "ghost" });
-    await expect(alice.mls.encrypt(CONV, { type: "text", body: "after the warning" }, { ...guard, knownGhosts: [`${mallory.address}/${DEV.c}`] })).resolves.toBeTruthy();
-    // Shown by the caller's ghost check: known from then on, also after further commits.
-    expect(await alice.mls.ghostCheck(CONV, memberSet(alice, bob))).toEqual([{ identity: `${mallory.address}/${DEV.c}`, reason: "not_member" }]);
+    await expect(alice.mls.encrypt(CONV, { type: "text", body: "secret" }, guard)).rejects.toMatchObject({ code: "ghost" });
+    // A ghost check shows it, but acknowledges nothing.
+    expect(await alice.mls.ghostCheck(CONV, memberSet(alice, bob))).toMatchObject([{ identity: `${mallory.address}/${DEV.c}`, reason: "not_member" }]);
+    expect(alice.mls.unacknowledgedGhosts(CONV)).toMatchObject([{ identity: `${mallory.address}/${DEV.c}`, reason: "not_member" }]);
+    await expect(alice.mls.encrypt(CONV, { type: "text", body: "secret" })).rejects.toMatchObject({ code: "ghost" });
+    // The warning's button: acknowledged from then on, also after further commits.
+    await alice.mls.acknowledgeGhosts(CONV, [`${mallory.address}/${DEV.c}`]);
+    expect(alice.mls.unacknowledgedGhosts(CONV)).toEqual([]);
+    await expect(alice.mls.encrypt(CONV, { type: "text", body: "after the warning" }, guard)).resolves.toBeTruthy();
     await bob.mls.selfUpdate(CONV);
     await expect(alice.mls.encrypt(CONV, { type: "text", body: "after the warning" })).resolves.toBeTruthy();
+  });
+
+  it("refuses every write path while a ghost is not acknowledged, even without an earlier ghost check (fail closed)", async () => {
+    const { device } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    const forged = device("bob", DEV.d, { forgedAttestation: true });
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    await bob.mls.ensureJoined(CONV, { canCreate: true });
+    await forged.mls.ensureJoined(CONV, { canCreate: false });
+    await alice.mls.catchUp(CONV);
+    // No view ever ran a ghost check here (a forum post, a file record, a whiteboard scene, a thread title).
+    await expect(alice.mls.encrypt(CONV, { type: "text", body: "forum post" })).rejects.toMatchObject({ code: "ghost" });
+    await expect(alice.mls.encryptThreadTitle(CONV, "a title")).rejects.toMatchObject({ code: "ghost" });
+    await expect(alice.mls.encryptEphemeral(CONV, { type: "whiteboard.scene", elements: [] })).rejects.toMatchObject({ code: "ghost" });
+    await alice.mls.acknowledgeGhosts(CONV, [`${bob.address}/${DEV.d}`]);
+    await expect(alice.mls.encrypt(CONV, { type: "text", body: "forum post" })).resolves.toBeTruthy();
+    await expect(alice.mls.encryptEphemeral(CONV, { type: "whiteboard.scene", elements: [] })).resolves.toBeTruthy();
   });
 });
 

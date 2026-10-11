@@ -25,7 +25,12 @@ export type BotErrorCode =
   /** An interaction was answered twice, or answered after it expired. */
   | "interaction_answered"
   /** The bot was stopped (or not started yet). */
-  | "stopped";
+  | "stopped"
+  /**
+   * Not sent: the conversation's encryption group has a device the bot's `ghostPolicy` does not accept (a key never
+   * attested, a changed identity key without a continuity chain, a non-member; ENCRYPTION.md §4.6).
+   */
+  | "ghost";
 
 export class BotError extends Error {
   constructor(
