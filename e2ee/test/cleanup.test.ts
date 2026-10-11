@@ -151,6 +151,7 @@ describe("re-attesting own deleted devices before their leaves go", () => {
       rosterEntries: () => f.state.roster.map((identity) => ({ identity, key })),
       retiredDevice: (_a: string, d: string) => retired.get(d),
       verifiedDevices: async () => new Map(),
+      knownOwnDevice: async () => true,
     });
     const calls: string[] = [];
     let online = false;
@@ -176,6 +177,25 @@ describe("re-attesting own deleted devices before their leaves go", () => {
     const again = vi.fn(async () => true);
     Object.assign(g.mls, { rosterEntries: () => [{ identity: myOld, key }], retiredDevice: () => ({ key, deletedAt: 0 }), verifiedDevices: async () => new Map() });
     await new LeafCleaner({ mls: g.mls as unknown as CleanerDeps["mls"], reattest: again }).clean({ q: Q, members, mayManage: false });
+    expect(again).not.toHaveBeenCalled();
+    expect(g.mls.removeLeaves).toHaveBeenCalled();
+  });
+
+  it("never signs a leaf key the account's own-devices record does not know: the leaf goes without", async () => {
+    const key = new Uint8Array(32).fill(9);
+    const f = fake([me, myOld], { [myOld]: "unattested" });
+    const known = vi.fn(async () => false);
+    Object.assign(f.mls, { rosterEntries: () => f.state.roster.map((identity) => ({ identity, key })), retiredDevice: () => undefined, verifiedDevices: async () => new Map(), knownOwnDevice: known });
+    const reattest = vi.fn(async () => true);
+    const r = await new LeafCleaner({ mls: f.mls as unknown as CleanerDeps["mls"], reattest, sleep: async () => undefined }).clean({ q: Q, members, mayManage: false });
+    expect(known).toHaveBeenCalledWith("01J9ZK3G5M8Q2W4E6R8T0Y2VA1", key);
+    expect(reattest).not.toHaveBeenCalled();
+    expect(r.outcome).toBe("removed");
+    // Without the record (an older manager) nothing is signed either.
+    const g = fake([me, myOld], { [myOld]: "unattested" });
+    Object.assign(g.mls, { rosterEntries: () => g.state.roster.map((identity) => ({ identity, key })), retiredDevice: () => undefined, verifiedDevices: async () => new Map() });
+    const again = vi.fn(async () => true);
+    await new LeafCleaner({ mls: g.mls as unknown as CleanerDeps["mls"], reattest: again, sleep: async () => undefined }).clean({ q: Q, members, mayManage: false });
     expect(again).not.toHaveBeenCalled();
     expect(g.mls.removeLeaves).toHaveBeenCalled();
   });

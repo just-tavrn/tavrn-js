@@ -11,7 +11,12 @@
  *
  * Before an own leaf goes, its device is attested again as retired when the node has no retired attestation for it
  * (devices deleted before nodes kept them, ENCRYPTION.md §5.2): the leaf's signature key is the device key, and
- * without it the history that device wrote could no longer be verified once the leaf is gone.
+ * without it the history that device wrote could no longer be verified once the leaf is gone. Only a key the account
+ * attested itself is signed again (its own-devices record, `MlsManager.knownOwnDevice`): a leaf the node planted under
+ * the user's address goes without one, and the messages of a device the record does not know stay unverifiable.
+ *
+ * Leaves are removed by identity and signature key, so a leaf that names a genuine device with another key goes
+ * while the genuine leaf stays.
  *
  * To avoid a storm of competing commits, the lowest online device id among the devices that may do the removal
  * tries first; every other device waits {@link CLEANUP_WAIT_MS} and tries only if the leaf is still there. One
@@ -58,10 +63,11 @@ export interface CleanupResult {
 
 export interface CleanerDeps {
   mls: Pick<MlsManager, "ghostCheck" | "removeLeaves" | "roster" | "identity" | "address"> &
-    Partial<Pick<MlsManager, "rosterEntries" | "retiredDevice" | "verifiedDevices">>;
+    Partial<Pick<MlsManager, "rosterEntries" | "retiredDevice" | "verifiedDevices" | "knownOwnDevice">>;
   /**
    * Attests an own deleted device again as retired (`POST /users/me/devices/retired`) from its leaf key; true when
-   * the node has it now (or refused it for good), false to keep the leaf for a later try (e.g. offline).
+   * the node has it now (or refused it for good), false to keep the leaf for a later try (e.g. offline). Called only
+   * for keys `mls.knownOwnDevice` vouches for.
    */
   reattest?(deviceId: string, key: Uint8Array): Promise<boolean>;
   sleep?(ms: number): Promise<void>;
@@ -71,6 +77,16 @@ export interface CleanerDeps {
 }
 
 type Why = "own" | "device" | "membership";
+
+/** A leaf to remove: its identity and signature key (null: every leaf of the identity). */
+interface Leaf {
+  identity: string;
+  key: Uint8Array | null;
+}
+
+function sameKey(a: Uint8Array, b: Uint8Array): boolean {
+  return a.length === b.length && a.every((x, i) => x === b[i]);
+}
 
 function deviceIdOf(identity: string): string {
   return splitIdentity(identity).deviceId;
@@ -99,22 +115,46 @@ function isConflict(e: unknown): boolean {
 }
 
 export class LeafCleaner {
-  /** Own leaves without a retired attestation: re-attested first; leaves whose re-attestation failed stay. */
-  private async keepHistory(q: string, ids: string[]): Promise<string[]> {
+  /**
+   * Own leaves without a retired attestation whose key the account attested itself: re-attested first; leaves whose
+   * re-attestation failed stay. Any other own leaf goes without one.
+   */
+  private async keepHistory(leaves: Leaf[]): Promise<Leaf[]> {
     const { mls, reattest } = this.deps;
-    const own = ids.filter((i) => splitIdentity(i).address === mls.address);
-    if (!reattest || !own.length || !mls.rosterEntries || !mls.retiredDevice || !mls.verifiedDevices) return ids;
+    const own = leaves.filter((l) => splitIdentity(l.identity).address === mls.address);
+    if (!reattest || !own.length || !mls.retiredDevice || !mls.verifiedDevices || !mls.knownOwnDevice) return leaves;
     await mls.verifiedDevices(mls.address, true).catch(() => null);
-    const keys = new Map(mls.rosterEntries(q).map((e) => [e.identity, e.key]));
-    const keep = new Set<string>();
-    for (const id of own) {
-      const { deviceId } = splitIdentity(id);
-      const key = keys.get(id);
-      if (!key || mls.retiredDevice(mls.address, deviceId)) continue;
-      const ok = await reattest(deviceId, key).catch(() => false);
-      if (!ok) keep.add(id);
+    const keep = new Set<Leaf>();
+    for (const leaf of own) {
+      const { deviceId } = splitIdentity(leaf.identity);
+      if (!leaf.key || mls.retiredDevice(mls.address, deviceId)) continue;
+      if (!(await mls.knownOwnDevice(deviceId, leaf.key).catch(() => false))) continue;
+      const ok = await reattest(deviceId, leaf.key).catch(() => false);
+      if (!ok) keep.add(leaf);
     }
-    return ids.filter((i) => !keep.has(i));
+    return leaves.filter((l) => !keep.has(l));
+  }
+
+  /**
+   * The leaves behind the target identities: with keys known (`rosterEntries`), every leaf of the identity except one
+   * carrying the device's attested key (that one is genuine); otherwise the identity alone (all its leaves).
+   */
+  private async leavesOf(q: string, targets: Map<string, Why>): Promise<Leaf[]> {
+    const { mls } = this.deps;
+    if (!mls.rosterEntries) return [...targets.keys()].map((identity) => ({ identity, key: null }));
+    const entries = mls.rosterEntries(q);
+    const out: Leaf[] = [];
+    for (const [identity, why] of targets) {
+      const { address, deviceId } = splitIdentity(identity);
+      const attested = mls.verifiedDevices ? (await mls.verifiedDevices(address).catch(() => null))?.get(deviceId) : undefined;
+      for (const e of entries) {
+        if (e.identity !== identity) continue;
+        // Departed members go with every leaf; otherwise the leaf with the attested key is the genuine one.
+        if (why !== "membership" && attested && sameKey(attested, e.key)) continue;
+        out.push({ identity, key: e.key });
+      }
+    }
+    return out;
   }
 
   private readonly running = new Map<string, Promise<CleanupResult>>();
@@ -144,7 +184,9 @@ export class LeafCleaner {
     const ghosts = await mls.ghostCheck(req.q, members, { fresh: true, noBots: req.noBots });
     const targets = new Map<string, Why>();
     for (const g of ghosts) {
-      if (g.reason === "duplicate" || g.identity === mls.identity) continue;
+      // Duplicates carry the attested key (removing one would hit the genuine leaf); this device's own leaf is never
+      // reported, a leaf under its name with another key is.
+      if (g.reason === "duplicate") continue;
       if ((this.tries.get(`${req.q}|${g.identity}`) ?? 0) >= CLEANUP_MAX_TRIES) continue;
       if (splitIdentity(g.identity).address === mls.address) targets.set(g.identity, "own");
       else if (g.reason === "unattested") targets.set(g.identity, "device");
@@ -170,18 +212,22 @@ export class LeafCleaner {
       if (targets.size === 0) return result(ghosts.length ? "deferred" : "clean");
     }
 
-    const ids = await this.keepHistory(req.q, [...targets.keys()]);
-    if (ids.length === 0) return result("deferred");
+    const leaves = await this.keepHistory(await this.leavesOf(req.q, targets));
+    if (leaves.length === 0) return result("deferred");
+    const ids = [...new Set(leaves.map((l) => l.identity))];
     for (const id of ids) this.tries.set(`${req.q}|${id}`, (this.tries.get(`${req.q}|${id}`) ?? 0) + 1);
+    const byKey = leaves.every((l) => l.key !== null);
     const backoff = this.deps.backoffMs ?? [500, 1500, 3000];
     for (let attempt = 0; ; attempt++) {
       try {
-        const ok = await mls.removeLeaves(req.q, ids);
+        const ok = byKey ? await mls.removeLeaves(req.q, leaves.map((l) => l.identity), leaves.map((l) => l.key!)) : await mls.removeLeaves(req.q, ids);
         if (!ok) {
           // The node refused (403 mls.forbidden) or the leaves are already gone.
           const after = await this.targets(req);
           ghosts = after.ghosts;
-          if (after.targets.size === 0 && !ids.some((i) => mls.roster(req.q).includes(i))) return result("clean");
+          const entries = byKey && mls.rosterEntries ? mls.rosterEntries(req.q) : null;
+          const stillThere = entries ? leaves.some((l) => entries.some((e) => e.identity === l.identity && sameKey(e.key, l.key!))) : ids.some((i) => mls.roster(req.q).includes(i));
+          if (after.targets.size === 0 && !stillThere) return result("clean");
           for (const id of ids) this.tries.set(`${req.q}|${id}`, CLEANUP_MAX_TRIES);
           return result("not_allowed");
         }
