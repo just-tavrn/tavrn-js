@@ -213,11 +213,18 @@ async function identityKeyOnNode(ctx: E2eeContext): Promise<string | null> {
 /**
  * Registration (ENCRYPTION.md §2.4 flow 1), after the user confirmed `recovery`: master secret (kept
  * locally first, so a retry after an error reuses it), identity key, `recovery` entry, optional
- * passkey entry, device attestation and KeyPackages.
+ * passkey entry, device attestation and KeyPackages. Refused (`already_set_up`) when this device's store holds the
+ * account's master secret but is locked, or the node has a recovery entry for it: such an account unlocks instead.
  */
 export async function setupAccount(ctx: E2eeContext, recovery: RecoveryKey, passkey?: { credentialId: string; prf: Uint8Array } | null): Promise<void> {
   await ensureCrypto();
-  if ((await localStatus(ctx.store, ctx.address, ctx.deviceId)) !== "unlocked") {
+  const status = await localStatus(ctx.store, ctx.address, ctx.deviceId);
+  // A node that claims the account has no identity key must not make this device replace its local data (and with it
+  // its pins and groups): with a stored master secret or a recovery entry the account is set up, the user unlocks.
+  // An unlocked store is the retry of an interrupted setup and keeps its master secret.
+  if (status === "locked") throw new E2eeError("already_set_up");
+  if (status === "none" && (await entry(ctx, METHOD_RECOVERY))) throw new E2eeError("already_set_up");
+  if (status !== "unlocked") {
     const fresh = MasterSecret.generate();
     const bytes = fresh.toBytes();
     fresh.free();

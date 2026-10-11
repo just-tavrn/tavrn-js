@@ -157,6 +157,17 @@ describe("MLS state shared by the tabs of one browser", () => {
     expect(stateWrites(t2)).toEqual([]);
   });
 
+  it("a forwarded encryption is checked against the calling tab's members, and the acknowledgement reaches the owner", async () => {
+    const { alice, bob, t1, t2 } = await dm();
+    // Tab 2 (a follower) knows Bob is no member any more; the owner tab never ran a ghost check for the DM.
+    const ghosts = await t2.mls.ghostCheck(CONV, [alice.address]);
+    expect(ghosts).toMatchObject([{ identity: `${bob.address}/${DEV.b}`, reason: "not_member" }]);
+    await expect(t2.mls.encrypt(CONV, { type: "thread.title", body: "x" })).rejects.toMatchObject({ code: "ghost" });
+    await t2.mls.acknowledgeGhosts(CONV, ghosts);
+    await expect(send(t2, "nach der Warnung", "m9")).resolves.toBeTruthy();
+    expect(t1.mls.unacknowledgedGhosts(CONV)).toEqual([]);
+  });
+
   it("hand-over: when the owner tab closes the next tab takes over from the stored state", async () => {
     const { net, alice, bob, b, t1, t2 } = await dm();
     const t3 = await openTab(net, alice, b);

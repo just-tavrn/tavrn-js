@@ -9,6 +9,7 @@ export { CommandRouter, Interaction, type CommandCrypto, type CommandHandler, ty
 // The argument checks of encrypted invocations (§5.8) are the shared ones of @tavrn/e2ee.
 export { COMMAND_ARGS_TYPE, CommandArgsVerifier, type ArgsCheck, type ArgsRejection } from "@tavrn/e2ee";
 export { BotError, type BotErrorCode } from "./errors";
+export { retiredLeaf, sealUnderPolicy, type GhostPolicy } from "./ghosts";
 export type { CommandDefinition, CommandSet } from "@tavrn/sdk";
 export { createKeyFile, defaultKeyFile, parseKey, readKey } from "./keyfile";
 export { consoleLogger, silentLogger, type BotLogger, type LogFields } from "./logger";

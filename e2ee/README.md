@@ -64,22 +64,32 @@ adapts `@tavrn/sdk` clients) and persistence injected (`persist`, `savePins`, `s
 Conversation ids are qualified (`qualify(domain, ulid)`, `splitQualified`). Methods:
 
 - joining: `ensureJoined(q, { canCreate })`, `processWelcomes(domain)`, `catchUp(q)`, `addMissingDevices(q, members)`,
-  `removeLeaves(q, identities)`, `selfUpdate(q)`, `hasGroup`, `epoch`;
+  `removeLeaves(q, identities, keys?)` (with `keys`, exactly the leaves with those signature keys), `selfUpdate(q)`,
+  `hasGroup`, `epoch`. `addMissingDevices` adds a claimed KeyPackage only when its leaf carries the identity and the
+  attested key of the device it was claimed for (`keyPackageLeaf`);
 - content: `encrypt(q, content, opts?)`, `decrypt(q, envelope)` → `Decrypted`, `peek`, `encryptEphemeral`,
   `decryptEphemeral` (replay window), `voiceKey(q)`, `contentHeader(content)`. `opts.ctx` is the message's **signed
   context** (`{ thread_id, reply_to }`, for answers of applications also `interaction`; ENCRYPTION.md §5.2): it is
   encrypted and signed with the content, and `decrypt` answers `{ ok: false, reason: "envelope_mismatch" }` when the
-  envelope the node delivers names another thread or reply. `opts.members`, `opts.noBots` and `opts.knownGhosts`
-  feed the ghost check that runs again after the catch-up before anything is sent;
+  envelope the node delivers names another thread or reply. Before anything leaves the device (`encrypt`, thread
+  titles, `encryptEphemeral`) the ghost check runs again (`opts.members`, `opts.noBots`; without them the members of
+  the last `ghostCheck`, or every leaf's user) and refuses with `MlsError("ghost")` while a violation is not
+  acknowledged: only `acknowledgeGhosts(q, identities)`, called by the warning's button, lets content out to it
+  (`unacknowledgedGhosts(q)` lists the rest); a ghost check alone acknowledges nothing;
 - plaintext signatures: `signPlaintext(q, fields, content)`, `verifyPlaintext(q, envelope)` → `PlainStatus`;
 - identities: `verifiedDevices(address)`, `ghostCheck(q, members)` (a member whose security key changed stays a
   ghost with the reason `key_changed` until the user acknowledges the change; no device is added automatically
   meanwhile), `changedKeys()`, `acknowledgeKeyChange`, `identityChanged`, `forgetDevices`, `safetyNumber`,
   `comparePayload`, `markVerified`, `removeVerification`, `acceptNewKey`, `verification(address)`,
   `verificationStates()`;
+- trust record (`trust.ts`, ENCRYPTION.md §7): the pins, the verified contacts and the account's own devices are
+  kept as a backup blob under the backup key on the home node, so they survive a sign-out and reach new devices
+  (`restoreBackups` brings them, `flushBackups` uploads changes, `syncTrust()` merges both ways);
+  `knownOwnDevice(deviceId, key)` tells whether the account attested that device key itself (the cleanup re-attests
+  only such keys as retired);
 - share keys: `verifiedShareKeys(address)` (the share keys of a user's devices whose attestation by the device key
-  checks out), `ownShareKey()`, `encryptHistory(q, json, shareKeys?)` (format 2 with sealed boxes per recipient device
-  when `shareKeys` is given, format 1 under the current epoch otherwise);
+  checks out), `ownShareKey()`, `encryptHistory(q, json, shareKeys)` (format 2 with sealed boxes per recipient
+  device; format 1 is not sent any more);
 - backups: `flushBackups()`, `hasPendingBackups()`, `restoreBackups()`; `dispose()`;
 - KeyPackages: `createKeyPackages(count)` (in the manager's state; `ensureDevice` tops up through it when its context
   has `keyPackages`, see below).
@@ -146,7 +156,10 @@ member's room join and its device's first leaf in the group, whose keys reach th
 against a stored message of its epoch signed by its author's attested device, keeps accepted keys and acknowledges
 the share), `noteAdded`, `dispose`. With the node capability `history.shares2` a share is **format 2**: a fresh key
 sealed to the verified share key of every device of the recipient (at most `MAX_SHARE_BOXES`), so only those devices
-can read it; format 1 (under the current epoch) is the fallback for older nodes. The payload codec is
+can read it. Without the capability, or when a device of the recipient has no verified share key, nothing is sent
+(`onLog("share_skipped")`): format 1 (under the current epoch, readable by every leaf) is never sent, only still read.
+The window starts at the node's `since`, but never more than `MAX_JOIN_GAP_MS` (30 days) before this device first saw
+the member waiting (`boundedJoin`). The payload codec is
 `encodeHistoryPayload` / `parseHistoryPayload`, the key check `epochKeyOpens` with `pickSamples`.
 
 **History after a key reset** — also `history.ts` (capability `history.restore`): `restorePlan(q, channel)` lists the
