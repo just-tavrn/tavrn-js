@@ -93,6 +93,15 @@ export class AttachmentIntegrityError extends Error {
   }
 }
 
+/**
+ * Checks the bytes of a plaintext attachment against its `sha256` (base64url), which a signed plaintext message covers
+ * (FEDERATION.md §10.3): throws {@link AttachmentIntegrityError} when the node served other bytes.
+ */
+export async function verifyPlainAttachment(bytes: Uint8Array, sha256: string): Promise<void> {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes as Uint8Array<ArrayBuffer>));
+  if (b64urlEncode(digest) !== sha256) throw new AttachmentIntegrityError();
+}
+
 /** Checks the SHA-256 of the downloaded ciphertext (§6 step 4), then decrypts it. */
 export async function decryptAttachment(ciphertext: Uint8Array, a: Pick<ContentAttachment, "key" | "nonce" | "sha256">): Promise<Uint8Array> {
   await ensureCrypto();

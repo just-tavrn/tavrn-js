@@ -2,11 +2,21 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { b64urlDecode, b64urlEncode } from "@tavrn/sdk";
 import { ensureCrypto } from "../src/wasm";
-import { AttachmentIntegrityError, contentAttachments, decryptAttachment, encryptAttachment, safeFileName } from "../src/content";
+import { AttachmentIntegrityError, contentAttachments, decryptAttachment, encryptAttachment, safeFileName, verifyPlainAttachment } from "../src/content";
 
 beforeAll(() => ensureCrypto());
 
 const ID = "01J9ZK3G5M8Q2W4E6R8T0Y2V00";
+
+describe("plaintext attachments", () => {
+  it("accepts the bytes the signed sha256 names and refuses others", async () => {
+    const bytes = new TextEncoder().encode("Rechnung.pdf");
+    const sha256 = b64urlEncode(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)));
+    await expect(verifyPlainAttachment(bytes, sha256)).resolves.toBeUndefined();
+    const swapped = new TextEncoder().encode("Rechnung.pdg");
+    await expect(verifyPlainAttachment(swapped, sha256)).rejects.toBeInstanceOf(AttachmentIntegrityError);
+  });
+});
 
 describe("encrypted attachments", () => {
   it("round-trips a file and refuses a modified ciphertext before decrypting", async () => {
