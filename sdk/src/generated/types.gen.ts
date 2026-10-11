@@ -6080,6 +6080,11 @@ export type UserInvite = {
     room?: {
         [key: string]: unknown;
     } | null;
+    /**
+     * Set when the inviter is a user of a third node (neither `node` nor this node): `node` named them, but cannot
+     * vouch for them, so their identity is unverified (FEDERATION.md §5.2). Clients show "via <node>".
+     */
+    via?: string | null;
 };
 
 export type UserInviteList = {
@@ -8903,6 +8908,7 @@ export type ForgotPasswordData = {
 
 export type ForgotPasswordErrors = {
     429: ProblemDetails;
+    503: ProblemDetails;
 };
 
 export type ForgotPasswordError = ForgotPasswordErrors[keyof ForgotPasswordErrors];
@@ -8979,6 +8985,7 @@ export type UnlinkData = {
 };
 
 export type UnlinkErrors = {
+    403: ProblemDetails;
     404: ProblemDetails;
     409: ProblemDetails;
 };
