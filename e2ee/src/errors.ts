@@ -11,7 +11,12 @@ export type E2eeErrorCode =
   | "rotation_devices"
   | "locked"
   /** Setup refused: this device holds the account's master secret, or the node has its recovery entry (unlock). */
-  | "already_set_up";
+  | "already_set_up"
+  /**
+   * The session's device has a key on the node that this device no longer holds (its local key store was lost):
+   * a device key is immutable (ENCRYPTION.md §3.1), so encryption needs a new device, i.e. signing in again.
+   */
+  | "device_key_lost";
 
 export class E2eeError extends Error {
   constructor(readonly code: E2eeErrorCode) {

@@ -29,6 +29,7 @@ export {
   ensureDevice,
   forgetIdentityKeepDevice,
   loadClient,
+  localDeviceLost,
   localIdentityKey,
   localStatus,
   passkeyEntryIds,

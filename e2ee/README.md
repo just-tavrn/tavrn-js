@@ -48,12 +48,16 @@ address, deviceId, store, clientName?, keyPackages? }`, where `api` needs the `k
 `TavrnApi`:
 `ensureDevice` (create the MLS client, attest the device together with its share key (§3.1; a device attested
 before share keys existed publishes it once with `keys.putShareKey`), keep ≥ `KEY_PACKAGE_MIN` KeyPackages, uploading
-up to `KEY_PACKAGE_BATCH`), `setupAccount`, `unlockWithRecoveryKey`, `unlockWithPasskeyPrf`, `addPasskeySecret`,
+up to `KEY_PACKAGE_BATCH`; a device key is immutable, so when the node holds another key for the session's device
+than the local one, or a key while the store has none, the device lost its key: `device_key_lost`, nothing new is
+stored and a mismatching stored client is dropped, and the session has to sign in again as a new device), `setupAccount`, `unlockWithRecoveryKey`, `unlockWithPasskeyPrf`, `addPasskeySecret`,
 `regenerateRecoveryKey`, `resetIdentity`, `passkeyEntryIds(api)`; store-only helpers `localStatus(store, address,
 deviceId)`, `loadClient(store)` / `saveClient(store, client)` (secret `CLIENT_STATE = "mls-client"`),
-`localIdentityKey(store)`, `forgetIdentityKeepDevice(store, address)`, `wipeLocal(store, address)`. Errors:
-`E2eeError` with `code` (`recovery_key_invalid`, `recovery_key_wrong`, `passkey_wrong`, `no_recovery_entry`,
-`no_passkey_entry`, `identity_mismatch`, `locked`).
+`localIdentityKey(store)`, `forgetIdentityKeepDevice(store, address)`, `wipeLocal(store, address)`;
+`localDeviceLost(ctx)` (the node lists the session's device with a key this store does not hold: no unlock helps,
+sign in again; false while locked). Errors: `E2eeError` with `code` (`recovery_key_invalid`, `recovery_key_wrong`,
+`passkey_wrong`, `no_recovery_entry`, `no_passkey_entry`, `identity_mismatch`, `rotation_devices`, `locked`,
+`already_set_up`, `device_key_lost`).
 
 **MLS session manager** (`mls.ts`, ENCRYPTION.md §4–§7, FEDERATION.md §3.5, §6, §10) — `MlsManager(deps:
 MlsDeps)` with the node API injected (`MlsApi`: `node(domain)` → `MlsNodeApi` delivery service of the hosting
