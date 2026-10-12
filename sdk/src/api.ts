@@ -174,6 +174,7 @@ import type {
   UpdateSound,
   VoiceChannelState,
   VoiceJoin,
+  VoiceRole,
   VoiceStatePatch,
   EphemeralAccepted,
   EphemeralRequest,
@@ -1397,9 +1398,15 @@ export class TavrnApi {
 
   /** Voice channels (VOICE.md §3–§7). Moderation targets are user addresses of room members. */
   voice = {
-    /** LiveKit token, limits, MLS epoch and the participants already connected (§3). */
-    join: (roomId: string, channelId: string) => this.post<VoiceJoin>(`/rooms/${roomId}/channels/${channelId}/voice/join`),
-    leave: (roomId: string, channelId: string) => this.post<void>(`/rooms/${roomId}/channels/${channelId}/voice/leave`),
+    /**
+     * LiveKit token, limits, MLS epoch and the participants already connected (§3). `role: "screen"`: the token of
+     * this device's screen publisher instead, which only publishes its screen share (§4b; the device must be there).
+     */
+    join: (roomId: string, channelId: string, role: VoiceRole = "device") =>
+      this.post<VoiceJoin>(`/rooms/${roomId}/channels/${channelId}/voice/join`, role === "device" ? undefined : { role }),
+    /** This device leaves (with its screen publisher); `role: "screen"` ends only the screen publisher (§4b). */
+    leave: (roomId: string, channelId: string, role: VoiceRole = "device") =>
+      this.post<void>(`/rooms/${roomId}/channels/${channelId}/voice/leave`, role === "device" ? undefined : { role }),
     /** Own mute/deafen/streaming/camera flags (§5). */
     updateState: (roomId: string, channelId: string, patch: VoiceStatePatch) => this.patch<VoiceChannelState>(`/rooms/${roomId}/channels/${channelId}/voice/state`, patch),
     /** Voice channels of a room with at least one participant (initial state; then `voice.state`). */
@@ -1423,8 +1430,12 @@ export class TavrnApi {
     get: (conversationId: string) => this.get<CallState>(`/conversations/${conversationId}/call`),
     /** Starts the call (rings the others) or joins the running one. */
     start: (conversationId: string) => this.post<CallJoin>(`/conversations/${conversationId}/call/start`),
-    join: (conversationId: string) => this.post<CallJoin>(`/conversations/${conversationId}/call/join`),
-    leave: (conversationId: string) => this.post<void>(`/conversations/${conversationId}/call/leave`),
+    /** Answers or joins the running call; `role: "screen"`: this device's screen publisher (VOICE.md §4b). */
+    join: (conversationId: string, role: VoiceRole = "device") =>
+      this.post<CallJoin>(`/conversations/${conversationId}/call/join`, role === "device" ? undefined : { role }),
+    /** This device leaves (with its screen publisher); `role: "screen"` ends only the screen publisher. */
+    leave: (conversationId: string, role: VoiceRole = "device") =>
+      this.post<void>(`/conversations/${conversationId}/call/leave`, role === "device" ? undefined : { role }),
     decline: (conversationId: string) => this.post<void>(`/conversations/${conversationId}/call/decline`),
     updateState: (conversationId: string, patch: VoiceStatePatch) => this.patch<CallState>(`/conversations/${conversationId}/call/state`, patch),
   };

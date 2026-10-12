@@ -6435,6 +6435,11 @@ export type VoiceParticipant = {
      */
     muted: boolean;
     /**
+     * Set only for a device's screen publisher (VOICE.md §4b): the identity of the device it belongs to. Clients
+     * show it as that participant's stream, not as a participant of its own. Absent for devices.
+     */
+    screen_of?: string | null;
+    /**
      * Muted by a moderator (`mute_members`); the user cannot unmute and has no microphone grant.
      */
     server_muted: boolean;
@@ -6447,6 +6452,18 @@ export type VoiceParticipant = {
      */
     user: string;
     user_id: string;
+};
+
+/**
+ * Who joins or leaves: the device itself, or its screen publisher (VOICE.md §4b).
+ */
+export type VoiceRole = 'device' | 'screen';
+
+/**
+ * Optional body of `voice/join`, `voice/leave`, `call/join` and `call/leave` (no body = the device).
+ */
+export type VoiceRoleRequest = {
+    role?: VoiceRole;
 };
 
 export type VoiceStatePatch = {
@@ -9696,7 +9713,10 @@ export type DeclineResponses = {
 export type DeclineResponse = DeclineResponses[keyof DeclineResponses];
 
 export type JoinData = {
-    body?: never;
+    /**
+     * Optional: `{ "role": "screen" }` for the device's screen publisher
+     */
+    body?: null | VoiceRoleRequest;
     path: {
         conversation_id: string;
     };
@@ -9705,6 +9725,7 @@ export type JoinData = {
 };
 
 export type JoinErrors = {
+    400: ProblemDetails;
     403: ProblemDetails;
     404: ProblemDetails;
     409: ProblemDetails;
@@ -9721,7 +9742,10 @@ export type JoinResponses = {
 export type JoinResponse = JoinResponses[keyof JoinResponses];
 
 export type LeaveData = {
-    body?: never;
+    /**
+     * Optional: `{ "role": "screen" }` ends only the screen publisher
+     */
+    body?: null | VoiceRoleRequest;
     path: {
         conversation_id: string;
     };
@@ -9730,6 +9754,7 @@ export type LeaveData = {
 };
 
 export type LeaveErrors = {
+    400: ProblemDetails;
     404: ProblemDetails;
     503: ProblemDetails;
 };
@@ -12439,7 +12464,10 @@ export type Upload2Responses = {
 export type Upload2Response = Upload2Responses[keyof Upload2Responses];
 
 export type Join2Data = {
-    body?: never;
+    /**
+     * Optional: `{ "role": "screen" }` for the device's screen publisher
+     */
+    body?: null | VoiceRoleRequest;
     path: {
         room_id: string;
         channel_id: string;
@@ -12466,7 +12494,10 @@ export type Join2Responses = {
 export type Join2Response = Join2Responses[keyof Join2Responses];
 
 export type Leave2Data = {
-    body?: never;
+    /**
+     * Optional: `{ "role": "screen" }` ends only the screen publisher
+     */
+    body?: null | VoiceRoleRequest;
     path: {
         room_id: string;
         channel_id: string;
@@ -12476,6 +12507,7 @@ export type Leave2Data = {
 };
 
 export type Leave2Errors = {
+    400: ProblemDetails;
     503: ProblemDetails;
 };
 
