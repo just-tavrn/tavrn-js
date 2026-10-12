@@ -27,6 +27,8 @@ package instead of a git dependency.
 - `@tavrn/sdk`: the types of the node policy "files channels on external stores only" (protocol FILES.md §5):
   `NodeInfo.files_internal`, `Policies.files_internal`, `BackendInfo.internal_allowed`, and the store kind `none` of
   `FilesInfo.backend` / `BackendInfo.kind`.
+- `@tavrn/sdk`: `BackendInfo.max_bytes` and `BackendRequest.max_bytes`, the optional limit of a files channel on an
+  external store (protocol FILES.md §5); `FilesInfo.limit_bytes` is that limit for external channels.
 
 ### Fixed
 

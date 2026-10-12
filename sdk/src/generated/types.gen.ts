@@ -503,6 +503,10 @@ export type BackendInfo = {
      */
     kind: string;
     /**
+     * External stores: the channel's limit on the store in bytes (0 = unlimited); always 0 for the node's storage.
+     */
+    max_bytes: number;
+    /**
      * A WebDAV password is stored (never returned).
      */
     password_set: boolean;
@@ -532,6 +536,11 @@ export type BackendRequest = {
      * `internal`, `webdav` or `s3`.
      */
     kind: string;
+    /**
+     * External stores: the channel's limit on the store in bytes (absent or 0 = unlimited, at most 1 PiB). The node
+     * quota never applies to external stores; the node's own storage takes none (`400 files.backend_invalid`).
+     */
+    max_bytes?: number | null;
     /**
      * Absent or empty: keep the stored password.
      */
@@ -2425,7 +2434,8 @@ export type FilesInfo = {
     files: number;
     folders: number;
     /**
-     * `files_channels.max_bytes` of the room (0 = unlimited).
+     * The channel's limit (0 = unlimited): on the node's storage `files_channels.max_bytes` of the room, on an
+     * external store the store's own `max_bytes` (FILES.md §4/§5).
      */
     limit_bytes: number;
     /**
@@ -3535,8 +3545,9 @@ export type NodeInfo = {
      */
     voice: VoiceInfo;
     /**
-     * WebAuthn relying party id (`TAVRN_WEBAUTHN_RP_ID`, default the identity domain): clients pass it
-     * as `rpId` on the assertions they build themselves (PROTOCOL.md §5a.4).
+     * WebAuthn relying party id (`TAVRN_WEBAUTHN_RP_ID`, default the identity domain), which clients pass
+     * as `rpId` on the assertions they build themselves, and the accepted origins (web origin first, then the
+     * apps' origins: an app offers in-app passkeys only while its origin is listed), PROTOCOL.md §5a.4.
      */
     webauthn: WebauthnInfo;
 };
@@ -6441,11 +6452,20 @@ export type WebauthnCredential = {
 };
 
 /**
- * The WebAuthn relying party id (`TAVRN_WEBAUTHN_RP_ID`, default the identity domain). It may be a parent
- * domain of the web client's host (delegation); clients pass it as `rpId` on assertions they build
- * themselves (the secret storage PRF, PROTOCOL.md §5a.4).
+ * The WebAuthn relying party of this node (PROTOCOL.md §5a.4).
  */
 export type WebauthnInfo = {
+    /**
+     * Every origin the node accepts in `clientDataJSON`: the web origin first, then the origins of the node's own
+     * apps (`TAVRN_WEBAUTHN_APP_ORIGINS`, e.g. `android:apk-key-hash:<base64url>`). An app offers passkeys in its
+     * webview only while its own origin is listed, otherwise it signs in through the browser.
+     */
+    origins: Array<string>;
+    /**
+     * The relying party id (`TAVRN_WEBAUTHN_RP_ID`, default the identity domain). It may be a parent domain of
+     * the web client's host (delegation); clients pass it as `rpId` on assertions they build themselves (the
+     * secret storage PRF).
+     */
     rp_id: string;
 };
 
