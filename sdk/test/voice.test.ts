@@ -33,6 +33,27 @@ describe("voice API (VOICE.md)", () => {
     expect(calls[3]!.url).toBe("https://n.example/api/v1/rooms/R/voice");
   });
 
+  it("joins and leaves as the device's screen publisher with the role in the body, the device without a body (§4b)", async () => {
+    const { impl, calls } = fetchMock([{ status: 200, body: { token: "lk", identity: "a@n.example/D#screen" } }, { status: 204 }, { status: 200, body: { token: "c" } }, { status: 204 }, { status: 200, body: { token: "d" } }, { status: 204 }]);
+    const api = new TavrnApi({ baseUrl: "https://n.example", getToken: () => "tok", fetchImpl: impl });
+    expect((await api.voice.join("R", "C", "screen")).identity).toBe("a@n.example/D#screen");
+    expect(calls[0]!.url).toBe("https://n.example/api/v1/rooms/R/channels/C/voice/join");
+    expect(JSON.parse(String(calls[0]!.init.body))).toEqual({ role: "screen" });
+    await api.voice.leave("R", "C", "screen");
+    expect(calls[1]!.url).toBe("https://n.example/api/v1/rooms/R/channels/C/voice/leave");
+    expect(JSON.parse(String(calls[1]!.init.body))).toEqual({ role: "screen" });
+    await api.calls.join("V", "screen");
+    expect(calls[2]!.url).toBe("https://n.example/api/v1/conversations/V/call/join");
+    expect(JSON.parse(String(calls[2]!.init.body))).toEqual({ role: "screen" });
+    await api.calls.leave("V", "screen");
+    expect(JSON.parse(String(calls[3]!.init.body))).toEqual({ role: "screen" });
+    // The device itself sends no role, as before (older nodes know none).
+    await api.calls.join("V");
+    expect(JSON.parse(String(calls[4]!.init.body))).toEqual({});
+    await api.voice.leave("R", "C");
+    expect(JSON.parse(String(calls[5]!.init.body))).toEqual({});
+  });
+
   it("loads the voice state of all rooms at once (GET /users/me/voice)", async () => {
     const rooms = [{ room_id: "R", channels: [{ room_id: "R", channel_id: "C", epoch: 1, participants: [] }] }];
     const { impl, calls } = fetchMock([{ status: 200, body: { rooms } }]);

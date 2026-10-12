@@ -24,6 +24,9 @@ package instead of a git dependency.
 
 ### Added
 
+- `@tavrn/sdk`: screen publishers (protocol VOICE.md §4b): `voice.join`, `voice.leave`, `calls.join` and
+  `calls.leave` take an optional `role` (`"device"` by default, `"screen"` for the device's screen publisher, which
+  only publishes its screen share), and `VoiceParticipant.screen_of` names the device a screen publisher belongs to.
 - `@tavrn/sdk`: the types of the node policy "files channels on external stores only" (protocol FILES.md §5):
   `NodeInfo.files_internal`, `Policies.files_internal`, `BackendInfo.internal_allowed`, and the store kind `none` of
   `FilesInfo.backend` / `BackendInfo.kind`.
