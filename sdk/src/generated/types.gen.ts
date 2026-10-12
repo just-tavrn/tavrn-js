@@ -3545,8 +3545,9 @@ export type NodeInfo = {
      */
     voice: VoiceInfo;
     /**
-     * WebAuthn relying party id (`TAVRN_WEBAUTHN_RP_ID`, default the identity domain): clients pass it
-     * as `rpId` on the assertions they build themselves (PROTOCOL.md §5a.4).
+     * WebAuthn relying party id (`TAVRN_WEBAUTHN_RP_ID`, default the identity domain), which clients pass
+     * as `rpId` on the assertions they build themselves, and the accepted origins (web origin first, then the
+     * apps' origins: an app offers in-app passkeys only while its origin is listed), PROTOCOL.md §5a.4.
      */
     webauthn: WebauthnInfo;
 };
@@ -6451,11 +6452,20 @@ export type WebauthnCredential = {
 };
 
 /**
- * The WebAuthn relying party id (`TAVRN_WEBAUTHN_RP_ID`, default the identity domain). It may be a parent
- * domain of the web client's host (delegation); clients pass it as `rpId` on assertions they build
- * themselves (the secret storage PRF, PROTOCOL.md §5a.4).
+ * The WebAuthn relying party of this node (PROTOCOL.md §5a.4).
  */
 export type WebauthnInfo = {
+    /**
+     * Every origin the node accepts in `clientDataJSON`: the web origin first, then the origins of the node's own
+     * apps (`TAVRN_WEBAUTHN_APP_ORIGINS`, e.g. `android:apk-key-hash:<base64url>`). An app offers passkeys in its
+     * webview only while its own origin is listed, otherwise it signs in through the browser.
+     */
+    origins: Array<string>;
+    /**
+     * The relying party id (`TAVRN_WEBAUTHN_RP_ID`, default the identity domain). It may be a parent domain of
+     * the web client's host (delegation); clients pass it as `rpId` on assertions they build themselves (the
+     * secret storage PRF).
+     */
     rp_id: string;
 };
 
