@@ -32,6 +32,10 @@ package instead of a git dependency.
 
 ### Fixed
 
+- `@tavrn/e2ee`: `LeafCleaner.clean` takes `urgent` for content that waits for a departed member's leaf to go: it
+  skips the election wait and cuts the wait of a running cleanup short. A device that was not elected otherwise
+  waited ten seconds before it removed the leaf itself, and a message sent meanwhile was refused by the ghost check
+  (tavrn-web#86).
 - `@tavrn/e2ee`: a device whose local key store was lost while its session lived on no longer creates a second device
   key for the same device id after a recovery-key or passkey unlock (every commit it signed was refused with "The
   commit is not from this device", tavrn-web#83). `ensureDevice` compares the local key with the device's key on the

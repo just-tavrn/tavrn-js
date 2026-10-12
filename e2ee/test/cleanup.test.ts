@@ -16,7 +16,7 @@ const carol = "carol@t.local/01J9ZK3G5M8Q2W4E6R8T0Y2VC1";
 const early = "dave@t.local/01J9ZK3G5M8Q2W4E6R8T0Y2V01";
 
 /** A fake manager whose roster loses the leaves `removeLeaves` removes. */
-function fake(roster: string[], ghosts: Record<string, GhostViolation["reason"]>, opts: { refuse?: boolean; conflicts?: number } = {}) {
+function fake(roster: string[], ghosts: Record<string, GhostViolation["reason"]>, opts: { refuse?: boolean; conflicts?: number; sleepForever?: boolean } = {}) {
   let conflicts = opts.conflicts ?? 0;
   const state = { roster: [...roster] };
   const mls = {
@@ -40,7 +40,11 @@ function fake(roster: string[], ghosts: Record<string, GhostViolation["reason"]>
     }),
   };
   const sleeps: number[] = [];
-  const deps: CleanerDeps = { mls: mls as unknown as CleanerDeps["mls"], sleep: async (ms) => void sleeps.push(ms) };
+  const deps: CleanerDeps = {
+    mls: mls as unknown as CleanerDeps["mls"],
+    // `sleepForever`: a wait that only ends when it is cut short (the real one lasts CLEANUP_WAIT_MS).
+    sleep: (ms) => (sleeps.push(ms), opts.sleepForever ? new Promise<void>(() => undefined) : Promise.resolve()),
+  };
   return { mls, state, sleeps, cleaner: new LeafCleaner(deps) };
 }
 
@@ -102,6 +106,28 @@ describe("LeafCleaner", () => {
     expect(sleeps).toEqual([CLEANUP_WAIT_MS]);
     expect(mls.removeLeaves).toHaveBeenCalledWith(Q, [bobGone]);
     expect(r.outcome).toBe("removed");
+  });
+
+  it("urgent (a message waits for the removal): goes at once, without the wait of a device that was not elected", async () => {
+    const { cleaner, mls, state, sleeps } = fake([early, me, carol], {});
+    const r = await cleaner.clean({ q: Q, members: ["alice@t.local", "dave@t.local"], mayManage: true, urgent: true });
+    expect(sleeps).toEqual([]);
+    expect(mls.removeLeaves).toHaveBeenCalledWith(Q, [carol]);
+    expect(state.roster).toEqual([early, me]);
+    expect(r.outcome).toBe("removed");
+  });
+
+  it("an urgent call cuts the wait of a running cleanup short and shares its result", async () => {
+    const { cleaner, mls, sleeps } = fake([early, me, carol], {}, { sleepForever: true });
+    const req = { q: Q, members: ["alice@t.local", "dave@t.local"], mayManage: true };
+    const waiting = cleaner.clean(req);
+    await vi.waitFor(() => expect(sleeps).toEqual([CLEANUP_WAIT_MS]));
+    expect(mls.removeLeaves).not.toHaveBeenCalled();
+    const urgent = cleaner.clean({ ...req, urgent: true });
+    const [a, b] = await Promise.all([waiting, urgent]);
+    expect(a).toBe(b);
+    expect(a.outcome).toBe("removed");
+    expect(mls.removeLeaves).toHaveBeenCalledTimes(1);
   });
 
   it("runs once per conversation at a time", async () => {
