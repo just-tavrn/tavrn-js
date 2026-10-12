@@ -1148,7 +1148,8 @@ export class TavrnApi {
 
   /**
    * Reports and the moderation inbox (MODERATION.md §1, capability `reports.v1`). Room moderators read `room`, node
-   * admins `admin`; `act` runs the moderation shortcuts with the caller's permissions.
+   * admins `admin`; `act` runs the moderation shortcuts with the caller's permissions; `forward` (`reports.v2`) hands a
+   * report about a remote user to its home node.
    */
   reports = {
     create: (req: CreateReportRequest) => this.post<ReportCreated>("/reports", req),
@@ -1157,6 +1158,11 @@ export class TavrnApi {
     /** Node admins only. */
     delete: (reportId: string) => this.del(`/reports/${encodeURIComponent(reportId)}`),
     act: (reportId: string, req: ReportActionRequest) => this.post<ReportActionResult>(`/reports/${encodeURIComponent(reportId)}/actions`, req),
+    /**
+     * Node admins: forwards a report about a user of another node to that user's home node (MODERATION.md §1.6,
+     * capability `reports.v2` on both nodes). Idempotent; the reporter stays pseudonymous to the home node.
+     */
+    forward: (reportId: string) => this.post<ModerationReport>(`/reports/${encodeURIComponent(reportId)}/forward`, {}),
     room: (roomId: string, query?: { status?: string; limit?: number; before?: string }) => this.get<ReportList>(`/rooms/${roomId}/reports`, query),
     admin: (query?: { status?: string; scope?: string; limit?: number; before?: string }) => this.get<ReportList>("/admin/reports", query),
   };

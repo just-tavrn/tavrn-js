@@ -3345,6 +3345,7 @@ export type ModerationReport = {
      * `reporter` when evidence was released by the reporter.
      */
     evidence_source?: string | null;
+    forwarded?: null | ReportForward;
     id: string;
     /**
      * `message`, `user` or `room`.
@@ -3360,6 +3361,7 @@ export type ModerationReport = {
      */
     node?: string | null;
     note: string;
+    origin?: null | ReportOrigin;
     reporter?: null | User;
     resolved_at?: string | null;
     room_id?: string | null;
@@ -3370,7 +3372,7 @@ export type ModerationReport = {
     scope: string;
     snapshot?: null | MessageSnapshot;
     /**
-     * `user` or `automod`.
+     * `user`, `automod` or `forward` (forwarded by another node).
      */
     source: string;
     /**
@@ -4805,6 +4807,21 @@ export type ReportCreated = {
 };
 
 /**
+ * Where and when a report was forwarded (MODERATION.md §1.6).
+ */
+export type ReportForward = {
+    at: string;
+    /**
+     * The admin who forwarded it (address).
+     */
+    by: string;
+    /**
+     * The reported user's home node.
+     */
+    node: string;
+};
+
+/**
  * A page of the inbox.
  */
 export type ReportList = {
@@ -4813,6 +4830,28 @@ export type ReportList = {
      */
     open: number;
     reports: Array<ModerationReport>;
+};
+
+/**
+ * The node a forwarded report comes from (`source: forward`, MODERATION.md §1.6).
+ */
+export type ReportOrigin = {
+    /**
+     * The sending node.
+     */
+    node: string;
+    /**
+     * The report's id on the sending node.
+     */
+    report_id: string;
+    /**
+     * When the report was made on the sending node.
+     */
+    reported_at: string;
+    /**
+     * The reporter's pseudonym (stable per reporter for this node, never an address).
+     */
+    reporter: string;
 };
 
 export type ReportRequest = {
@@ -11229,6 +11268,31 @@ export type ActOnReportResponses = {
 };
 
 export type ActOnReportResponse = ActOnReportResponses[keyof ActOnReportResponses];
+
+export type ForwardReportData = {
+    body?: never;
+    path: {
+        report_id: string;
+    };
+    query?: never;
+    url: '/api/v1/reports/{report_id}/forward';
+};
+
+export type ForwardReportErrors = {
+    400: ProblemDetails;
+    403: ProblemDetails;
+    404: ProblemDetails;
+    409: ProblemDetails;
+    502: ProblemDetails;
+};
+
+export type ForwardReportError = ForwardReportErrors[keyof ForwardReportErrors];
+
+export type ForwardReportResponses = {
+    200: ModerationReport;
+};
+
+export type ForwardReportResponse = ForwardReportResponses[keyof ForwardReportResponses];
 
 export type ListMyRoomsData = {
     body?: never;

@@ -31,6 +31,14 @@ describe("moderation (MODERATION.md)", () => {
     expect(calls[5]).toMatchObject({ url: "https://n.example/api/v1/reports/R1/actions", method: "POST", body: { action: "timeout", minutes: 60 } });
   });
 
+  it("forwards a report to the reported user's home node (reports.v2)", async () => {
+    const forwarded = { node: "b.example", at: "2026-10-12T10:00:00Z", by: "admin@n.example" };
+    const { api, calls } = fetchMock({ id: "R/1", forwarded, origin: null });
+    const report = await api.reports.forward("R/1");
+    expect(report.forwarded).toEqual(forwarded);
+    expect(calls[0]).toMatchObject({ url: "https://n.example/api/v1/reports/R%2F1/forward", method: "POST", body: {} });
+  });
+
   it("deletes reports", async () => {
     const { api, calls } = fetchMock(undefined, 204);
     await expect(api.reports.delete("R/1")).resolves.toBeUndefined();
