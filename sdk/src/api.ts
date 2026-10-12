@@ -535,6 +535,8 @@ export class TavrnApi {
     /** `end_session_url` for SSO sessions whose provider has a logout endpoint (APPLICATIONS.md §8.6), else undefined. */
     logout: (opts: { forgetDevice?: boolean } = {}) => this.post<LogoutResponse | undefined>(opts.forgetDevice ? "/auth/logout?forget_device=true" : "/auth/logout"),
     verifyEmail: (token: string) => this.post<void>("/auth/verify-email", { token }),
+    /** A new confirmation link for an unconfirmed address (username, address or e-mail); `204` whether or not it exists. */
+    resendVerification: (account: string) => this.post<void>("/auth/verify-email/resend", { account }),
     forgotPassword: (account: string) => this.post<void>("/auth/forgot-password", { account }),
     resetPassword: (token: string, new_password: string) => this.post<void>("/auth/reset-password", { token, new_password }),
     checkAccountInvite: (code: string) => this.get<{ valid: boolean; note: string }>(`/account-invites/${encodeURIComponent(code)}`),

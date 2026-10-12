@@ -27,6 +27,17 @@ describe("TavrnApi: second factor", () => {
     expect(calls.map((c) => c.url)).toEqual(["http://localhost/api/v1/auth/login", "http://localhost/api/v1/auth/register"]);
   });
 
+  it("confirms the e-mail address and asks for the confirmation mail again", async () => {
+    const { impl, calls } = fetchMock([{ status: 204 }]);
+    const api = new TavrnApi({ fetchImpl: impl });
+    await api.auth.verifyEmail("tok");
+    await api.auth.resendVerification("alice@example.org");
+    expect(calls.map((c) => [c.method, c.url, c.body])).toEqual([
+      ["POST", "http://localhost/api/v1/auth/verify-email", { token: "tok" }],
+      ["POST", "http://localhost/api/v1/auth/verify-email/resend", { account: "alice@example.org" }],
+    ]);
+  });
+
   it("verifies with TOTP code or recovery code", async () => {
     const { impl, calls } = fetchMock([{ status: 200, body: { status: "ok", access_token: "a" } }]);
     const api = new TavrnApi({ fetchImpl: impl });

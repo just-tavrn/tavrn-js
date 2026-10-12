@@ -4848,6 +4848,13 @@ export type ReportSummary = {
     reports: number;
 };
 
+export type ResendVerificationRequest = {
+    /**
+     * Username, address (`name@domain`) or email address of the account (at most 320 characters)
+     */
+    account: string;
+};
+
 export type ResetPasswordRequest = {
     new_password: string;
     token: string;
@@ -9289,6 +9296,27 @@ export type VerifyEmailResponses = {
 };
 
 export type VerifyEmailResponse = VerifyEmailResponses[keyof VerifyEmailResponses];
+
+export type ResendVerificationData = {
+    body: ResendVerificationRequest;
+    path?: never;
+    query?: never;
+    url: '/api/v1/auth/verify-email/resend';
+};
+
+export type ResendVerificationErrors = {
+    400: ProblemDetails;
+    429: ProblemDetails;
+    503: ProblemDetails;
+};
+
+export type ResendVerificationError = ResendVerificationErrors[keyof ResendVerificationErrors];
+
+export type ResendVerificationResponses = {
+    204: void;
+};
+
+export type ResendVerificationResponse = ResendVerificationResponses[keyof ResendVerificationResponses];
 
 export type WebauthnCredentialsData = {
     body?: never;
