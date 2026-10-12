@@ -21,6 +21,10 @@
  * To avoid a storm of competing commits, the lowest online device id among the devices that may do the removal
  * tries first; every other device waits {@link CLEANUP_WAIT_MS} and tries only if the leaf is still there. One
  * cleanup runs per conversation at a time; an epoch conflict is retried after the missing commits (at most 3).
+ *
+ * A message waiting for the removal (the ghost check refuses to encrypt while a departed member's leaf is in the
+ * group) cannot wait for the election: an `urgent` request skips the wait and cuts the wait of a running cleanup short.
+ * A second commit of the same removal costs nothing but an epoch conflict, after which the leaf is gone.
  */
 import { TavrnApiError } from "@tavrn/sdk";
 import { MlsError, splitIdentity, type GhostViolation, type MlsManager } from "./mls";
@@ -49,6 +53,11 @@ export interface CleanupRequest {
   online?: Iterable<string> | null;
   /** The conversation's effective "no bots" flag: bot leaves are ghosts (§4.6) and go like departed members. */
   noBots?: boolean;
+  /**
+   * Content is waiting for the removal: no election wait, and a running cleanup of the conversation that is waiting
+   * for the elected device stops waiting.
+   */
+  urgent?: boolean;
 }
 
 export type CleanupOutcome = "clean" | "removed" | "deferred" | "not_allowed" | "failed";
@@ -158,6 +167,8 @@ export class LeafCleaner {
   }
 
   private readonly running = new Map<string, Promise<CleanupResult>>();
+  /** Ends the election wait of a running cleanup, per conversation. */
+  private readonly waiting = new Map<string, () => void>();
   private readonly tries = new Map<string, number>();
 
   constructor(private readonly deps: CleanerDeps) {}
@@ -166,10 +177,25 @@ export class LeafCleaner {
     return this.deps.sleep ? this.deps.sleep(ms) : new Promise((r) => setTimeout(r, ms));
   }
 
+  /** The election wait of a cleanup; an urgent request for the same conversation ends it early. */
+  private electionWait(q: string): Promise<void> {
+    return new Promise((resolve) => {
+      const done = () => {
+        if (this.waiting.get(q) === done) this.waiting.delete(q);
+        resolve();
+      };
+      this.waiting.set(q, done);
+      void this.sleep(this.deps.waitMs ?? CLEANUP_WAIT_MS).then(done, done);
+    });
+  }
+
   /** Cleans the conversation's group; concurrent calls for one conversation share the run. */
   clean(req: CleanupRequest): Promise<CleanupResult> {
     const running = this.running.get(req.q);
-    if (running) return running;
+    if (running) {
+      if (req.urgent) this.waiting.get(req.q)?.();
+      return running;
+    }
     const p = this.run(req).finally(() => this.running.delete(req.q));
     this.running.set(req.q, p);
     return p;
@@ -206,8 +232,8 @@ export class LeafCleaner {
     const valid = mls.roster(req.q).filter((i) => !ghostIds.has(i));
     const anyMember = [...targets.values()].some((w) => w !== "own");
     const eligible = anyMember ? valid : valid.filter((i) => splitIdentity(i).address === mls.address);
-    if (!electedFirst(mls.identity, eligible, req.online)) {
-      await this.sleep(this.deps.waitMs ?? CLEANUP_WAIT_MS);
+    if (!req.urgent && !electedFirst(mls.identity, eligible, req.online)) {
+      await this.electionWait(req.q);
       ({ ghosts, targets } = await this.targets(req));
       if (targets.size === 0) return result(ghosts.length ? "deferred" : "clean");
     }

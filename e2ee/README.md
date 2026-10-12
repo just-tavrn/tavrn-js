@@ -181,7 +181,8 @@ approve, deny) are routes of `@tavrn/sdk` (`api.historyRequests`).
 - `embeds.ts`: the embed rules of `text` content (`assertEmbeds` before encrypting, `withValidEmbeds` after
   decrypting, `readEmbeds` for renderers; APPLICATIONS.md §6.4).
 - `cleanup.ts`: `LeafCleaner` removes ghost leaves the node allows and the client verified (ENCRYPTION.md §4.7), with an
-  election among the devices that may do it.
+  election among the devices that may do it; `urgent` (content waits for the removal) skips the election wait and ends
+  the wait of a running cleanup.
 - `identity.ts`: the current identity key and its rotation with continuity (`rotateIdentity`, `syncIdentity`,
   `resolveIdentity`; ENCRYPTION.md §9a).
 - `search/`: the local encrypted search index (`SearchIndex` over a `SearchBackend`, `MemorySearchBackend` for tests;
