@@ -503,6 +503,10 @@ export type BackendInfo = {
      */
     kind: string;
     /**
+     * External stores: the channel's limit on the store in bytes (0 = unlimited); always 0 for the node's storage.
+     */
+    max_bytes: number;
+    /**
      * A WebDAV password is stored (never returned).
      */
     password_set: boolean;
@@ -532,6 +536,11 @@ export type BackendRequest = {
      * `internal`, `webdav` or `s3`.
      */
     kind: string;
+    /**
+     * External stores: the channel's limit on the store in bytes (absent or 0 = unlimited, at most 1 PiB). The node
+     * quota never applies to external stores; the node's own storage takes none (`400 files.backend_invalid`).
+     */
+    max_bytes?: number | null;
     /**
      * Absent or empty: keep the stored password.
      */
@@ -2425,7 +2434,8 @@ export type FilesInfo = {
     files: number;
     folders: number;
     /**
-     * `files_channels.max_bytes` of the room (0 = unlimited).
+     * The channel's limit (0 = unlimited): on the node's storage `files_channels.max_bytes` of the room, on an
+     * external store the store's own `max_bytes` (FILES.md §4/§5).
      */
     limit_bytes: number;
     /**
