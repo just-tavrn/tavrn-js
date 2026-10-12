@@ -22,6 +22,12 @@ package instead of a git dependency.
   replies in threads, signed answers to interactions, token rotation, installations on other nodes) and the example
   bots.
 
+### Added
+
+- `@tavrn/sdk`: the types of the node policy "files channels on external stores only" (protocol FILES.md §5):
+  `NodeInfo.files_internal`, `Policies.files_internal`, `BackendInfo.internal_allowed`, and the store kind `none` of
+  `FilesInfo.backend` / `BackendInfo.kind`.
+
 ### Fixed
 
 - `@tavrn/e2ee`: a device whose local key store was lost while its session lived on no longer creates a second device

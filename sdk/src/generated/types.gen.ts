@@ -494,7 +494,12 @@ export type BackendInfo = {
      */
     has_files: boolean;
     /**
-     * `internal`, `webdav` or `s3`.
+     * The node's own storage may be chosen (`TAVRN_FILES_INTERNAL`); `false`: only external stores.
+     */
+    internal_allowed: boolean;
+    /**
+     * `internal`, `webdav` or `s3`; `none` while a node without internal storage has no external store for the
+     * channel.
      */
     kind: string;
     /**
@@ -2379,7 +2384,8 @@ export type FilesInfo = {
      */
     allowed_categories: Array<string>;
     /**
-     * `internal`, `webdav` or `s3`.
+     * `internal`, `webdav` or `s3`; `none` on a node without internal storage (`TAVRN_FILES_INTERNAL=off`) while
+     * the channel has no external store: no uploads or folders until one is set (FILES.md §5).
      */
     backend: string;
     /**
@@ -3497,6 +3503,11 @@ export type NodeInfo = {
     dm_policy: string;
     domain: string;
     /**
+     * Files channels may keep their files on this node (`TAVRN_FILES_INTERNAL`, FILES.md §5); `false`: a files
+     * channel takes uploads only once it has an external store.
+     */
+    files_internal: boolean;
+    /**
      * GIF provider (`giphy`, `tenor`) or null.
      */
     gif_provider?: string | null;
@@ -4110,6 +4121,11 @@ export type Policies = {
      * Webcam sharing (same shape as `screenshare`).
      */
     camera: ScreensharePolicy;
+    /**
+     * Files channels may keep their files on the node (`TAVRN_FILES_INTERNAL`); `false`: a files channel takes
+     * uploads only once it has an external store (FILES.md §5).
+     */
+    files_internal: boolean;
     /**
      * Largest image (bytes) clients load as a preview without a click (`TAVRN_PREVIEW_AUTO_MAX_BYTES`).
      */
