@@ -142,14 +142,25 @@ const sharePublished = new Set<string>();
 export async function ensureDevice(ctx: E2eeContext): Promise<void> {
   await ensureCrypto();
   const { store } = ctx;
-  await syncIdentity(ctx.api, store, ctx.username, ctx.address);
-  let client = await loadClient(store);
-  if (!client) {
-    client = Client.create(ctx.address, ctx.deviceId);
-    await saveClient(store, client);
-  }
+  const doc = await ctx.api.keys.get(ctx.username);
+  await syncIdentity(ctx.api, store, ctx.username, ctx.address, doc);
+  const stored = await loadClient(store);
+  const client = stored ?? Client.create(ctx.address, ctx.deviceId);
+  /**
+   * §3.1: a device key is immutable. When this session's device already has another key on the node, this device lost
+   * it (its local key store is gone while the session lives on, tavrn-web#83): a second key would sign commits and
+   * messages that the node and every member refuse. A new key is never stored, a stored one (left by earlier versions)
+   * is dropped, so no session manager opens with it; the device needs a new device id (sign in again).
+   */
+  const lost = async () => {
+    await store.deleteSecret(CLIENT_STATE);
+    return new E2eeError("device_key_lost");
+  };
   try {
     const devicePublicKey = client.devicePublicKey;
+    const listed = doc.devices.find((d) => d.device_id === ctx.deviceId);
+    if (listed && listed.device_public_key !== b64urlEncode(devicePublicKey)) throw await lost();
+    if (!stored) await saveClient(store, client);
     if (!store.isUnlocked()) throw new E2eeError("locked");
     const signature = await withIdentityKey(store, (k) => k.attestDevice(ctx.address, ctx.deviceId, devicePublicKey));
     // The device's share key goes with the device key (ENCRYPTION.md §3.1); a device attested without one publishes it
@@ -160,6 +171,9 @@ export async function ensureDevice(ctx: E2eeContext): Promise<void> {
     try {
       await ctx.api.keys.putDeviceKey(ctx.deviceId, { device_public_key: b64urlEncode(devicePublicKey), identity_signature: b64urlEncode(signature), ...share });
     } catch (e) {
+      // Not listed, yet the node keeps another key (or share key) for it: a device attested under an earlier identity
+      // key (§9) whose own key is gone. Listed with this key, `device_key_exists` is the usual answer.
+      if (!listed && (code(e) === "e2ee.device_key_exists" || code(e) === "e2ee.share_key_exists")) throw await lost();
       if (code(e) !== "e2ee.device_key_exists") throw e;
       if (!sharePublished.has(`${ctx.address}/${ctx.deviceId}`)) {
         // Asked once per session, also when it fails (a node without the route); the next start asks again.
@@ -178,6 +192,27 @@ export async function ensureDevice(ctx: E2eeContext): Promise<void> {
       }
       await ctx.api.keys.uploadKeyPackages(ctx.deviceId, { key_packages: packages });
     }
+  } finally {
+    client.free();
+  }
+}
+
+/**
+ * Whether this session's device lost its key (tavrn-web#83): the node lists the device with a key, and this store
+ * holds no MLS client with that key (no local data, or a client with another key). Then no unlock can make it usable
+ * for encryption again; it needs a new device (sign in again). False while the store is locked (unknown until then).
+ */
+export async function localDeviceLost(ctx: Pick<E2eeContext, "api" | "username" | "address" | "deviceId" | "store">): Promise<boolean> {
+  const { store } = ctx;
+  const status = await store.status(ctx.address);
+  if (status === "locked") return false;
+  const listed = (await ctx.api.keys.get(ctx.username)).devices.find((d) => d.device_id === ctx.deviceId);
+  if (!listed) return false;
+  if (status === "none") return true;
+  const client = await loadClient(store);
+  if (!client) return true;
+  try {
+    return b64urlEncode(client.devicePublicKey) !== listed.device_public_key;
   } finally {
     client.free();
   }

@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { MasterSecret, RecoveryKey, wrapMasterSecret } from "@tavrn/crypto";
+import { Client, MasterSecret, RecoveryKey, wrapMasterSecret } from "@tavrn/crypto";
 import { b64urlDecode, b64urlEncode } from "@tavrn/sdk";
 import {
   E2eeError,
@@ -15,8 +15,10 @@ import {
   ensureDevice,
   forgetIdentityKeepDevice,
   loadClient,
+  localDeviceLost,
   localIdentityKey,
   localStatus,
+  saveClient,
   setupAccount,
   unlockWithRecoveryKey,
   wipeLocal,
@@ -24,7 +26,7 @@ import {
   type KeyStore,
 } from "../src/index";
 import { FileKeyStore } from "../src/node";
-import { Network } from "./fake-node";
+import { Network, problem } from "./fake-node";
 
 const DOMAIN = "t.local";
 const DEV_A = "01J9ZK3G5M8Q2W4E6R8T0Y2VA1";
@@ -168,5 +170,62 @@ describe.each(kinds)("account flows (%s store)", (_kind, makeStore) => {
     await unlockWithRecoveryKey(ctx, recovery.toWords());
     expect(localIdentityKey(ctx.store)).toBe(user().identity);
     expect(user().devices.get(DEV_A)!.pk).toBe(deviceKey);
+  });
+  // tavrn-web#83: the local key store was lost while the session lives on (an app process killed before its storage
+  // reached the disk). The device's key is gone; a second key for the same device id would sign commits and messages
+  // the node and every member refuse (ENCRYPTION.md §3.1: a new key means a new device).
+  it("a device whose local keys were lost gets no second key: device_key_lost, nothing stored", async () => {
+    const { ctx, user } = account();
+    const recovery = RecoveryKey.generate();
+    await setupAccount(ctx, recovery);
+    const attested = { ...user().devices.get(DEV_A)! };
+    const packages = [...user().kps.get(DEV_A)!];
+    await wipeLocal(ctx.store, ctx.address);
+    expect(await localStatus(ctx.store, ctx.address, DEV_A)).toBe("none");
+    expect(await localDeviceLost(ctx)).toBe(true);
+    await expect(unlockWithRecoveryKey(ctx, recovery.toWords())).rejects.toMatchObject({ name: "E2eeError", code: "device_key_lost" });
+    // The master secret is the account's (unlocked), but no MLS client: no session manager opens with a foreign key.
+    expect(ctx.store.isUnlocked(ctx.address)).toBe(true);
+    expect(await loadClient(ctx.store)).toBeNull();
+    expect(await localDeviceLost(ctx)).toBe(true);
+    await expect(ensureDevice(ctx)).rejects.toMatchObject({ code: "device_key_lost" });
+    expect(await loadClient(ctx.store)).toBeNull();
+    expect(user().devices.get(DEV_A)).toEqual(attested);
+    expect(user().kps.get(DEV_A)).toEqual(packages);
+    // Signed in anew (a new device), the same recovery key works.
+    await wipeLocal(ctx.store, ctx.address);
+    const next: E2eeContext = { ...ctx, deviceId: DEV_B };
+    expect(await localDeviceLost(next)).toBe(false);
+    await unlockWithRecoveryKey(next, recovery.toWords());
+    const client = (await loadClient(next.store))!;
+    expect(b64urlEncode(client.devicePublicKey)).toBe(user().devices.get(DEV_B)!.pk);
+    client.free();
+  });
+
+  it("drops a stored MLS client whose key is not the device's attested key (left by earlier versions)", async () => {
+    const { ctx, user } = account();
+    await setupAccount(ctx, RecoveryKey.generate());
+    expect(await localDeviceLost(ctx)).toBe(false);
+    const foreign = Client.create(ctx.address, DEV_A);
+    await saveClient(ctx.store, foreign);
+    foreign.free();
+    expect(await localDeviceLost(ctx)).toBe(true);
+    await expect(ensureDevice(ctx)).rejects.toMatchObject({ code: "device_key_lost" });
+    expect(await loadClient(ctx.store)).toBeNull();
+    expect(user().devices.get(DEV_A)).toBeDefined();
+  });
+
+  it("a device not attested under the current identity key whose key is gone is lost too", async () => {
+    const { ctx, user, node } = account();
+    await setupAccount(ctx, RecoveryKey.generate());
+    // The node keeps the key of a device that is not listed (attested under an earlier identity key, §9).
+    const hidden = user().devices.get(DEV_A)!;
+    const keys = node.accountApi(ctx.username).keys;
+    const api = { ...ctx.api, keys: { ...keys, get: async (u: string) => ({ ...(await keys.get(u)), devices: [] }), putDeviceKey: async () => Promise.reject(problem(409, "e2ee.share_key_exists")) } };
+    const foreign = Client.create(ctx.address, DEV_A);
+    await saveClient(ctx.store, foreign);
+    foreign.free();
+    await expect(ensureDevice({ ...ctx, api: api as never })).rejects.toMatchObject({ code: "device_key_lost" });
+    expect(user().devices.get(DEV_A)).toBe(hidden);
   });
 });

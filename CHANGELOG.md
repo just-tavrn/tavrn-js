@@ -22,7 +22,13 @@ package instead of a git dependency.
   replies in threads, signed answers to interactions, token rotation, installations on other nodes) and the example
   bots.
 
-### Security
+### Fixed
+
+- `@tavrn/e2ee`: a device whose local key store was lost while its session lived on no longer creates a second device
+  key for the same device id after a recovery-key or passkey unlock (every commit it signed was refused with "The
+  commit is not from this device", tavrn-web#83). `ensureDevice` compares the local key with the device's key on the
+  node and throws `E2eeError` `device_key_lost` instead, dropping a mismatching client state that earlier versions
+  stored; `localDeviceLost(ctx)` tells before an unlock. Such a device needs a new device id: sign in again.
 
 ### Security
 
