@@ -338,6 +338,8 @@ export type Decrypted =
 
 /** `type` of an encrypted thread title (PROTOCOL.md §7e). */
 const THREAD_TITLE_TYPE = "thread.title";
+/** `type` of a poll vote record (PROTOCOL.md §7g): never a message, never anything but a vote. */
+const POLL_VOTE_TYPE = "poll.vote";
 /** Content types that are never a message or an event: history shares (§7b) travel only through their own route. */
 const NOT_CONTENT_TYPES = new Set(["history_keys"]);
 
@@ -1263,7 +1265,7 @@ export class MlsManager {
     return this.decryptEnvelope(conversationId, m, "message");
   }
 
-  private async decryptEnvelope(conversationId: string, m: EncryptedEnvelope, purpose: "message" | "title"): Promise<Decrypted> {
+  private async decryptEnvelope(conversationId: string, m: EncryptedEnvelope, purpose: "message" | "title" | "vote"): Promise<Decrypted> {
     const sealed = m.webhook ? sealedContent(m.content) : null;
     if (sealed) return purpose === "message" ? this.decryptSealed(conversationId, m, sealed) : { ok: false, reason: "invalid" };
     if (typeof m.content !== "string" || !m.device_id) return { ok: false, reason: "invalid" };
@@ -1273,6 +1275,7 @@ export class MlsManager {
     const sentAt = m.created_at ? Date.parse(m.created_at) : NaN;
     let result = await this.decryptUncached(conversationId, m.id, m.author, m.device_id, m.epoch ?? null, m.content, Number.isFinite(sentAt) ? sentAt : null);
     if (result.ok && (purpose === "title") !== (result.content.type === THREAD_TITLE_TYPE)) result = { ok: false, reason: "invalid" };
+    if (result.ok && (purpose === "vote") !== (result.content.type === POLL_VOTE_TYPE)) result = { ok: false, reason: "invalid" };
     if (result.ok && NOT_CONTENT_TYPES.has(String(result.content.type))) result = { ok: false, reason: "invalid" };
     if (!result.ok && result.reason === "invalid") this.forgetNonce(conversationId, m.content, m.id);
     if (result.ok && purpose === "message" && "ctx" in result.content) {
@@ -1380,6 +1383,15 @@ export class MlsManager {
     return { ok: true, title: body.trim() };
   }
 
+  /**
+   * Decrypts and verifies an encrypted poll vote record (PROTOCOL.md §7g) with its voter and device. Anything that is
+   * not `poll.vote` content is `invalid` (and vote content is never shown as a message: {@link decrypt} refuses it).
+   * The content keeps its `ctx` (`poll`, `poll_hash`) for `parsePollVote`, which compares it with the poll.
+   */
+  decryptPollVote(conversationId: string, r: { user: string; device_id?: string | null; epoch?: number | null; content: unknown; updated_at?: string | null }): Promise<Decrypted> {
+    return this.decryptEnvelope(conversationId, { id: `poll-vote:${r.user}`, author: r.user, device_id: r.device_id ?? null, epoch: r.epoch ?? null, content: r.content, created_at: r.updated_at ?? null }, "vote");
+  }
+
   /** Synchronous lookup of an already decrypted message (pins panel, edits). */
   peek(conversationId: string, m: EncryptedEnvelope): Decrypted | undefined {
     const sealed = m.webhook ? sealedContent(m.content) : null;
@@ -1417,7 +1429,7 @@ export class MlsManager {
     const replayKey = `${conversationId}|${header.epoch}|${header.nonce}`;
     if (this.ephemeralNonces.has(replayKey)) return { ok: false, reason: "replay" };
     let result = await this.decryptUncached(conversationId, `eph:${replayKey}`, author, deviceId, header.epoch, content);
-    if (result.ok && (result.content.type === THREAD_TITLE_TYPE || NOT_CONTENT_TYPES.has(String(result.content.type)))) {
+    if (result.ok && (result.content.type === THREAD_TITLE_TYPE || result.content.type === POLL_VOTE_TYPE || NOT_CONTENT_TYPES.has(String(result.content.type)))) {
       this.nonces.delete(replayKey);
       return { ok: false, reason: "invalid" };
     }

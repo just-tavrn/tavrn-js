@@ -1530,6 +1530,10 @@ export type CreateMessageRequest = {
     epoch?: number | null;
     mentions?: Array<string>;
     mentions_everyone?: boolean;
+    /**
+     * Close time of a poll (PROTOCOL.md §7g): RFC 3339, 1 minute to 1 year ahead; needs `create_polls`.
+     */
+    poll_closes_at?: string | null;
     reply_to_id?: string | null;
     /**
      * Plaintext only: device signature `base64url(nonce(16) || Ed25519 signature(64))` (FEDERATION.md
@@ -2070,13 +2074,17 @@ export type DirectorySoftware = {
 };
 
 export type EditMessageRequest = {
-    content: unknown;
+    content?: unknown;
     /**
      * MLS epoch (encrypted only; edits use the current epoch)
      */
     epoch?: number | null;
     mentions?: Array<string>;
     mentions_everyone?: boolean;
+    /**
+     * Close a poll early (PROTOCOL.md §7g): an earlier time than the current close time.
+     */
+    poll_closes_at?: string | null;
     /**
      * Plaintext only: device signature `base64url(nonce(16) || Ed25519 signature(64))` (FEDERATION.md
      * §10.3). Rejected in encrypted conversations; mentions must then be sent normalized (lowercase,
@@ -3269,6 +3277,10 @@ export type Message = {
     mentions: Array<string>;
     mentions_everyone: boolean;
     pinned?: boolean;
+    /**
+     * Plaintext close time of a poll (PROTOCOL.md §7g), null otherwise.
+     */
+    poll_closes_at?: string | null;
     reactions?: Array<Reaction>;
     /**
      * `reply_to_id` names a message that was deleted since (clients show "message deleted").
@@ -4089,6 +4101,35 @@ export type PersonalSounds = {
      * Most personal clips this user may have (entitlement `sounds.max_personal`; 0 = unlimited).
      */
     max_personal: number;
+};
+
+/**
+ * A member's vote on a poll (PROTOCOL.md §7g).
+ */
+export type PollVote = {
+    content: unknown;
+    conversation_id: string;
+    created_at: string;
+    device_id?: string | null;
+    epoch?: number | null;
+    message_id: string;
+    signature?: string | null;
+    updated_at: string;
+    /**
+     * `username@domain`
+     */
+    user: string;
+    user_id: string;
+};
+
+export type PollVoteList = {
+    items: Array<PollVote>;
+};
+
+export type PollVoteRequest = {
+    content: unknown;
+    epoch?: number | null;
+    signature?: string | null;
 };
 
 export type PinList = {

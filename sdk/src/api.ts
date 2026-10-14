@@ -100,6 +100,9 @@ import type {
   NodeBanRequest,
   NodeInfo,
   PinList,
+  PollVote,
+  PollVoteList,
+  PollVoteRequest,
   PurgeUserRequest,
   PurgeUserResponse,
   PermissionOverride,
@@ -838,6 +841,26 @@ export class TavrnApi {
     pins: (conversationId: string) => this.get<PinList>(`/conversations/${conversationId}/pins`),
     pin: (conversationId: string, messageId: string) => this.put<Message>(`/conversations/${conversationId}/pins/${messageId}`, {}),
     unpin: (conversationId: string, messageId: string) => this.del<Message>(`/conversations/${conversationId}/pins/${messageId}`),
+  };
+
+  /**
+   * Polls (PROTOCOL.md §7g, capability `polls.v1`). A poll is an ordinary message (`{ type: "poll", … }`, sent with
+   * `conversations.send`, optionally with `poll_closes_at`); votes are records next to it, one per member. Build and
+   * check the contents with `@tavrn/e2ee` (`pollVoteContent`, `checkPollVote`, `tallyPoll`).
+   */
+  polls = {
+    /** Casts or replaces the caller's vote (`content` ciphertext + `epoch`, or the plaintext vote + `signature`). */
+    vote: (conversationId: string, messageId: string, req: PollVoteRequest) => this.put<PollVote>(`/conversations/${conversationId}/messages/${messageId}/poll/vote`, req),
+    /** Retracts the caller's vote (`404 poll.vote_not_found` without one, `409 poll.closed` after the close). */
+    retract: (conversationId: string, messageId: string) => this.del(`/conversations/${conversationId}/messages/${messageId}/poll/vote`),
+    /** Every vote record of the poll, oldest first (at most one per member). */
+    votes: (conversationId: string, messageId: string) => this.get<PollVoteList>(`/conversations/${conversationId}/messages/${messageId}/poll/votes`),
+    /**
+     * Closes the poll early (author or `manage_messages`): moves `poll_closes_at` to `at` (default: now). Never later
+     * than the current close time; a poll without one cannot be closed.
+     */
+    close: (conversationId: string, messageId: string, at?: string) =>
+      this.patch<Message>(`/conversations/${conversationId}/messages/${messageId}`, { poll_closes_at: at ?? new Date().toISOString() } satisfies EditMessageRequest),
   };
 
   /**

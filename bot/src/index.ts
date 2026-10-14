@@ -4,7 +4,7 @@
  * key file, the token's bot device, end-to-end encryption as an MLS member, messages, commands and remote
  * installations over federated sessions. See README.md.
  */
-export { BOT_VERSION, Bot, DEFAULT_STATE_DIR, JOINABLE_KINDS, createBot, threadTitle, type BotEvents, type BotInfo, type BotMessage, type BotOptions, type InstallEvent, type SendOptions, type TokenExpiringEvent, type UndecryptableEvent, type UninstallEvent } from "./bot";
+export { BOT_VERSION, Bot, DEFAULT_STATE_DIR, JOINABLE_KINDS, createBot, threadTitle, type BotEvents, type BotInfo, type BotMessage, type BotOptions, type InstallEvent, type PollOptions, type PollResults, type PollVoteEvent, type SendOptions, type TokenExpiringEvent, type UndecryptableEvent, type UninstallEvent } from "./bot";
 export { CommandRouter, Interaction, type CommandCrypto, type CommandHandler, type CommandInvokeData, type InteractionResult, type InvokeContext, type ReplyContent, type ReplyOptions } from "./commands";
 // The argument checks of encrypted invocations (§5.8) are the shared ones of @tavrn/e2ee.
 export { COMMAND_ARGS_TYPE, CommandArgsVerifier, type ArgsCheck, type ArgsRejection } from "@tavrn/e2ee";
