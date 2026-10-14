@@ -43,6 +43,9 @@ A few route groups that recent protocol versions added:
 | `api.historyRequests.create`, `mine`, `cancel`, `list`, `approve`, `deny` | `/rooms/{id}/history-requests`: history restore after a key reset | ENCRYPTION.md §7b, `history.restore` |
 | `api.voice.mine()` | `GET /users/me/voice`: the occupied voice channels of every room of this node the user may view, in one request | VOICE.md §5 |
 | `api.invites.direct(roomId, user)` | `POST /rooms/{id}/invites/direct`: a single-use invite bound to one user of any node | FEDERATION.md §3.4 |
+| `api.polls.vote`, `retract`, `votes`, `close` | `PUT`/`DELETE …/messages/{id}/poll/vote`, `GET …/poll/votes`, `PATCH …/messages/{id} { poll_closes_at }`: vote records of polls and date polls, closing a poll early (the poll itself is a message sent with `conversations.send`; contents and votes are built and checked with `@tavrn/e2ee` `poll.ts`) | PROTOCOL.md §7g, `polls.v1` |
+| `api.channels.update(roomId, channelId, { status })` | `PATCH /rooms/{id}/channels/{id}`: the status line of a voice channel, with `voice_status` alone; `VoiceChannelState.session_started_at` is when the channel's session began | VOICE.md §2a, §5 |
+| `api.voice.join(roomId, channelId, "screen")`, `api.calls.join(conversationId, "screen")` | the device's screen publisher, which only publishes its screen share (`leave` with `"screen"` ends it alone; `VoiceParticipant.screen_of` names its device) | VOICE.md §4b |
 
 The package ships TypeScript sources (`main: src/index.ts`); the consumer's bundler or test runner compiles them.
 The types in `src/generated/` are generated from the protocol's `openapi.json` with
