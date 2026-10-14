@@ -197,3 +197,20 @@ describe("inheritedOverrideValue (what a neutral override shows in the editors)"
     expect(inheritedOverrideValue({ ...admin, subject: { type: "role", id: "r1" }, category_overrides: [{ subject_type: "role", subject_id: "r1", allow: 0n, deny: Permission.SEND_MESSAGES }] }, Permission.SEND_MESSAGES)).toEqual({ allowed: true, source: "role" });
   });
 });
+
+describe("the permission lists the clients render are complete", () => {
+  const names = Object.keys(Permission) as (keyof typeof Permission)[];
+
+  it("every permission bit has a label (the role editor lists PERMISSION_LABELS)", () => {
+    const labelled = new Set(PERMISSION_LABELS.map((p) => p.name));
+    expect(names.filter((n) => !labelled.has(n))).toEqual([]);
+    expect(PERMISSION_LABELS.filter((p) => !(p.name in Permission)).map((p) => p.name)).toEqual([]);
+  });
+
+  it("every channel-scoped bit is in a channel group and vice versa (the channel override editor lists CHANNEL_SCOPED_GROUPS)", () => {
+    const grouped = new Set(CHANNEL_SCOPED_GROUPS.flatMap((g) => g.permissions));
+    const scoped = names.filter((n) => (CHANNEL_SCOPED & Permission[n]) !== 0n);
+    expect(scoped.filter((n) => !grouped.has(n))).toEqual([]);
+    expect([...grouped].filter((n) => (CHANNEL_SCOPED & Permission[n]) === 0n)).toEqual([]);
+  });
+});
