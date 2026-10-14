@@ -273,3 +273,52 @@ describe("labelGhosts", () => {
     expect(labelGhosts(ghosts, null)).toBe(ghosts);
   });
 });
+
+describe("the election counts only devices that may do the removal (§4.7)", () => {
+  it("a lower device id that is offline (voice participants) does not hold this device back", async () => {
+    const { cleaner, mls, sleeps } = fake([early, me, bobGone], { [bobGone]: "unattested" });
+    const r = await cleaner.clean({ q: Q, members, mayManage: false, online: [me] });
+    expect(sleeps).toEqual([]);
+    expect(r.outcome).toBe("removed");
+    expect(mls.removeLeaves).toHaveBeenCalledWith(Q, [bobGone]);
+  });
+
+  it("a lower device id of a user who is offline (presence) does not hold this device back", async () => {
+    const { cleaner, sleeps } = fake([early, me, bobGone], { [bobGone]: "unattested" });
+    const r = await cleaner.clean({ q: Q, members, mayManage: false, onlineUsers: ["alice@t.local", "bob@t.local"] });
+    expect(sleeps).toEqual([]);
+    expect(r.outcome).toBe("removed");
+  });
+
+  it("a lower device id of a user who may not remove departed members does not hold a manager back", async () => {
+    // carol left; dave (lowest device id) is a plain member, alice manages.
+    const { cleaner, mls, sleeps } = fake([early, me, carol], {});
+    const r = await cleaner.clean({ q: Q, members: ["alice@t.local", "dave@t.local"], mayManage: true, managers: ["alice@t.local"] });
+    expect(sleeps).toEqual([]);
+    expect(r.outcome).toBe("removed");
+    expect(mls.removeLeaves).toHaveBeenCalledWith(Q, [carol]);
+  });
+
+  it("removals any member may do (deleted devices) still wait for a lower device id of a non-manager", async () => {
+    const { cleaner, sleeps } = fake([early, me, bobGone], { [bobGone]: "unattested" });
+    await cleaner.clean({ q: Q, members, mayManage: true, managers: ["alice@t.local"] });
+    expect(sleeps).toEqual([CLEANUP_WAIT_MS]);
+  });
+
+  it("a lower device id that is allowed and online: waits as before", async () => {
+    const { cleaner, sleeps } = fake([early, me, carol], {});
+    await cleaner.clean({ q: Q, members: ["alice@t.local", "dave@t.local"], mayManage: true, managers: ["alice@t.local", "dave@t.local"], onlineUsers: ["alice@t.local", "dave@t.local"] });
+    expect(sleeps).toEqual([CLEANUP_WAIT_MS]);
+    // Unknown managers and presence: every valid leaf counts (the behaviour without the lists).
+    const unknown = fake([early, me, carol], {});
+    await unknown.cleaner.clean({ q: Q, members: ["alice@t.local", "dave@t.local"], mayManage: true });
+    expect(unknown.sleeps).toEqual([CLEANUP_WAIT_MS]);
+  });
+
+  it("electedFirst with users known to be online", () => {
+    expect(electedFirst(me, [me, early], null, ["alice@t.local"])).toBe(true);
+    expect(electedFirst(me, [me, early], null, ["alice@t.local", "dave@t.local"])).toBe(false);
+    // Both lists: a device must be in both.
+    expect(electedFirst(me, [me, early], [early], ["alice@t.local"])).toBe(true);
+  });
+});

@@ -52,6 +52,11 @@ package instead of a git dependency.
   outcome `postponed` without committing (the caller cleans again later, in the background); `isRunning(q)` tells
   whether a cleanup runs. A voice join shared a running background cleanup and inherited up to ten seconds of its
   election wait.
+- `@tavrn/e2ee`: the cleanup election counts only devices that may commit the removal and are online:
+  `CleanupRequest.managers` (users who may remove departed members' leaves) and `onlineUsers` (users known to be
+  online), next to the existing `online` devices; `electedFirst` takes `onlineUsers`. A lower device id of a member
+  who may not remove a departed member's leaf, or of a user who is offline, held every other device back for ten
+  seconds.
 - `@tavrn/e2ee`: `LeafCleaner.clean` takes `urgent` for content that waits for a departed member's leaf to go: it
   skips the election wait and cuts the wait of a running cleanup short. A device that was not elected otherwise
   waited ten seconds before it removed the leaf itself, and a message sent meanwhile was refused by the ghost check

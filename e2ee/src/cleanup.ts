@@ -22,6 +22,14 @@
  * tries first; every other device waits {@link CLEANUP_WAIT_MS} and tries only if the leaf is still there. One
  * cleanup runs per conversation at a time; an epoch conflict is retried after the missing commits (at most 3).
  *
+ * The election counts only the valid leaves (no ghosts) of devices that may commit every removal of the run, by the
+ * rules above: own ghost leaves only devices of the same user; departed members only devices of users who may manage
+ * the conversation (`managers`, when the caller knows them); deleted or unattested devices any member. Of those, only
+ * the devices known to be online count when the caller knows it: `online` (device identities, e.g. the voice
+ * participants) and `onlineUsers` (user addresses, e.g. the presence list; every device of a user who is not in it is
+ * offline). This device always counts. Without the lists every candidate counts, as before: a device that is offline
+ * or not allowed would otherwise hold every other device back for the whole wait.
+ *
  * A message waiting for the removal (the ghost check refuses to encrypt while a departed member's leaf is in the
  * group) cannot wait for the election: an `urgent` request skips the wait and cuts the wait of a running cleanup short.
  * A second commit of the same removal costs nothing but an epoch conflict, after which the leaf is gone.
@@ -56,6 +64,13 @@ export interface CleanupRequest {
   pending?: PendingRemovalLike[] | null;
   /** Device identities known to be online (voice participants); null = unknown. */
   online?: Iterable<string> | null;
+  /** Addresses of users known to be online (presence); devices of other users are offline. null = unknown. */
+  onlineUsers?: Iterable<string> | null;
+  /**
+   * Addresses of the users who may remove leaves of departed members (DMs: every member, channels: moderators); only
+   * their devices are elected for such removals. null = unknown (every member counts).
+   */
+  managers?: Iterable<string> | null;
   /** The conversation's effective "no bots" flag: bot leaves are ghosts (§4.6) and go like departed members. */
   noBots?: boolean;
   /**
@@ -122,11 +137,13 @@ export function labelGhosts(ghosts: GhostViolation[], pending: PendingRemovalLik
 
 /**
  * Whether this device goes first: the lowest device id among the devices that may commit the removal and are
- * online (this device always counts as online).
+ * online (this device always counts as online). `online` names devices, `onlineUsers` users (all their devices);
+ * a list that is not given does not filter.
  */
-export function electedFirst(self: string, eligible: Iterable<string>, online?: Iterable<string> | null): boolean {
+export function electedFirst(self: string, eligible: Iterable<string>, online?: Iterable<string> | null, onlineUsers?: Iterable<string> | null): boolean {
   const on = online ? new Set(online) : null;
-  const candidates = [...new Set([...eligible, self])].filter((i) => i === self || !on || on.has(i));
+  const users = onlineUsers ? new Set(onlineUsers) : null;
+  const candidates = [...new Set([...eligible, self])].filter((i) => i === self || ((!on || on.has(i)) && (!users || users.has(splitIdentity(i).address))));
   candidates.sort((a, b) => (deviceIdOf(a) < deviceIdOf(b) ? -1 : deviceIdOf(a) > deviceIdOf(b) ? 1 : a < b ? -1 : 1));
   return candidates[0] === self;
 }
@@ -244,12 +261,18 @@ export class LeafCleaner {
     const result = (outcome: CleanupOutcome, removed: string[] = []): CleanupResult => ({ outcome, removed, ghosts: labelGhosts(ghosts, req.pending) });
     if (targets.size === 0) return result(ghosts.length ? "not_allowed" : "clean");
 
-    // Election among the valid leaves that may commit these removals.
+    // Election among the valid leaves of devices that may commit every one of these removals.
     const ghostIds = new Set(ghosts.map((g) => g.identity));
-    const valid = mls.roster(req.q).filter((i) => !ghostIds.has(i));
-    const anyMember = [...targets.values()].some((w) => w !== "own");
-    const eligible = anyMember ? valid : valid.filter((i) => splitIdentity(i).address === mls.address);
-    if (!req.urgent && !electedFirst(mls.identity, eligible, req.online)) {
+    const kinds = new Set(targets.values());
+    const managers = req.managers ? new Set(req.managers) : null;
+    const eligible = mls.roster(req.q).filter((i) => {
+      if (ghostIds.has(i)) return false;
+      const { address } = splitIdentity(i);
+      if (address === mls.address) return true;
+      if (kinds.has("own")) return false;
+      return !kinds.has("membership") || !managers || managers.has(address);
+    });
+    if (!req.urgent && !electedFirst(mls.identity, eligible, req.online, req.onlineUsers)) {
       if (req.noWait) return result("postponed");
       await this.electionWait(req.q);
       ({ ghosts, targets } = await this.targets(req));
