@@ -50,6 +50,11 @@ export class TavrnSocket {
   /** 4001 closes since the last `ready` that were answered with a refresh. */
   private authRefreshes = 0;
   private closedByUser = false;
+  /**
+   * Bumped by every {@link TavrnSocket.connect} and {@link TavrnSocket.close}: an `open()` that awaited its token
+   * across one of them is obsolete and must not create a socket.
+   */
+  private generation = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private listeners = new Map<string, Set<(data: never) => void>>();
   status: SocketStatus = "closed";
@@ -59,11 +64,13 @@ export class TavrnSocket {
 
   connect(): void {
     this.closedByUser = false;
+    this.generation += 1;
     void this.open();
   }
 
   close(): void {
     this.closedByUser = true;
+    this.generation += 1;
     if (this.timer) clearTimeout(this.timer);
     this.ws?.close(1000, "client");
     this.ws = null;
@@ -103,7 +110,10 @@ export class TavrnSocket {
   }
 
   private async open() {
+    const generation = this.generation;
     const token = await this.opts.getToken();
+    // close() or a newer connect() happened during the token fetch: this attempt is obsolete.
+    if (generation !== this.generation || this.closedByUser) return;
     if (!token) {
       this.opts.onAuthFailure?.();
       this.setStatus("closed");
@@ -111,12 +121,24 @@ export class TavrnSocket {
     }
     this.setStatus(this.attempt === 0 ? "connecting" : "reconnecting");
     const Impl = this.opts.WebSocketImpl ?? WebSocket;
+    const previous = this.ws;
+    if (previous) {
+      // A second connect() while a socket was live: only the newest one may receive events.
+      this.ws = null;
+      previous.close(1000, "client");
+    }
     const ws = new Impl(this.opts.url);
     this.ws = ws;
     ws.onopen = () => {
+      if (this.ws !== ws) {
+        ws.close(1000, "client");
+        return;
+      }
       ws.send(JSON.stringify({ op: "hello", token, capabilities: this.opts.capabilities ?? ["content.v1"], last_event_id: null }));
     };
-    ws.onmessage = (m: MessageEvent) => this.handle(String(m.data));
+    ws.onmessage = (m: MessageEvent) => {
+      if (this.ws === ws) this.handle(String(m.data));
+    };
     ws.onclose = (ev: CloseEvent) => {
       if (this.ws !== ws) return;
       this.ws = null;
