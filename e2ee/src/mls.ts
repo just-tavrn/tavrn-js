@@ -469,6 +469,11 @@ const ROTATE_AFTER_MS = 7 * 24 * 3600 * 1000;
 /** Most KeyPackages {@link MlsManager.createKeyPackages} creates at once. */
 export const MAX_KEY_PACKAGES = 100;
 const MAX_TRIES = 3;
+/**
+ * A self update right after a complete catch-up (a voice join: `ensureJoined`, then `selfUpdate`) does not fetch the
+ * handshake log again within this time; a commit that missed one still lands after its epoch conflict.
+ */
+export const CAUGHT_UP_REUSE_MS = 3_000;
 /** A forced lookup of a user's devices reuses a result younger than this. */
 const KEY_REFETCH_MS = 2_000;
 /** Device lists are looked up again after this (the key cache TTL of nodes, FEDERATION.md §3.5). */
@@ -552,6 +557,8 @@ export class MlsManager {
   private readonly acknowledged = new Map<string, Set<string>>();
   /** The violations of the last check per conversation and the epoch it ran in (ephemeral events reuse it). */
   private readonly ghostCache = new Map<string, { epoch: number; found: GhostViolation[] }>();
+  /** The epoch each group was last known to be current at (a complete catch-up or an own commit), and when. */
+  private readonly caughtUp = new Map<string, { epoch: number; at: number }>();
   private readonly nonces = new Map<string, string>();
   private readonly backupTried = new Set<string>();
   private readonly plainChecked = new Map<string, PlainStatus>();
@@ -685,6 +692,7 @@ export class MlsManager {
         const old = this.client;
         this.client = next.client;
         old.free();
+        this.caughtUp.clear();
         const meta = this.deps.meta as unknown as Record<string, unknown>;
         for (const k of Object.keys(meta)) delete meta[k];
         Object.assign(meta, normalizeMeta(next.meta, this.deps.homeDomain));
@@ -753,6 +761,7 @@ export class MlsManager {
   }
 
   private noteJoined(q: string) {
+    this.caughtUp.set(q, { epoch: this.client.currentEpoch(q), at: this.now() });
     const meta = this.deps.meta;
     meta.convs[q] = { rotatedAt: this.now() };
     void this.deps.saveMeta(meta);
@@ -908,7 +917,10 @@ export class MlsManager {
         this.markDirty(q);
         this.deps.onEvent?.({ type: "epoch", conversationId: q });
       }
-      if (log.next == null || !progressed) return changed;
+      if (log.next == null || !progressed) {
+        if (log.next == null && this.client.hasGroup(q)) this.caughtUp.set(q, { epoch: this.client.currentEpoch(q), at: this.now() });
+        return changed;
+      }
     }
     return changed;
   }
@@ -938,6 +950,7 @@ export class MlsManager {
       }
       this.client.mergePendingCommit(q);
       await this.persist();
+      this.caughtUp.set(q, { epoch: this.client.currentEpoch(q), at: this.now() });
       const meta = this.deps.meta;
       meta.convs[q] = { rotatedAt: this.now() };
       void this.deps.saveMeta(meta);
@@ -1011,7 +1024,9 @@ export class MlsManager {
     if (remote) return remote;
     return this.run(async () => {
       if (!this.client.hasGroup(q)) return false;
-      await this.catchUpInner(q);
+      // Right after a catch-up (a voice join's `ensureJoined`) the log is not fetched again (CAUGHT_UP_REUSE_MS).
+      const known = this.caughtUp.get(q);
+      if (!known || known.epoch !== this.client.currentEpoch(q) || this.now() - known.at > CAUGHT_UP_REUSE_MS) await this.catchUpInner(q);
       return this.commitInner(q, () => (this.client.hasGroup(q) ? this.client.selfUpdate(q) : null));
     });
   }
@@ -1868,13 +1883,33 @@ export class MlsManager {
     const allowed = new Set(members);
     /** Identities whose attested leaf was seen: a second leaf with the attested key is a duplicate. */
     const matched = new Set<string>();
-    const refreshed = new Set<string>();
     const out: GhostViolation[] = [];
     const ownKey = this.client.devicePublicKey;
+    const isOwnLeaf = (e: { identity: string; key: Uint8Array }) => e.identity === this.client.identity && sameBytes(e.key, ownKey);
+    // Every member's devices are looked up at once (one round trip instead of one per user), then a second time, also
+    // at once, for the users whose leaf names a device the first answer did not list (a device added since).
+    const lookups = new Map<string, Promise<Map<string, Uint8Array> | null | undefined>>();
+    for (const e of entries) {
+      const { address } = splitIdentity(e.identity);
+      if (isOwnLeaf(e) || !allowed.has(address) || lookups.has(address)) continue;
+      // Before acting on a violation: look the user's devices up again.
+      if (opts.fresh && !this.keyCache.get(address)?.pending) this.keyCache.delete(address);
+      lookups.set(address, this.verifiedDevices(address).catch(() => undefined));
+    }
+    const refreshes = new Map<string, Promise<Map<string, Uint8Array> | null | undefined>>();
+    for (const e of entries) {
+      const { address, deviceId } = splitIdentity(e.identity);
+      const first = lookups.get(address);
+      if (!first || refreshes.has(address)) continue;
+      const devices = await first;
+      // A failed lookup is not repeated (the leaf counts as unattested, as before).
+      if (devices === undefined || devices?.get(deviceId)) continue;
+      refreshes.set(address, this.verifiedDevices(address, true).catch(() => undefined));
+    }
     for (const e of entries) {
       const { address, deviceId } = splitIdentity(e.identity);
       // This device's own leaf is never a ghost (another leaf under its name is judged like any other).
-      if (e.identity === this.client.identity && sameBytes(e.key, ownKey) && !matched.has(e.identity)) {
+      if (isOwnLeaf(e) && !matched.has(e.identity)) {
         matched.add(e.identity);
         continue;
       }
@@ -1883,16 +1918,8 @@ export class MlsManager {
         continue;
       }
       let key: Uint8Array | undefined;
-      try {
-        if (opts.fresh && !refreshed.has(address)) {
-          // Before acting on a violation: look the user's devices up again.
-          refreshed.add(address);
-          if (!this.keyCache.get(address)?.pending) this.keyCache.delete(address);
-        }
-        key = (await this.verifiedDevices(address))?.get(deviceId) ?? (await this.verifiedDevices(address, true))?.get(deviceId);
-      } catch {
-        key = undefined;
-      }
+      const first = await (lookups.get(address) ?? this.verifiedDevices(address).catch(() => undefined));
+      if (first !== undefined) key = first?.get(deviceId) ?? (await (refreshes.get(address) ?? this.verifiedDevices(address, true).catch(() => undefined)))?.get(deviceId);
       if (opts.noBots && isBotKind(this.kinds.get(address))) {
         out.push({ identity: e.identity, reason: "bot", key: b64urlEncode(e.key) });
         continue;

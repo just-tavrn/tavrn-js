@@ -121,6 +121,53 @@ describe("MlsManager", () => {
     expect(Object.keys(bob.pins)).toEqual([alice.address]);
   });
 
+  it("a self update right after the join does not fetch the handshake log a second time (voice join)", async () => {
+    const { node, device } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    await bob.mls.ensureJoined(CONV, { canCreate: true });
+    await alice.mls.catchUp(CONV);
+    const before = node.logCalls;
+    expect(await alice.mls.ensureJoined(CONV, { canCreate: true })).toBe("joined");
+    expect(node.logCalls).toBe(before + 1);
+    expect(await alice.mls.selfUpdate(CONV)).toBe(true);
+    expect(node.logCalls).toBe(before + 1);
+    expect(alice.mls.epoch(CONV)).toBe(2);
+    // A commit of another device in between: the epoch conflict brings the missing commit, the update still lands.
+    await alice.mls.catchUp(CONV);
+    await bob.mls.selfUpdate(CONV);
+    expect(await alice.mls.selfUpdate(CONV)).toBe(true);
+    expect(alice.mls.epoch(CONV)).toBe(node.groups.get(ID)!.epoch);
+    await bob.mls.catchUp(CONV);
+    const m = await send(alice, CONV, "after both updates", "m1");
+    expect(await bob.mls.decrypt(CONV, m)).toEqual({ ok: true, content: { type: "text", body: "after both updates" } });
+  });
+
+  it("a ghost check looks the members' devices up in parallel", async () => {
+    const { node, device } = setup();
+    const alice = device("alice", DEV.a);
+    const others = [device("bob", DEV.b), device("carol", DEV.c), device("dave", DEV.d)];
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    for (const o of others) {
+      await o.mls.ensureJoined(CONV, { canCreate: true });
+      await alice.mls.catchUp(CONV);
+    }
+    let inFlight = 0;
+    let most = 0;
+    const keysOf = node.keysOf.bind(node);
+    node.keysOf = ((address: string) => {
+      inFlight++;
+      most = Math.max(most, inFlight);
+      return new Promise((r) => setTimeout(r, 5)).then(() => {
+        inFlight--;
+        return keysOf(address);
+      });
+    }) as unknown as typeof node.keysOf;
+    expect(await alice.mls.ghostCheck(CONV, [alice.address, ...others.map((o) => o.address)], { fresh: true })).toEqual([]);
+    expect(most).toBeGreaterThan(1);
+  });
+
   it("encrypts ephemeral events like messages, verifies the sender and rejects replays", async () => {
     const { node, device } = setup();
     const alice = device("alice", DEV.a);

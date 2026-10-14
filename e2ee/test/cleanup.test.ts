@@ -322,3 +322,32 @@ describe("the election counts only devices that may do the removal (§4.7)", () 
     expect(electedFirst(me, [me, early], [early], ["alice@t.local"])).toBe(true);
   });
 });
+
+describe("fresh device lookups (§4.6) only when the group changed", () => {
+  const freshFlags = (calls: unknown[][]) => calls.map((c) => !!(c[2] as { fresh?: boolean } | undefined)?.fresh);
+
+  it("a second cleanup of an unchanged roster uses the cached device lists", async () => {
+    const { cleaner, mls, state } = fake([me, bob], {});
+    expect((await cleaner.clean({ q: Q, members, mayManage: false })).outcome).toBe("clean");
+    expect((await cleaner.clean({ q: Q, members, mayManage: false })).outcome).toBe("clean");
+    expect(freshFlags(mls.ghostCheck.mock.calls)).toEqual([true, false]);
+    // Another leaf: fresh again.
+    state.roster = [me, bob, carol];
+    await cleaner.clean({ q: Q, members, mayManage: false });
+    expect(freshFlags(mls.ghostCheck.mock.calls)).toEqual([true, false, true]);
+  });
+
+  it("looks up again when the node lists a pending removal of a leaf in the group", async () => {
+    const { cleaner, mls } = fake([me, bob], {});
+    await cleaner.clean({ q: Q, members, mayManage: false });
+    await cleaner.clean({ q: Q, members, mayManage: false, pending: [{ identity: bob, reason: "deleted" }] });
+    expect(freshFlags(mls.ghostCheck.mock.calls)).toEqual([true, true]);
+  });
+
+  it("looks up again when a ghost was found last time", async () => {
+    const { cleaner, mls } = fake([me, bob], { [bob]: "unattested" }, { refuse: true });
+    await cleaner.clean({ q: Q, members, mayManage: false });
+    await cleaner.clean({ q: Q, members, mayManage: false });
+    expect(freshFlags(mls.ghostCheck.mock.calls)[2]).toBe(true);
+  });
+});

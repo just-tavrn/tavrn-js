@@ -208,7 +208,10 @@ const tally = tallyPoll(poll, checked, { closesAt: message.poll_closes_at });
   The election counts only valid leaves of devices that may commit every removal of the run (own ghost leaves: the
   same user; departed members: the users in `managers`, when given; deleted or unattested devices: any member) and,
   when the caller knows it, only online ones (`online`: device identities such as the voice participants;
-  `onlineUsers`: user addresses such as the presence list). Without these lists every valid leaf counts.
+  `onlineUsers`: user addresses such as the presence list). Without these lists every valid leaf counts. A cleanup
+  looks the members' devices up again only when the roster (identities and signature keys) changed since the last
+  check without findings, that check is older than `FRESH_REUSE_MS` or the node lists a pending removal of a leaf in
+  the group.
 - `identity.ts`: the current identity key and its rotation with continuity (`rotateIdentity`, `syncIdentity`,
   `resolveIdentity`; ENCRYPTION.md §9a).
 - `search/`: the local encrypted search index (`SearchIndex` over a `SearchBackend`, `MemorySearchBackend` for tests;

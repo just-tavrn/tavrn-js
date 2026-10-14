@@ -46,6 +46,15 @@ import { MlsError, splitIdentity, type GhostViolation, type MlsManager } from ".
 export const CLEANUP_WAIT_MS = 10_000;
 /** Attempts per leaf and session (a node that refuses keeps refusing). */
 export const CLEANUP_MAX_TRIES = 3;
+/**
+ * A cleanup looks every member's devices up again (`ghostCheck` `fresh`) unless the last fresh check of the
+ * conversation found no ghost in the same roster (identities and signature keys) less than this ago and the node
+ * lists no pending removal of a leaf in it. Device deletions reach clients as `devices.changed` (the key cache forgets
+ * the user) and as pending removals, so an unchanged roster needs no new lookups; a voice join then costs no key
+ * round trips. The epoch is not part of the key: every voice join's self update moves it without changing a leaf's
+ * identity or signature key.
+ */
+export const FRESH_REUSE_MS = 10 * 60_000;
 
 /** A pending removal as the hosting node lists it. */
 export interface PendingRemovalLike {
@@ -107,6 +116,8 @@ export interface CleanerDeps {
    */
   reattest?(deviceId: string, key: Uint8Array): Promise<boolean>;
   sleep?(ms: number): Promise<void>;
+  /** Clock of {@link FRESH_REUSE_MS} (default `Date.now`). */
+  now?(): number;
   waitMs?: number;
   /** Waits before the retries after an epoch conflict (default 500 ms, 1.5 s, 3 s). */
   backoffMs?: number[];
@@ -199,6 +210,8 @@ export class LeafCleaner {
   /** Ends the election wait of a running cleanup, per conversation. */
   private readonly waiting = new Map<string, () => void>();
   private readonly tries = new Map<string, number>();
+  /** The roster of the last fresh ghost check that found nothing, per conversation, and when. */
+  private readonly checked = new Map<string, { roster: string; at: number }>();
 
   constructor(private readonly deps: CleanerDeps) {}
 
@@ -235,13 +248,27 @@ export class LeafCleaner {
     return p;
   }
 
+  /** The roster's identities and signature keys (identities alone without `rosterEntries`). */
+  private fingerprint(q: string): string {
+    const { mls } = this.deps;
+    const entries = mls.rosterEntries ? mls.rosterEntries(q).map((e) => `${e.identity}#${e.key.join(".")}`) : mls.roster(q);
+    return entries.sort().join("|");
+  }
+
   /** The ghosts this device may remove, by rule. */
   private async targets(req: CleanupRequest): Promise<{ ghosts: GhostViolation[]; targets: Map<string, Why> }> {
     const { mls } = this.deps;
     const roster = mls.roster(req.q);
     // Without a member list every leaf's user counts as a member: only attestation is judged.
     const members = req.members ?? roster.map((i) => splitIdentity(i).address);
-    const ghosts = await mls.ghostCheck(req.q, members, { fresh: true, noBots: req.noBots });
+    const fingerprint = this.fingerprint(req.q);
+    const now = this.deps.now?.() ?? Date.now();
+    const last = this.checked.get(req.q);
+    const pendingHere = !!req.pending?.some((p) => roster.includes(p.identity));
+    const fresh = !last || last.roster !== fingerprint || now - last.at >= FRESH_REUSE_MS || pendingHere;
+    const ghosts = await mls.ghostCheck(req.q, members, { fresh, noBots: req.noBots });
+    if (ghosts.length) this.checked.delete(req.q);
+    else if (fresh) this.checked.set(req.q, { roster: fingerprint, at: now });
     const targets = new Map<string, Why>();
     for (const g of ghosts) {
       // Duplicates carry the attested key (removing one would hit the genuine leaf); this device's own leaf is never
