@@ -1757,7 +1757,7 @@ export type DataCategory = {
     count: number;
     /**
      * account, profile, devices, sessions, rooms, conversations, friends, blocks, messages, encrypted_messages,
-     * attachments, reactions, personal_emojis, personal_sounds, whiteboards, applications, audit_log,
+     * attachments, reactions, poll_votes, personal_emojis, personal_sounds, whiteboards, applications, audit_log,
      * legal_notices, terms_acceptances
      */
     key: string;
@@ -2086,9 +2086,10 @@ export type EditMessageRequest = {
     mentions?: Array<string>;
     mentions_everyone?: boolean;
     /**
-     * Close a poll early (PROTOCOL.md §7g): a time earlier than the current close time and not more than a minute
-     * in the past (the node stores the later of it and its clock). Without `content` the author or a member with
-     * `manage_messages` may send it; it never moves later and a message without a close time gets none.
+     * Close a poll early (PROTOCOL.md §7g): a time not after the node's clock closes it now (also a poll without a
+     * close time); a later time only moves an existing close time earlier. Without `content` the author or a member
+     * with `manage_messages` may send it; a close time never moves later and a poll without one never gets a future
+     * one.
      */
     poll_closes_at?: string | null;
     /**

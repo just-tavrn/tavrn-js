@@ -856,8 +856,9 @@ export class TavrnApi {
     /** Every vote record of the poll, oldest first (at most one per member). */
     votes: (conversationId: string, messageId: string) => this.get<PollVoteList>(`/conversations/${conversationId}/messages/${messageId}/poll/votes`),
     /**
-     * Closes the poll early (author or `manage_messages`): moves `poll_closes_at` to `at` (default: now). Never later
-     * than the current close time; a poll without one cannot be closed.
+     * Closes the poll early (author or `manage_messages`): `at` not after now (the default) closes it at once, also a
+     * poll created without a close time; a future `at` only moves an existing close time earlier (never later, and a
+     * poll without one never gets a future one).
      */
     close: (conversationId: string, messageId: string, at?: string) =>
       this.patch<Message>(`/conversations/${conversationId}/messages/${messageId}`, { poll_closes_at: at ?? new Date().toISOString() } satisfies EditMessageRequest),
