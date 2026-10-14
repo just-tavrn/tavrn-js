@@ -24,6 +24,13 @@ package instead of a git dependency.
 
 ### Added
 
+- Polls and date polls (protocol PROTOCOL.md §7g, capability `polls.v1`): `@tavrn/sdk` `api.polls` (`vote`,
+  `retract`, `votes`, `close`), `poll_closes_at` on messages, sends and edits, the `PollVote` types and the
+  permission `CREATE_POLLS` (bit 39: channel-scoped, in the text group, in DMs, covered by `messages:write`, denied
+  in system channels; `CHANNEL_SCOPED` is now `927683510783`); `@tavrn/e2ee` `poll.ts` (poll and vote codecs, the
+  poll hash, `checkPollVote`, `tallyPoll`, `pollVisibility`) and `MlsManager.decryptPollVote` (vote records are
+  decrypted for their own purpose: vote content is never a message, a message never a vote); `@tavrn/bot`
+  `createPoll`, `votes`, `vote`, `retractVote` and the `pollVote` event (`onPollVote`).
 - `@tavrn/sdk`: the voice session start and the voice channel status (protocol VOICE.md §5, §2a):
   `VoiceChannelState.session_started_at` and `VoiceJoin.session_started_at` (when the channel's current session
   began, `null` while it is empty), `Channel.status` with `UpdateChannelRequest.status`, and the permission
