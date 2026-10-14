@@ -7,6 +7,7 @@ import {
   CHANNEL_SCOPED,
   CHANNEL_SCOPED_GROUPS,
   EVERYONE_RESTRICTED,
+  PERMISSION_LABELS,
   Permission,
   SCOPE_NAMES,
   capBot,
@@ -73,6 +74,18 @@ describe("manage_applications (bit 35)", () => {
   });
 });
 
+describe("voice_status (bit 38)", () => {
+  it("is channel-scoped, grantable to @everyone and covered by rooms:manage", () => {
+    expect(Permission.VOICE_STATUS).toBe(1n << 38n);
+    expect(isChannelScoped("VOICE_STATUS")).toBe(true);
+    expect(isEveryoneRestricted("VOICE_STATUS")).toBe(false);
+    expect(hasPermission(scopeMask(["rooms:manage"]), Permission.VOICE_STATUS)).toBe(true);
+    expect(hasPermission(scopeMask(["voice", "moderation"]), Permission.VOICE_STATUS)).toBe(false);
+    expect(CHANNEL_SCOPED_GROUPS.find((g) => g.group === "voice")!.permissions).toContain("VOICE_STATUS");
+    expect(PERMISSION_LABELS.find((p) => p.name === "VOICE_STATUS")?.group).toBe("Voice");
+  });
+});
+
 describe("bot inputs (APPLICATIONS.md §2.4)", () => {
   it("scope masks never contain administrator or restore_history and cover every other bit", () => {
     expect(scopeMask([])).toBe(BOT_ALWAYS);
@@ -114,7 +127,7 @@ describe("CHANNEL_SCOPED (layered overrides)", () => {
     const bits = [...section.matchAll(/^\| (\d+) \| `/gm)].map((m) => BigInt(m[1]!));
     expect(bits.reduce((acc, b) => acc | (1n << b), 0n)).toBe(CHANNEL_SCOPED);
     // Same value as permissions::CHANNEL_SCOPED of the node.
-    expect(CHANNEL_SCOPED.toString()).toBe("103049789951");
+    expect(CHANNEL_SCOPED.toString()).toBe("377927696895");
     expect(isChannelScoped("VIEW_CHANNEL")).toBe(true);
     expect(isChannelScoped("MANAGE_ROLES")).toBe(true);
     for (const room of ["ADMINISTRATOR", "MANAGE_ROOM", "KICK_MEMBERS", "PURGE", "CHANGE_NICKNAME", "MANAGE_APPLICATIONS"] as const) expect(isChannelScoped(room)).toBe(false);
