@@ -246,4 +246,58 @@ describe("TavrnSocket", () => {
     expect(FakeWebSocket.instances).toHaveLength(1);
     expect(socket.status).toBe("closed");
   });
+  it("does not open a socket when close() happens while the token is being fetched", async () => {
+    let release: (t: string) => void = () => {};
+    const authFailures: number[] = [];
+    const { socket, statuses } = make({
+      getToken: () => new Promise<string>((r) => (release = r)),
+      onAuthFailure: () => authFailures.push(1),
+    });
+    socket.connect();
+    socket.close();
+    release("tok");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    expect(socket.status).toBe("closed");
+    expect(statuses).toEqual(["closed"]);
+    expect(authFailures).toEqual([]);
+  });
+
+  it("keeps only the newest connection when connect() is called again during the token fetch", async () => {
+    const releases: ((t: string) => void)[] = [];
+    const { socket, events } = make({ getToken: () => new Promise<string>((r) => releases.push(r)) });
+    socket.connect();
+    socket.close();
+    socket.connect();
+    releases[1]!("new");
+    releases[0]!("old");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    const ws = FakeWebSocket.instances[0]!;
+    ws.serverOpen();
+    expect(JSON.parse(ws.sent[0]!)).toMatchObject({ op: "hello", token: "new" });
+    ws.serverSend({ op: "ready", session_id: "s1" });
+    ws.serverSend({ op: "event", id: "e1", type: "message.create", data: {} });
+    expect(events).toHaveLength(1);
+    socket.close();
+  });
+
+  it("closes an obsolete socket instead of greeting the node with it", async () => {
+    const { socket, events } = make();
+    socket.connect();
+    await vi.runOnlyPendingTimersAsync();
+    socket.connect();
+    await vi.runOnlyPendingTimersAsync();
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    const [stale, current] = FakeWebSocket.instances as [FakeWebSocket, FakeWebSocket];
+    expect(stale.readyState).toBe(3);
+    stale.serverOpen();
+    expect(stale.sent).toEqual([]);
+    stale.serverSend({ op: "event", id: "e0", type: "message.create", data: {} });
+    current.serverOpen();
+    current.serverSend({ op: "ready", session_id: "s2" });
+    expect(socket.status).toBe("ready");
+    expect(events).toHaveLength(0);
+    socket.close();
+  });
 });

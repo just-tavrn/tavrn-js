@@ -68,6 +68,10 @@ package instead of a git dependency.
   online), next to the existing `online` devices; `electedFirst` takes `onlineUsers`. A lower device id of a member
   who may not remove a departed member's leaf, or of a user who is offline, held every other device back for ten
   seconds.
+- `@tavrn/sdk`: `TavrnSocket` no longer leaks a live socket when `close()` (or a second `connect()`) happens while
+  `getToken()` is still pending: the obsolete attempt creates no socket, a socket replaced by a newer one is closed
+  and its frames are ignored. Before, a page load in React's development StrictMode or a session change could leave
+  two sockets that both delivered every event (tavrn-js#26).
 - `@tavrn/e2ee`: `LeafCleaner.clean` takes `urgent` for content that waits for a departed member's leaf to go: it
   skips the election wait and cuts the wait of a running cleanup short. A device that was not elected otherwise
   waited ten seconds before it removed the leaf itself, and a message sent meanwhile was refused by the ghost check
