@@ -1531,7 +1531,8 @@ export type CreateMessageRequest = {
     mentions?: Array<string>;
     mentions_everyone?: boolean;
     /**
-     * Close time of a poll (PROTOCOL.md §7g): RFC 3339, 1 minute to 1 year ahead; needs `create_polls`.
+     * Close time of a poll (PROTOCOL.md §7g): RFC 3339 with an offset, 1 minute to 1 year ahead, any content. Needs
+     * `create_polls`; the node refuses votes after it.
      */
     poll_closes_at?: string | null;
     reply_to_id?: string | null;
@@ -2074,6 +2075,9 @@ export type DirectorySoftware = {
 };
 
 export type EditMessageRequest = {
+    /**
+     * The new content; absent when the request only closes a poll early (`poll_closes_at`).
+     */
     content?: unknown;
     /**
      * MLS epoch (encrypted only; edits use the current epoch)
@@ -2082,7 +2086,9 @@ export type EditMessageRequest = {
     mentions?: Array<string>;
     mentions_everyone?: boolean;
     /**
-     * Close a poll early (PROTOCOL.md §7g): an earlier time than the current close time.
+     * Close a poll early (PROTOCOL.md §7g): a time earlier than the current close time and not more than a minute
+     * in the past (the node stores the later of it and its clock). Without `content` the author or a member with
+     * `manage_messages` may send it; it never moves later and a message without a close time gets none.
      */
     poll_closes_at?: string | null;
     /**
@@ -3278,7 +3284,7 @@ export type Message = {
     mentions_everyone: boolean;
     pinned?: boolean;
     /**
-     * Plaintext close time of a poll (PROTOCOL.md §7g), null otherwise.
+     * Plaintext close time of a poll (PROTOCOL.md §7g), null otherwise: the node refuses votes after it.
      */
     poll_closes_at?: string | null;
     reactions?: Array<Reaction>;
@@ -4103,35 +4109,6 @@ export type PersonalSounds = {
     max_personal: number;
 };
 
-/**
- * A member's vote on a poll (PROTOCOL.md §7g).
- */
-export type PollVote = {
-    content: unknown;
-    conversation_id: string;
-    created_at: string;
-    device_id?: string | null;
-    epoch?: number | null;
-    message_id: string;
-    signature?: string | null;
-    updated_at: string;
-    /**
-     * `username@domain`
-     */
-    user: string;
-    user_id: string;
-};
-
-export type PollVoteList = {
-    items: Array<PollVote>;
-};
-
-export type PollVoteRequest = {
-    content: unknown;
-    epoch?: number | null;
-    signature?: string | null;
-};
-
 export type PinList = {
     messages: Array<Message>;
 };
@@ -4198,6 +4175,62 @@ export type Policies = {
      * Participants per voice channel at most.
      */
     voice_max_participants: number;
+};
+
+/**
+ * A member's vote on a poll (PROTOCOL.md §7g).
+ */
+export type PollVote = {
+    /**
+     * Encrypted: content format 1 (base64url, ENCRYPTION.md §5.2) of the `poll.vote` object. Plaintext: the
+     * `poll.vote` object.
+     */
+    content: unknown;
+    conversation_id: string;
+    created_at: string;
+    /**
+     * The device that voted last (public device id).
+     */
+    device_id?: string | null;
+    /**
+     * Encrypted conversations: the MLS epoch of `content`.
+     */
+    epoch?: number | null;
+    message_id: string;
+    /**
+     * Plaintext only: the voting device's signature (FEDERATION.md §10.3), as sent.
+     */
+    signature?: string | null;
+    updated_at: string;
+    /**
+     * The voter, `username@domain`.
+     */
+    user: string;
+    user_id: string;
+};
+
+export type PollVoteList = {
+    /**
+     * Every vote of the poll, oldest first (at most one per member).
+     */
+    items: Array<PollVote>;
+};
+
+export type PollVoteRequest = {
+    /**
+     * Encrypted conversations: content format 1 (base64url) of the `poll.vote` object under the current epoch.
+     * Plaintext conversations: the `poll.vote` object. At most 4 KiB.
+     */
+    content: unknown;
+    /**
+     * MLS epoch of `content` (encrypted only).
+     */
+    epoch?: number | null;
+    /**
+     * Plaintext only: device signature `base64url(nonce(16) || Ed25519 signature(64))` (FEDERATION.md §10.3) with
+     * empty reply and thread, no mentions and no attachments.
+     */
+    signature?: string | null;
 };
 
 /**
@@ -10256,6 +10289,81 @@ export type EditConversationMessageResponses = {
 };
 
 export type EditConversationMessageResponse = EditConversationMessageResponses[keyof EditConversationMessageResponses];
+
+export type DeletePollVoteData = {
+    body?: never;
+    path: {
+        conversation_id: string;
+        message_id: string;
+    };
+    query?: never;
+    url: '/api/v1/conversations/{conversation_id}/messages/{message_id}/poll/vote';
+};
+
+export type DeletePollVoteErrors = {
+    403: ProblemDetails;
+    404: ProblemDetails;
+    409: ProblemDetails;
+    429: ProblemDetails;
+};
+
+export type DeletePollVoteError = DeletePollVoteErrors[keyof DeletePollVoteErrors];
+
+export type DeletePollVoteResponses = {
+    204: void;
+};
+
+export type DeletePollVoteResponse = DeletePollVoteResponses[keyof DeletePollVoteResponses];
+
+export type PutPollVoteData = {
+    body: PollVoteRequest;
+    path: {
+        conversation_id: string;
+        message_id: string;
+    };
+    query?: never;
+    url: '/api/v1/conversations/{conversation_id}/messages/{message_id}/poll/vote';
+};
+
+export type PutPollVoteErrors = {
+    400: ProblemDetails;
+    403: ProblemDetails;
+    404: ProblemDetails;
+    409: ProblemDetails;
+    413: ProblemDetails;
+    429: ProblemDetails;
+};
+
+export type PutPollVoteError = PutPollVoteErrors[keyof PutPollVoteErrors];
+
+export type PutPollVoteResponses = {
+    200: PollVote;
+};
+
+export type PutPollVoteResponse = PutPollVoteResponses[keyof PutPollVoteResponses];
+
+export type ListPollVotesData = {
+    body?: never;
+    path: {
+        conversation_id: string;
+        message_id: string;
+    };
+    query?: never;
+    url: '/api/v1/conversations/{conversation_id}/messages/{message_id}/poll/votes';
+};
+
+export type ListPollVotesErrors = {
+    403: ProblemDetails;
+    404: ProblemDetails;
+};
+
+export type ListPollVotesError = ListPollVotesErrors[keyof ListPollVotesErrors];
+
+export type ListPollVotesResponses = {
+    200: PollVoteList;
+};
+
+export type ListPollVotesResponse = ListPollVotesResponses[keyof ListPollVotesResponses];
 
 export type RemoveConversationReactionData = {
     body?: never;
