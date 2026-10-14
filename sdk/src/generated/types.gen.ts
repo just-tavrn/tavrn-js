@@ -817,6 +817,11 @@ export type Channel = {
     room_id: string;
     slowmode_secs: number;
     /**
+     * Voice channels: one line of plain text about what is going on (at most 128 characters, `""` = none;
+     * VOICE.md §2a), set by members with `voice_status`. Always `""` on other kinds.
+     */
+    status?: string;
+    /**
      * Set on default channels (`general`, `voice`) so that clients localize the name; NULL after a rename.
      */
     system_name?: string | null;
@@ -5798,6 +5803,13 @@ export type UpdateChannelRequest = {
     position?: number | null;
     slowmode_secs?: number | null;
     /**
+     * Voice channels: the status line (plain text, at most 128 characters after trimming, `""` clears it;
+     * VOICE.md §2a). Needs `voice_status` in the channel instead of `manage_channels` when it is the only field
+     * (`403 channel.status_forbidden`); refused on other kinds (`400 channel.status_not_voice`). Audited as
+     * `channel.voice_status`.
+     */
+    status?: string | null;
+    /**
      * Deprecated and ignored (protocol permissions.md "Changes", 2026-10-09): overrides are layered, a channel
      * always inherits its category's overrides underneath its own. Accepted for one release, then unknown.
      *
@@ -6313,6 +6325,11 @@ export type VoiceChannelState = {
      */
     participants: Array<VoiceParticipant>;
     room_id: string;
+    /**
+     * When the current session began (RFC 3339; VOICE.md §5): set with the first connected participant, kept
+     * while anybody is connected or reconnecting, `null` while the channel is empty. Clients show a timer from it.
+     */
+    session_started_at?: string | null;
 };
 
 export type VoiceInfo = {
@@ -6354,6 +6371,11 @@ export type VoiceJoin = {
      */
     room: string;
     room_id: string;
+    /**
+     * When the channel's current session began (VOICE.md §5; `null` while nobody is connected yet, this device
+     * included: its own connection starts the session).
+     */
+    session_started_at?: string | null;
     /**
      * LiveKit access token (10 minutes) with exactly the allowed sources.
      */
@@ -15291,7 +15313,6 @@ export type PutPasskeyErrors = {
     400: ProblemDetails;
     401: ProblemDetails;
     404: ProblemDetails;
-    409: ProblemDetails;
     413: ProblemDetails;
     429: ProblemDetails;
 };

@@ -33,6 +33,23 @@ describe("voice API (VOICE.md)", () => {
     expect(calls[3]!.url).toBe("https://n.example/api/v1/rooms/R/voice");
   });
 
+  it("carries the session start of a channel and sets a voice channel's status through the channel update (§5, §2a)", async () => {
+    const { impl, calls } = fetchMock([
+      { status: 200, body: { token: "lk", epoch: 3, session_started_at: "2026-10-14T12:00:00.000Z", participants: [] } },
+      { status: 200, body: { items: [{ room_id: "R", channel_id: "C", epoch: 3, session_started_at: null, participants: [] }] } },
+      { status: 200, body: { id: "C", kind: "voice", status: "Raid night" } },
+    ]);
+    const api = new TavrnApi({ baseUrl: "https://n.example", getToken: () => "tok", fetchImpl: impl });
+    expect((await api.voice.join("R", "C")).session_started_at).toBe("2026-10-14T12:00:00.000Z");
+    const states = await api.voice.roomStates("R");
+    expect(states.items[0]!.session_started_at).toBeNull();
+    const channel = await api.channels.update("R", "C", { status: "Raid night" });
+    expect(channel.status).toBe("Raid night");
+    expect(calls[2]!.init.method).toBe("PATCH");
+    expect(calls[2]!.url).toBe("https://n.example/api/v1/rooms/R/channels/C");
+    expect(JSON.parse(String(calls[2]!.init.body))).toEqual({ status: "Raid night" });
+  });
+
   it("joins and leaves as the device's screen publisher with the role in the body, the device without a body (§4b)", async () => {
     const { impl, calls } = fetchMock([{ status: 200, body: { token: "lk", identity: "a@n.example/D#screen" } }, { status: 204 }, { status: 200, body: { token: "c" } }, { status: 204 }, { status: 200, body: { token: "d" } }, { status: 204 }]);
     const api = new TavrnApi({ baseUrl: "https://n.example", getToken: () => "tok", fetchImpl: impl });

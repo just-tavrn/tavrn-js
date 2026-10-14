@@ -24,6 +24,11 @@ package instead of a git dependency.
 
 ### Added
 
+- `@tavrn/sdk`: the voice session start and the voice channel status (protocol VOICE.md §5, §2a):
+  `VoiceChannelState.session_started_at` and `VoiceJoin.session_started_at` (when the channel's current session
+  began, `null` while it is empty), `Channel.status` with `UpdateChannelRequest.status`, and the permission
+  `VOICE_STATUS` (bit 38, channel-scoped, in the voice group of the override editors, covered by `rooms:manage`;
+  `CHANNEL_SCOPED` is now `377927696895`).
 - `@tavrn/sdk`: screen publishers (protocol VOICE.md §4b): `voice.join`, `voice.leave`, `calls.join` and
   `calls.leave` take an optional `role` (`"device"` by default, `"screen"` for the device's screen publisher, which
   only publishes its screen share), and `VoiceParticipant.screen_of` names the device a screen publisher belongs to.
