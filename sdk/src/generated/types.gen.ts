@@ -15313,7 +15313,6 @@ export type PutPasskeyErrors = {
     400: ProblemDetails;
     401: ProblemDetails;
     404: ProblemDetails;
-    409: ProblemDetails;
     413: ProblemDetails;
     429: ProblemDetails;
 };
