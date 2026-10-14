@@ -17,9 +17,9 @@
  *
  * `stop()` closes the sockets, waits for running handlers and flushes the pending history backups (if enabled).
  */
-import { LocalKeyMismatchError, MlsError, ensureDevice, localStatus, mlsApiOf, openMlsManager, qualify, splitQualified, type Decrypted, type MlsManager, type PlainStatus } from "@tavrn/e2ee";
+import { LocalKeyMismatchError, MlsError, checkPollVote, encryptPollVote, ensureDevice, localStatus, mlsApiOf, openMlsManager, parsePoll, pollContent, pollHash, pollVoteContent, qualify, signPlainPollVote, splitQualified, tallyPoll, type Decrypted, type MlsManager, type PlainStatus, type Poll, type PollInput, type PollSelection, type PollTally, type VoteCheck } from "@tavrn/e2ee";
 import { FileKeyStore, StateDirInUseError } from "@tavrn/e2ee/node";
-import { TavrnApi, TavrnApiError, b64urlEncode, resolveNode, type Channel, type CommandDefinition, type CommandSet, type Message, type NodeEndpoints, type TavrnEvent, type UserKeys, type UserPrivate, type WellKnown } from "@tavrn/sdk";
+import { TavrnApi, TavrnApiError, b64urlEncode, resolveNode, type Channel, type CommandDefinition, type CommandSet, type Message, type NodeEndpoints, type PollVote, type TavrnEvent, type UserKeys, type UserPrivate, type WellKnown } from "@tavrn/sdk";
 import { threadTitle } from "./threads";
 import { CommandRouter, type CommandCrypto, type CommandHandler, type InvokeContext, type ReplyContent } from "./commands";
 import { BotError } from "./errors";
@@ -143,6 +143,35 @@ export interface SendOptions {
   threadId?: string | null;
 }
 
+/** Options of {@link Bot.createPoll}. */
+export interface PollOptions extends SendOptions {
+  /** The plaintext close time (PROTOCOL.md §7g): 1 minute to 1 year ahead; needs `create_polls`. */
+  closesAt?: string | Date | null;
+}
+
+/** A poll with its checked votes and the tally ({@link Bot.votes}). */
+export interface PollResults {
+  message: Message;
+  poll: Poll;
+  /** `poll_hash` of this version of the poll. */
+  hash: string;
+  closesAt: string | null;
+  votes: { record: PollVote; check: VoteCheck }[];
+  tally: PollTally;
+}
+
+/** `poll.vote` and `poll.vote.delete` (PROTOCOL.md §7g): call {@link Bot.votes} for the checked tally. */
+export interface PollVoteEvent {
+  node: string;
+  /** Qualified conversation id. */
+  conversation: string;
+  messageId: string;
+  user: string;
+  /** The record (null when the vote was retracted). */
+  record: PollVote | null;
+  retracted: boolean;
+}
+
 export interface InstallEvent {
   node: string;
   roomId: string;
@@ -182,6 +211,8 @@ export interface BotEvents {
   tokenExpiring: [TokenExpiringEvent];
   /** {@link Bot.rotateToken} produced a new secret: store it, the previous one stays valid for 24 hours. */
   tokenRotated: [{ secret: string; expiresAt: string }];
+  /** A member voted on a poll, changed or retracted a vote (the bot's own votes included). */
+  pollVote: [PollVoteEvent];
   /** Every WebSocket event of every node, unchanged (for events the runtime does not interpret). */
   event: [{ node: string; event: TavrnEvent }];
   error: [Error];
@@ -734,6 +765,13 @@ export class Bot {
       case "command.invoke":
         void this.track(this.commands.handle(data, this.invokeContext(link)));
         break;
+      case "poll.vote":
+      case "poll.vote.delete": {
+        if (typeof data.conversation_id !== "string" || typeof data.message_id !== "string" || typeof data.user !== "string") break;
+        const retracted = event.type === "poll.vote.delete";
+        this.emit("pollVote", { node: link.domain, conversation: qualify(link.domain, data.conversation_id), messageId: data.message_id, user: data.user, record: retracted ? null : (data as unknown as PollVote), retracted });
+        break;
+      }
       default:
         break;
     }
@@ -890,12 +928,15 @@ export class Bot {
    * Attachments are not supported yet.
    */
   async send(conversation: string | { conversation: string }, content: ReplyContent, opts: SendOptions = {}): Promise<Message> {
+    return this.sendObject(conversation, normalizeContent(content), opts, {});
+  }
+
+  private async sendObject(conversation: string | { conversation: string }, object: Record<string, unknown>, opts: SendOptions, extra: { poll_closes_at?: string }): Promise<Message> {
     if (this.state !== "running" && this.state !== "starting") throw new BotError("stopped", "The bot is not running");
     const mls = this.mls!;
     const q = this.qualified(conversation);
     const { domain, id } = splitQualified(q);
     const link = this.linkFor(domain);
-    const object = normalizeContent(content);
     const mentions = mentionList(opts.mentions);
     const replyTo = opts.replyTo ?? null;
     const threadId = opts.threadId ?? null;
@@ -905,7 +946,7 @@ export class Bot {
       // Thread and reply are signed inside the content (ENCRYPTION.md §5.2); a stale epoch (§5.3) is caught up once.
       const post = async () => {
         const sealed = await this.seal(q, () => mls.encrypt(q, object, { ctx: { thread_id: threadId, reply_to: replyTo } }));
-        return link.api.conversations.send(id, { content: sealed.content, epoch: sealed.epoch, mentions, reply_to_id: replyTo, ...thread });
+        return link.api.conversations.send(id, { content: sealed.content, epoch: sealed.epoch, mentions, reply_to_id: replyTo, ...thread, ...extra });
       };
       try {
         return await post();
@@ -916,7 +957,85 @@ export class Bot {
       }
     }
     const signature = mls.signPlaintext(q, { reply_to: replyTo, thread_id: threadId, mentions_everyone: false, mentions, attachments: [] }, object);
-    return link.api.conversations.send(id, { content: object, mentions, reply_to_id: replyTo, signature, ...thread });
+    return link.api.conversations.send(id, { content: object, mentions, reply_to_id: replyTo, signature, ...thread, ...extra });
+  }
+
+  // ---- Polls (PROTOCOL.md §7g) ----------------------------------------------------------------------
+
+  /**
+   * Sends a poll: a {@link PollInput} (built with `pollContent`) or a ready poll content object, encrypted or signed
+   * like every message, with an optional close time. Needs `create_polls` (and `messages:write`).
+   */
+  async createPoll(conversation: string | { conversation: string }, poll: PollInput | Record<string, unknown>, opts: PollOptions = {}): Promise<Message> {
+    const content = "type" in poll ? (poll as Record<string, unknown>) : pollContent(poll as PollInput);
+    if (!parsePoll(content)) throw new RangeError("invalid poll (PROTOCOL.md §7g)");
+    const { closesAt, ...send } = opts;
+    const extra = closesAt ? { poll_closes_at: closesAt instanceof Date ? closesAt.toISOString() : closesAt } : {};
+    return this.sendObject(conversation, content, send, extra);
+  }
+
+  /** The poll message, its checked content and hash (`not_a_poll` when it is missing or cannot be read as a poll). */
+  private async loadPoll(conversation: string | { conversation: string }, messageId: string): Promise<{ q: string; id: string; link: NodeLink; message: Message; poll: Poll; hash: string; encrypted: boolean }> {
+    if (this.state !== "running" && this.state !== "starting") throw new BotError("stopped", "The bot is not running");
+    const mls = this.mls!;
+    const q = this.qualified(conversation);
+    const { domain, id } = splitQualified(q);
+    const link = this.linkFor(domain);
+    const [message] = await link.api.conversations.messages(id, { around: messageId, limit: 1 });
+    if (!message || message.id !== messageId) throw new BotError("not_a_poll", `No message ${messageId} in ${q}`);
+    let content: Record<string, unknown> | null = null;
+    if (message.encrypted) {
+      if (!mls.hasGroup(q) && !(await this.join(q, false))) throw new BotError("not_member", `The bot is not a member of the encryption group of ${q}`);
+      const d = await mls.decrypt(q, message);
+      content = d.ok ? d.content : null;
+    } else if (message.content && typeof message.content === "object" && !Array.isArray(message.content)) {
+      content = message.content as Record<string, unknown>;
+    }
+    const poll = content ? parsePoll(content) : null;
+    if (!content || !poll) throw new BotError("not_a_poll", `Message ${messageId} is not a readable poll`);
+    return { q, id, link, message, poll, hash: await pollHash(content), encrypted: !!message.encrypted };
+  }
+
+  /** The poll's vote records, each checked against this version of the poll, and the tally (one vote per member). */
+  async votes(conversation: string | { conversation: string }, messageId: string): Promise<PollResults> {
+    const { q, id, link, message, poll, hash } = await this.loadPoll(conversation, messageId);
+    const mls = this.mls!;
+    const { items } = await link.api.polls.votes(id, messageId);
+    const votes = await Promise.all(items.map(async (record) => ({ record, check: await checkPollVote(mls, q, record, poll, hash) })));
+    const closesAt = message.poll_closes_at ?? null;
+    const tally = tallyPoll(poll, votes.map((v) => ({ user: v.record.user, updated_at: v.record.updated_at, check: v.check })), { closesAt });
+    return { message, poll, hash, closesAt, votes, tally };
+  }
+
+  /** Casts or replaces the bot's vote: option ids of a choice poll, or answers per slot of a date poll. */
+  async vote(conversation: string | { conversation: string }, messageId: string, selection: PollSelection): Promise<PollVote> {
+    const { q, id, link, poll, hash, encrypted } = await this.loadPoll(conversation, messageId);
+    const mls = this.mls!;
+    const content = pollVoteContent(poll, messageId, hash, selection);
+    if (!encrypted) return link.api.polls.vote(id, messageId, { content, signature: signPlainPollVote(mls, q, content) });
+    const post = async () => {
+      const sealed = await this.seal(q, () => encryptPollVote(mls, q, content));
+      return link.api.polls.vote(id, messageId, { content: sealed.content, epoch: sealed.epoch });
+    };
+    try {
+      return await post();
+    } catch (e) {
+      if (!(e instanceof TavrnApiError && e.code === "mls.epoch_stale")) throw e;
+      await mls.catchUp(q);
+      return post();
+    }
+  }
+
+  /** Retracts the bot's vote. */
+  async retractVote(conversation: string | { conversation: string }, messageId: string): Promise<void> {
+    const q = this.qualified(conversation);
+    const { domain, id } = splitQualified(q);
+    await this.linkFor(domain).api.polls.retract(id, messageId);
+  }
+
+  /** Listens to `poll.vote` and `poll.vote.delete` ({@link BotEvents.pollVote}); returns the unsubscribe function. */
+  onPollVote(listener: (event: PollVoteEvent) => void | Promise<void>): () => void {
+    return this.on("pollVote", listener);
   }
 
   /** {@link BotMessage.replyInThread}: the message's thread, the thread it started, or a new one from it. */

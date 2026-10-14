@@ -26,6 +26,8 @@ export type BotErrorCode =
   | "interaction_answered"
   /** The bot was stopped (or not started yet). */
   | "stopped"
+  /** The message is not a poll the bot can read (PROTOCOL.md §7g): missing, undecryptable or no valid poll. */
+  | "not_a_poll"
   /**
    * Not sent: the conversation's encryption group has a device the bot's `ghostPolicy` does not accept (a key never
    * attested, a changed identity key without a continuity chain, a non-member; ENCRYPTION.md §4.6).

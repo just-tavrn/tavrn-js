@@ -83,6 +83,7 @@ These variables belong to the bot process, not to the node.
 | `install` / `uninstall` | the bot was added to or removed from a room (`node`, `roomId`) |
 | `tokenExpiring` | the token expires in 7 or 1 days |
 | `tokenRotated` | `rotateToken()` produced a new secret |
+| `pollVote` | a member voted, changed or retracted a vote (`conversation`, `messageId`, `user`, `record`, `retracted`; also `bot.onPollVote(fn)`) |
 | `event` | every WebSocket event of every node, unchanged |
 | `error` | connection ended (`token_refused`, `replaced`), a listener failed |
 
@@ -99,6 +100,24 @@ delivered back to it. **Attachments are not supported yet.**
 `m.replyInThread(content, { title? })` answers in the message's thread, in the thread it already started, or in a new
 thread started from it (the title, encrypted in encrypted channels, defaults to the start of the message). Threads
 need no extra scope: reading falls under `messages:read`, writing under `messages:write`.
+
+**Polls** (PROTOCOL.md §7g): a poll is a message, its votes are records next to it (one per member).
+
+```ts
+const poll = await bot.createPoll(m.conversation, {
+  kind: "choice", question: "Release today?", options: ["Yes", "No", "Tomorrow"], maxChoices: 1,
+}, { closesAt: new Date(Date.now() + 3600_000) });
+bot.onPollVote(async (e) => {
+  const { tally } = await bot.votes(e.conversation, e.messageId); // checked records, one vote per member
+  if (tally.voters >= 3) await bot.send(e.conversation, `Leading: ${tally.best.join(", ")}`);
+});
+await bot.vote(m.conversation, poll.id, { choices: ["o1"] }); // date polls: { answers: { s1: "yes" } }
+```
+
+`createPoll` takes a `PollInput` (or a ready `{ type: "poll", … }` object) and needs the permission `create_polls`;
+encrypted polls and votes are sealed for the conversation's group like messages, plaintext ones are signed by the
+bot device. `votes()` verifies every record against the voter's device and the poll's hash and leaves out stale and
+late votes; `retractVote()` takes the bot's vote back. Voting needs `messages:write`, reading votes `messages:read`.
 
 ## Commands
 

@@ -171,6 +171,26 @@ epochs of a requester's pre-reset range this device can share, `restore(q, to, c
 request, and `shareSinceReset` / `epochsSinceReset` share the epochs since the reset. The requests themselves (ask,
 approve, deny) are routes of `@tavrn/sdk` (`api.historyRequests`).
 
+**Polls** — `poll.ts` (PROTOCOL.md §7g): `parsePoll` (both kinds, the limits), `pollContent` (a composer's input to
+the content object), `pollHash` (hex SHA-256 of the JCS form without `ctx`), `pollVoteContent` (choices or answers,
+bound to the poll by `ctx.poll` and `ctx.poll_hash`), `encryptPollVote` / `signPlainPollVote` (the body of `PUT
+…/poll/vote`), `checkPollVote` (decrypts with `MlsManager.decryptPollVote` or checks the plaintext signature, then
+binds the vote to the poll: `stale` for an edited poll, `envelope_mismatch` for another poll), `tallyPoll` (one vote
+per member, the newest record; stale, late and unverifiable votes left out; per option counts and voters, date slots
+scored `2 × yes + maybe` with the best ones) and `pollVisibility` (the cooperative `results_visible` and
+`votes_visible`). Vote content is never shown as a message and a message is never a vote.
+
+```ts
+const d = await mls.decrypt(q, message);                          // the poll message
+const poll = d.ok ? parsePoll(d.content) : null;
+const hash = await pollHash(d.content);
+const vote = pollVoteContent(poll, message.id, hash, { choices: ["o2"] });
+await api.polls.vote(conversationId, message.id, await encryptPollVote(mls, q, vote));
+const { items } = await api.polls.votes(conversationId, message.id);
+const checked = await Promise.all(items.map(async (r) => ({ user: r.user, updated_at: r.updated_at, check: await checkPollVote(mls, q, r, poll, hash) })));
+const tally = tallyPoll(poll, checked, { closesAt: message.poll_closes_at });
+```
+
 **Other codecs and helpers**
 
 - `sealed.ts`: the stored form of sealed webhook posts in encrypted channels (`sealedContent`, `webhookPayload`,
