@@ -130,6 +130,41 @@ describe("LeafCleaner", () => {
     expect(mls.removeLeaves).toHaveBeenCalledTimes(1);
   });
 
+  it("noWait (a voice join): postponed at once when another device is elected, nothing committed", async () => {
+    const { cleaner, mls, sleeps } = fake([early, me, bobGone], { [bobGone]: "unattested" });
+    const r = await cleaner.clean({ q: Q, members, mayManage: false, noWait: true });
+    expect(r.outcome).toBe("postponed");
+    expect(r.ghosts.map((g) => g.identity)).toEqual([bobGone]);
+    expect(sleeps).toEqual([]);
+    expect(mls.removeLeaves).not.toHaveBeenCalled();
+    // The postponed cleanup runs again later without noWait (in the background) and waits as usual.
+    const later = await cleaner.clean({ q: Q, members, mayManage: false });
+    expect(sleeps).toEqual([CLEANUP_WAIT_MS]);
+    expect(later.outcome).toBe("removed");
+  });
+
+  it("noWait: an elected device removes at once", async () => {
+    const { cleaner, mls, sleeps } = fake([me, bobGone, carol], { [bobGone]: "unattested" });
+    const r = await cleaner.clean({ q: Q, members, mayManage: false, noWait: true });
+    expect(r.outcome).toBe("removed");
+    expect(mls.removeLeaves).toHaveBeenCalledWith(Q, [bobGone]);
+    expect(sleeps).toEqual([]);
+  });
+
+  it("noWait joins a running cleanup and cuts its election wait short", async () => {
+    const { cleaner, mls, sleeps } = fake([early, me, carol], {}, { sleepForever: true });
+    const req = { q: Q, members: ["alice@t.local", "dave@t.local"], mayManage: true };
+    const waiting = cleaner.clean(req);
+    await vi.waitFor(() => expect(sleeps).toEqual([CLEANUP_WAIT_MS]));
+    expect(cleaner.isRunning(Q)).toBe(true);
+    const join = cleaner.clean({ q: Q, members: null, mayManage: false, noWait: true });
+    const [a, b] = await Promise.all([waiting, join]);
+    expect(a).toBe(b);
+    expect(a.outcome).toBe("removed");
+    expect(mls.removeLeaves).toHaveBeenCalledTimes(1);
+    expect(cleaner.isRunning(Q)).toBe(false);
+  });
+
   it("runs once per conversation at a time", async () => {
     const { cleaner, mls } = fake([me, myOld], { [myOld]: "unattested" });
     const [a, b] = await Promise.all([cleaner.clean({ q: Q, members, mayManage: false }), cleaner.clean({ q: Q, members, mayManage: false })]);

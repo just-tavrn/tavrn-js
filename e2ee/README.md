@@ -202,7 +202,9 @@ const tally = tallyPoll(poll, checked, { closesAt: message.poll_closes_at });
   decrypting, `readEmbeds` for renderers; APPLICATIONS.md §6.4).
 - `cleanup.ts`: `LeafCleaner` removes ghost leaves the node allows and the client verified (ENCRYPTION.md §4.7), with an
   election among the devices that may do it; `urgent` (content waits for the removal) skips the election wait and ends
-  the wait of a running cleanup.
+  the wait of a running cleanup; `noWait` (a voice join: nothing waits for the removal) ends the wait of a running
+  cleanup too, runs at once when this device is elected and otherwise returns `postponed` without committing (the
+  caller repeats the cleanup without `noWait` later); `isRunning(q)` tells whether a cleanup of a conversation runs.
 - `identity.ts`: the current identity key and its rotation with continuity (`rotateIdentity`, `syncIdentity`,
   `resolveIdentity`; ENCRYPTION.md §9a).
 - `search/`: the local encrypted search index (`SearchIndex` over a `SearchBackend`, `MemorySearchBackend` for tests;

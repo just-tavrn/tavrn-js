@@ -47,6 +47,11 @@ package instead of a git dependency.
 
 ### Fixed
 
+- `@tavrn/e2ee`: `LeafCleaner.clean` takes `noWait` for a voice join, which must not wait for the election: it joins
+  a running cleanup and ends its election wait, runs at once when this device is elected and otherwise returns the new
+  outcome `postponed` without committing (the caller cleans again later, in the background); `isRunning(q)` tells
+  whether a cleanup runs. A voice join shared a running background cleanup and inherited up to ten seconds of its
+  election wait.
 - `@tavrn/e2ee`: `LeafCleaner.clean` takes `urgent` for content that waits for a departed member's leaf to go: it
   skips the election wait and cuts the wait of a running cleanup short. A device that was not elected otherwise
   waited ten seconds before it removed the leaf itself, and a message sent meanwhile was refused by the ghost check

@@ -25,6 +25,11 @@
  * A message waiting for the removal (the ghost check refuses to encrypt while a departed member's leaf is in the
  * group) cannot wait for the election: an `urgent` request skips the wait and cuts the wait of a running cleanup short.
  * A second commit of the same removal costs nothing but an epoch conflict, after which the leaf is gone.
+ *
+ * A voice join cannot wait either, but nothing waits for the removal there (the current epoch works for the fresh
+ * voice key, ENCRYPTION.md §5a): a `noWait` request joins a running cleanup and cuts its wait short (as `urgent`), runs
+ * at once when this device is elected, and otherwise returns `postponed` without committing anything; the caller runs
+ * the cleanup again without `noWait` later (in the background, after connecting), where it waits for the election.
  */
 import { TavrnApiError } from "@tavrn/sdk";
 import { MlsError, splitIdentity, type GhostViolation, type MlsManager } from "./mls";
@@ -58,9 +63,16 @@ export interface CleanupRequest {
    * for the elected device stops waiting.
    */
   urgent?: boolean;
+  /**
+   * The caller cannot wait for the election and nothing waits for the removal (a voice join): a running cleanup of the
+   * conversation stops waiting and is shared (as with `urgent`); otherwise a device that is not elected gets
+   * `postponed` at once and commits nothing (run the cleanup again without `noWait` later).
+   */
+  noWait?: boolean;
 }
 
-export type CleanupOutcome = "clean" | "removed" | "deferred" | "not_allowed" | "failed";
+/** `postponed`: a `noWait` request of a device that was not elected; nothing was committed. */
+export type CleanupOutcome = "clean" | "removed" | "deferred" | "not_allowed" | "failed" | "postponed";
 
 export interface CleanupResult {
   outcome: CleanupOutcome;
@@ -189,11 +201,16 @@ export class LeafCleaner {
     });
   }
 
+  /** Whether a cleanup of the conversation is running (possibly in its election wait). */
+  isRunning(q: string): boolean {
+    return this.running.has(q);
+  }
+
   /** Cleans the conversation's group; concurrent calls for one conversation share the run. */
   clean(req: CleanupRequest): Promise<CleanupResult> {
     const running = this.running.get(req.q);
     if (running) {
-      if (req.urgent) this.waiting.get(req.q)?.();
+      if (req.urgent || req.noWait) this.waiting.get(req.q)?.();
       return running;
     }
     const p = this.run(req).finally(() => this.running.delete(req.q));
@@ -233,6 +250,7 @@ export class LeafCleaner {
     const anyMember = [...targets.values()].some((w) => w !== "own");
     const eligible = anyMember ? valid : valid.filter((i) => splitIdentity(i).address === mls.address);
     if (!req.urgent && !electedFirst(mls.identity, eligible, req.online)) {
+      if (req.noWait) return result("postponed");
       await this.electionWait(req.q);
       ({ ghosts, targets } = await this.targets(req));
       if (targets.size === 0) return result(ghosts.length ? "deferred" : "clean");
