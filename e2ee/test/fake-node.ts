@@ -51,6 +51,8 @@ export class FakeNode {
   failNextPut = false;
   /** The next this many handshake log requests fail like a lost connection. */
   failLog = 0;
+  /** Handshake log requests served (round trips of catch-ups). */
+  logCalls = 0;
   counter = 0;
   /** Secret storage entries (method → wrapped) per username. */
   secrets = new Map<string, Map<string, string>>();
@@ -201,6 +203,7 @@ export class FakeNode {
         return { epoch: g.epoch };
       },
       log: async (c, since) => {
+        this.logCalls++;
         if (this.failLog > 0) {
           this.failLog--;
           throw new TypeError("Failed to fetch");

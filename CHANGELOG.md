@@ -45,8 +45,29 @@ package instead of a git dependency.
 - `@tavrn/sdk`: `BackendInfo.max_bytes` and `BackendRequest.max_bytes`, the optional limit of a files channel on an
   external store (protocol FILES.md §5); `FilesInfo.limit_bytes` is that limit for external channels.
 
+### Changed
+
+- `@tavrn/e2ee`: fewer round trips before a voice join. `ghostCheck` looks the members' devices up in parallel (one
+  round trip instead of one per user); `LeafCleaner` skips the fresh lookups when the roster is unchanged since its
+  last check without findings (`FRESH_REUSE_MS`, not with a pending removal of a leaf in the group); `selfUpdate` does
+  not fetch the handshake log again within `CAUGHT_UP_REUSE_MS` of a complete catch-up at the same epoch (the
+  `ensureJoined` right before it), an epoch conflict still brings a missed commit. `ensureJoined` and `selfUpdate`
+  take `priority` (a voice join): such an operation runs before the waiting background work (group-join probes,
+  Welcome processing, key uploads) instead of after it, and `ensureJoined` without a local group requests the
+  Welcomes and the GroupInfo at once (one round trip less for every probe and for the first join of a new channel).
+
 ### Fixed
 
+- `@tavrn/e2ee`: `LeafCleaner.clean` takes `noWait` for a voice join, which must not wait for the election: it joins
+  a running cleanup and ends its election wait, runs at once when this device is elected and otherwise returns the new
+  outcome `postponed` without committing (the caller cleans again later, in the background); `isRunning(q)` tells
+  whether a cleanup runs. A voice join shared a running background cleanup and inherited up to ten seconds of its
+  election wait.
+- `@tavrn/e2ee`: the cleanup election counts only devices that may commit the removal and are online:
+  `CleanupRequest.managers` (users who may remove departed members' leaves) and `onlineUsers` (users known to be
+  online), next to the existing `online` devices; `electedFirst` takes `onlineUsers`. A lower device id of a member
+  who may not remove a departed member's leaf, or of a user who is offline, held every other device back for ten
+  seconds.
 - `@tavrn/e2ee`: `LeafCleaner.clean` takes `urgent` for content that waits for a departed member's leaf to go: it
   skips the election wait and cuts the wait of a running cleanup short. A device that was not elected otherwise
   waited ten seconds before it removed the leaf itself, and a message sent meanwhile was refused by the ghost check
