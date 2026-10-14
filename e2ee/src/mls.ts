@@ -465,6 +465,9 @@ export class MlsError extends Error {
   }
 }
 
+/** A GroupInfo request started ahead of time (`ensureJoined`): its answer or its error. */
+type GroupInfoAnswer = { ok: GroupInfoResponse } | { error: unknown };
+
 const ROTATE_AFTER_MS = 7 * 24 * 3600 * 1000;
 /** Most KeyPackages {@link MlsManager.createKeyPackages} creates at once. */
 export const MAX_KEY_PACKAGES = 100;
@@ -538,7 +541,12 @@ function encryptOptions(v: unknown): EncryptOptions {
 
 export class MlsManager {
   private client: Client;
-  private queue: Promise<unknown> = Promise.resolve();
+  /**
+   * Operations waiting for the client, in two lanes: `priority` (a voice join, somebody waits for it) runs before the
+   * others; within a lane in order. One operation runs at a time ({@link run}).
+   */
+  private readonly lanes: { priority: Array<() => void>; normal: Array<() => void> } = { priority: [], normal: [] };
+  private busy = false;
   private readonly dirty = new Set<string>();
   private backupTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly keyCache = new Map<string, { at: number; pending: boolean; devices: Promise<Map<string, Uint8Array> | null> }>();
@@ -620,13 +628,13 @@ export class MlsManager {
       const [a, b] = args;
       switch (operation as ForwardedOperation) {
         case "ensureJoined":
-          return this.ensureJoined(str(a), { canCreate: obj(b).canCreate === true });
+          return this.ensureJoined(str(a), { canCreate: obj(b).canCreate === true, priority: obj(b).priority === true });
         case "processWelcomes":
           return this.processWelcomes(str(a));
         case "catchUp":
           return this.catchUp(str(a));
         case "selfUpdate":
-          return this.selfUpdate(str(a));
+          return this.selfUpdate(str(a), { priority: b !== undefined && obj(b).priority === true });
         case "removeLeaves": {
           const keys = args[2];
           if (keys === undefined) return this.removeLeaves(str(a), strs(b));
@@ -705,11 +713,34 @@ export class MlsManager {
     });
   }
 
-  /** Runs `fn` after every earlier operation: the client is mutated by one operation at a time. */
-  private run<T>(fn: () => Promise<T>): Promise<T> {
-    const next = this.queue.then(fn, fn);
-    this.queue = next.catch(() => undefined);
-    return next;
+  /**
+   * Runs `fn` after every earlier operation of its lane (a `priority` one also before the waiting normal ones, not
+   * before the one running): the client is mutated by one operation at a time.
+   */
+  private run<T>(fn: () => Promise<T>, priority = false): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      (priority ? this.lanes.priority : this.lanes.normal).push(() => {
+        let done: Promise<T>;
+        try {
+          done = fn();
+        } catch (e) {
+          done = Promise.reject(e);
+        }
+        done.then(resolve, reject).finally(() => {
+          this.busy = false;
+          this.pump();
+        });
+      });
+      this.pump();
+    });
+  }
+
+  private pump(): void {
+    if (this.busy) return;
+    const next = this.lanes.priority.shift() ?? this.lanes.normal.shift();
+    if (!next) return;
+    this.busy = true;
+    next();
   }
 
   private async persist(): Promise<void> {
@@ -746,18 +777,29 @@ export class MlsManager {
    * then catch-up of an existing local group, otherwise an external join, or the group creation if none
    * exists and `canCreate` (the user may post). Returns `no_group` when there is nothing to join yet.
    */
-  ensureJoined(q: string, opts: { canCreate: boolean }): Promise<"joined" | "no_group"> {
-    const remote = this.forwarded<"joined" | "no_group">("ensureJoined", [q, { canCreate: opts.canCreate }]);
+  ensureJoined(q: string, opts: { canCreate: boolean; priority?: boolean }): Promise<"joined" | "no_group"> {
+    const remote = this.forwarded<"joined" | "no_group">("ensureJoined", [q, { canCreate: opts.canCreate, priority: !!opts.priority }]);
     if (remote) return remote;
     return this.run(async () => {
       const { domain } = splitQualified(q);
-      if (!this.client.hasGroup(q)) await this.processWelcomesInner(domain);
+      let info: Promise<GroupInfoAnswer> | undefined;
+      if (!this.client.hasGroup(q)) {
+        // The Welcomes and the group's GroupInfo at once (one round trip instead of two); the GroupInfo is used only
+        // when no Welcome brought the group (a stale one ends in an epoch conflict and is fetched again).
+        const ds = this.ds(q);
+        info = ds.api.groupInfo(ds.id).then(
+          (ok) => ({ ok }),
+          (error: unknown) => ({ error }),
+        );
+        await this.processWelcomesInner(domain);
+      }
       if (this.client.hasGroup(q)) {
         await this.catchUpInner(q);
         if (this.client.hasGroup(q)) return "joined";
+        info = undefined;
       }
-      return this.joinInner(q, opts.canCreate);
-    });
+      return this.joinInner(q, opts.canCreate, info);
+    }, !!opts.priority);
   }
 
   private noteJoined(q: string) {
@@ -770,12 +812,14 @@ export class MlsManager {
     this.afterOwnCommit(q);
   }
 
-  private async joinInner(q: string, canCreate: boolean): Promise<"joined" | "no_group"> {
+  private async joinInner(q: string, canCreate: boolean, first?: Promise<GroupInfoAnswer>): Promise<"joined" | "no_group"> {
     const ds = this.ds(q);
     for (let attempt = 0; attempt < MAX_TRIES; attempt++) {
       let info: GroupInfoResponse;
       try {
-        info = await ds.api.groupInfo(ds.id);
+        const answer = attempt === 0 && first ? await first : null;
+        if (answer && "error" in answer) throw answer.error;
+        info = answer ? answer.ok : await ds.api.groupInfo(ds.id);
       } catch (e) {
         if (apiCode(e) !== "mls.no_group") throw e;
         if (!canCreate) return "no_group";
@@ -1019,8 +1063,8 @@ export class MlsManager {
    * Commits a self update (fresh leaf key, new epoch). Voice joins do this so that every voice session
    * starts on a fresh frame key (ENCRYPTION.md §5a). `false` without a local group.
    */
-  selfUpdate(q: string): Promise<boolean> {
-    const remote = this.forwarded<boolean>("selfUpdate", [q]);
+  selfUpdate(q: string, opts: { priority?: boolean } = {}): Promise<boolean> {
+    const remote = this.forwarded<boolean>("selfUpdate", [q, { priority: !!opts.priority }]);
     if (remote) return remote;
     return this.run(async () => {
       if (!this.client.hasGroup(q)) return false;
@@ -1028,7 +1072,7 @@ export class MlsManager {
       const known = this.caughtUp.get(q);
       if (!known || known.epoch !== this.client.currentEpoch(q) || this.now() - known.at > CAUGHT_UP_REUSE_MS) await this.catchUpInner(q);
       return this.commitInner(q, () => (this.client.hasGroup(q) ? this.client.selfUpdate(q) : null));
-    });
+    }, !!opts.priority);
   }
 
   /**
@@ -2379,7 +2423,7 @@ export class MlsManager {
     this.decrypted.clear();
     this.plainChecked.clear();
     this.ephemeralNonces.clear();
-    void this.queue.then(() => this.client.free());
+    void this.run(async () => this.client.free());
   }
 }
 

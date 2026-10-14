@@ -67,9 +67,11 @@ adapts `@tavrn/sdk` clients) and persistence injected (`persist`, `savePins`, `s
 `KeyStore` (secrets `PINS`, `META`, `VERIFIED`) and returns null when the device has no MLS client yet.
 Conversation ids are qualified (`qualify(domain, ulid)`, `splitQualified`). Methods:
 
-- joining: `ensureJoined(q, { canCreate })`, `processWelcomes(domain)`, `catchUp(q)`, `addMissingDevices(q, members)`,
-  `removeLeaves(q, identities, keys?)` (with `keys`, exactly the leaves with those signature keys), `selfUpdate(q)`,
-  `hasGroup`, `epoch`. `addMissingDevices` adds a claimed KeyPackage only when its leaf carries the identity and the
+- joining: `ensureJoined(q, { canCreate, priority? })`, `processWelcomes(domain)`, `catchUp(q)`,
+  `addMissingDevices(q, members)`, `removeLeaves(q, identities, keys?)` (with `keys`, exactly the leaves with those
+  signature keys), `selfUpdate(q, { priority? })`, `hasGroup`, `epoch`. Operations that change the client run one at a
+  time; `priority` (a voice join, somebody waits) runs before the waiting background work, not before the running
+  operation. Without a local group `ensureJoined` requests the Welcomes and the GroupInfo at once. `addMissingDevices` adds a claimed KeyPackage only when its leaf carries the identity and the
   attested key of the device it was claimed for (`keyPackageLeaf`);
 - content: `encrypt(q, content, opts?)`, `decrypt(q, envelope)` → `Decrypted`, `peek`, `encryptEphemeral`,
   `decryptEphemeral` (replay window), `voiceKey(q)`, `contentHeader(content)`. `opts.ctx` is the message's **signed

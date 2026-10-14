@@ -51,7 +51,10 @@ package instead of a git dependency.
   round trip instead of one per user); `LeafCleaner` skips the fresh lookups when the roster is unchanged since its
   last check without findings (`FRESH_REUSE_MS`, not with a pending removal of a leaf in the group); `selfUpdate` does
   not fetch the handshake log again within `CAUGHT_UP_REUSE_MS` of a complete catch-up at the same epoch (the
-  `ensureJoined` right before it), an epoch conflict still brings a missed commit.
+  `ensureJoined` right before it), an epoch conflict still brings a missed commit. `ensureJoined` and `selfUpdate`
+  take `priority` (a voice join): such an operation runs before the waiting background work (group-join probes,
+  Welcome processing, key uploads) instead of after it, and `ensureJoined` without a local group requests the
+  Welcomes and the GroupInfo at once (one round trip less for every probe and for the first join of a new channel).
 
 ### Fixed
 
