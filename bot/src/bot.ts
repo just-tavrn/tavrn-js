@@ -33,7 +33,7 @@ import { sealUnderPolicy, type GhostPolicy } from "./ghosts";
 import { NodeLink } from "./node-link";
 import { retryingFetch, type RetryOptions } from "./ratelimit";
 import { MessageTracker, validReaction } from "./reactions";
-import { MAX_ATTACHMENTS, asFile, type BotFile, type DownloadedFile, uploadCategory } from "./uploads";
+import { MAX_ATTACHMENTS, asFile, type BotFile, type DownloadedFile } from "./uploads";
 import { activityRequest, banSubject, checkContent, mentionList, normalizeContent, presenceRequest, reason as checkReason, timeoutMinutes, ulid, voiceStatus, type ActivityInput, type PresenceInput, reportQuery, type ReportStatus } from "./validate";
 import { appTokenClaims, type AppTokenClaims } from "./token";
 
