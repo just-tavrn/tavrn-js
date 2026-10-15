@@ -87,6 +87,38 @@ describe("reactions (js #18)", () => {
     await expect(bot.react(q, "not-an-id", "👍")).rejects.toThrow(/ULID/);
   });
 
+  it("reports the reactor the node names, skips its own reactions and lists the reactors", async () => {
+    await startBot();
+    const events: ReactionEvent[] = [];
+    bot.onReaction((e) => void events.push(e));
+    const q = `${DOMAIN}/${CHANNEL}`;
+    // The node's event shape (PROTOCOL.md §6): me is false for everyone, the change names the reactor.
+    node.emit("message.update", { ...message({ reactions: [{ emoji: "👍", count: 1, me: false }] }), reaction: { emoji: "👍", user: ALICE, user_id: ALICE_ID, added: true } });
+    node.emit("message.update", { ...message({ reactions: [{ emoji: "👍", count: 2, me: false }] }), reaction: { emoji: "👍", user: BOT_ADDRESS, user_id: "01J9ZK3G5M8Q2W4E6R8T0Y2B07", added: true } });
+    node.emit("message.update", { ...message({ reactions: [{ emoji: "👍", count: 1, me: false }] }), reaction: { emoji: "👍", user: ALICE, user_id: ALICE_ID, added: false } });
+    await settle();
+    expect(events.map((e) => [e.emoji, e.count, e.added, e.user, e.userId])).toEqual([
+      ["👍", 1, true, ALICE, ALICE_ID],
+      ["👍", 1, false, ALICE, ALICE_ID],
+    ]);
+    expect(bot.reactionsOf(q, MSG)).toEqual(new Map([["👍", 1]]));
+
+    const page = { items: [{ user: ALICE, user_id: ALICE_ID, created_at: "2026-10-15T10:00:00.000Z" }], next: "2026-10-15T10:00:00.000Z_X" };
+    node.route("GET", /\/reactions\//, (c) => (c.query.get("after") ? { items: [], next: null } : page));
+    await expect(bot.reactors(q, MSG, "👍", { limit: 1 })).resolves.toEqual({ items: [{ user: ALICE, userId: ALICE_ID, createdAt: "2026-10-15T10:00:00.000Z" }], next: page.next });
+    await expect(bot.reactors(q, MSG, "👍", { after: page.next })).resolves.toEqual({ items: [], next: null });
+    const calls = node.requests(/\/reactions\//, "GET");
+    expect(calls.map((c) => `${decodeURIComponent(c.path)}?${c.query.toString()}`)).toEqual([
+      `/api/v1/conversations/${CHANNEL}/messages/${MSG}/reactions/👍?limit=1`,
+      `/api/v1/conversations/${CHANNEL}/messages/${MSG}/reactions/👍?after=${encodeURIComponent(page.next)}`,
+    ]);
+    await expect(bot.reactors(q, MSG, "two words")).rejects.toThrow(RangeError);
+    await expect(bot.reactors(q, MSG, "👍", { limit: 101 })).rejects.toThrow(/limit/);
+    await expect(bot.reactors(q, MSG, "👍", { after: "" })).rejects.toThrow(/after/);
+    await expect(bot.reactors(q, "nope", "👍")).rejects.toThrow(/ULID/);
+    expect(node.requests(/\/reactions\//, "GET")).toHaveLength(2);
+  });
+
   it("reacts from a received message", async () => {
     await startBot();
     node.route("PUT", /\/reactions\//, () => message({ reactions: [{ emoji: "👀", count: 1, me: true }] }));

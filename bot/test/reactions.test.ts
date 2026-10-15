@@ -22,9 +22,9 @@ describe("MessageTracker", () => {
   it("reports added and removed reactions against the remembered counts", () => {
     const t = new MessageTracker();
     t.remember(q, m([{ emoji: "👍", count: 1 }]));
-    expect(t.update(q, m([{ emoji: "👍", count: 2 }])).reactions).toEqual([{ emoji: "👍", count: 2, added: true, user: null }]);
-    expect(t.update(q, m([{ emoji: "👍", count: 2 }, { emoji: "🎉", count: 1 }])).reactions).toEqual([{ emoji: "🎉", count: 1, added: true, user: null }]);
-    expect(t.update(q, m([{ emoji: "🎉", count: 1 }])).reactions).toEqual([{ emoji: "👍", count: 0, added: false, user: null }]);
+    expect(t.update(q, m([{ emoji: "👍", count: 2 }])).reactions).toEqual([{ emoji: "👍", count: 2, added: true, user: null, userId: null }]);
+    expect(t.update(q, m([{ emoji: "👍", count: 2 }, { emoji: "🎉", count: 1 }])).reactions).toEqual([{ emoji: "🎉", count: 1, added: true, user: null, userId: null }]);
+    expect(t.update(q, m([{ emoji: "🎉", count: 1 }])).reactions).toEqual([{ emoji: "👍", count: 0, added: false, user: null, userId: null }]);
     expect(t.update(q, m([{ emoji: "🎉", count: 1 }])).reactions).toEqual([]);
     expect(t.counts(q, "M")).toEqual(new Map([["🎉", 1]]));
   });
@@ -32,10 +32,12 @@ describe("MessageTracker", () => {
   it("reports nothing for unknown messages unless the node names the reaction, and notices edits", () => {
     const t = new MessageTracker();
     expect(t.update(q, m([{ emoji: "👍", count: 3 }]))).toEqual({ reactions: [], edited: false });
-    expect(t.update(q, m([{ emoji: "👍", count: 4 }], { reaction: { emoji: "👍", user: "Alice@H.test", added: true } })).reactions).toEqual([{ emoji: "👍", count: 4, added: true, user: "alice@h.test" }]);
-    expect(t.update(q, { ...m([{ emoji: "✅", count: 1 }]), id: "N", reaction: { emoji: "✅", user: "bob@h.test", added: true } }).reactions).toEqual([{ emoji: "✅", count: 1, added: true, user: "bob@h.test" }]);
+    expect(t.update(q, m([{ emoji: "👍", count: 4 }], { reaction: { emoji: "👍", user: "Alice@H.test", user_id: "01J9ZK3G5M8Q2W4E6R8T0Y2U01", added: true } })).reactions).toEqual([{ emoji: "👍", count: 4, added: true, user: "alice@h.test", userId: "01J9ZK3G5M8Q2W4E6R8T0Y2U01" }]);
+    expect(t.update(q, { ...m([{ emoji: "✅", count: 1 }]), id: "N", reaction: { emoji: "✅", user: "bob@h.test", added: true } }).reactions).toEqual([{ emoji: "✅", count: 1, added: true, user: "bob@h.test", userId: null }]);
+    // A removal the node names: the count may drop to zero (the emoji is gone from the list).
+    expect(t.update(q, { ...m([]), id: "N", reaction: { emoji: "✅", user: "bob@h.test", user_id: "U2", added: false } }).reactions).toEqual([{ emoji: "✅", count: 0, added: false, user: "bob@h.test", userId: "U2" }]);
     // A malformed field is ignored (the counts decide).
-    expect(t.update(q, m([{ emoji: "👍", count: 5 }], { reaction: { emoji: 1 } })).reactions).toEqual([{ emoji: "👍", count: 5, added: true, user: null }]);
+    expect(t.update(q, m([{ emoji: "👍", count: 5 }], { reaction: { emoji: 1 } })).reactions).toEqual([{ emoji: "👍", count: 5, added: true, user: null, userId: null }]);
     expect(t.update(q, m([{ emoji: "👍", count: 5 }], { edited_at: "2026-10-15T10:00:00Z" })).edited).toBe(true);
     expect(t.update(q, m([{ emoji: "👍", count: 5 }], { edited_at: "2026-10-15T10:00:00Z" })).edited).toBe(false);
   });

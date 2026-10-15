@@ -153,6 +153,17 @@ describe("TavrnApi", () => {
     expect((calls[2]!.init.headers as Record<string, string>)["Tavrn-Scene-Name"]).toBeUndefined();
   });
 
+  it("lists the reactors of an emoji with a percent-encoded emoji and the paging cursor", async () => {
+    const page = { items: [{ user: "alice@n.example", user_id: "U1", created_at: "2026-10-15T10:00:00.000Z" }], next: "c1" };
+    const { impl, calls } = fetchMock([{ status: 200, body: page }, { status: 200, body: { items: [], next: null } }]);
+    const api = new TavrnApi({ baseUrl: "https://n.example", fetchImpl: impl });
+    await expect(api.reactions.list("C", "M", "👍", { limit: 1 })).resolves.toEqual(page);
+    expect(calls[0]!.url).toBe("https://n.example/api/v1/conversations/C/messages/M/reactions/%F0%9F%91%8D?limit=1");
+    expect(calls[0]!.init.method).toBe("GET");
+    await api.reactions.list("C", "M", "<:party:01J00000000000000000000000>", { after: "c1" });
+    expect(calls[1]!.url).toBe("https://n.example/api/v1/conversations/C/messages/M/reactions/%3C%3Aparty%3A01J00000000000000000000000%3E?after=c1");
+  });
+
   it("reports network errors as network.error", async () => {
     const api = new TavrnApi({ fetchImpl: (async () => { throw new Error("offline"); }) as unknown as typeof fetch });
     const err = await api.node.info().catch((e: unknown) => e as TavrnApiError);

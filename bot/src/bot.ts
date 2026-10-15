@@ -163,9 +163,10 @@ export interface BotAttachment {
 }
 
 /**
- * A reaction was added or removed (`message.update`, PROTOCOL.md §7). `user` is null while the node does not say who
- * reacted (tavrn-protocol#43); without it the change is computed from the counts of messages the bot has seen since it
- * started, so changes on older messages are reported only once the node names the user.
+ * A reaction was added or removed (`message.update` with its `reaction` field, PROTOCOL.md §6, §7): `user` and `userId`
+ * name the reactor, also on messages the bot has never seen. The bot's own reactions are not reported. From an older
+ * node that sends only the new counts, the change is computed from the counts of messages the bot has seen since it
+ * started and `user`/`userId` are null.
  */
 export interface ReactionEvent {
   node: string;
@@ -178,7 +179,10 @@ export interface ReactionEvent {
   /** The count after the change. */
   count: number;
   added: boolean;
+  /** The reactor's address (null only from older nodes). */
   user: string | null;
+  /** The reactor's id on the node hosting the conversation (null only from older nodes). */
+  userId: string | null;
   encrypted: boolean;
   /** The message envelope after the change (content not decrypted; use {@link Bot.messages} for it). */
   message: Message;
@@ -1051,7 +1055,8 @@ export class Bot {
     const changes = this.tracker.update(q, m);
     const roomId = this.channels.get(q)?.roomId ?? null;
     for (const r of changes.reactions) {
-      this.emit("reaction", { node: link.domain, conversation: q, conversationId: m.conversation_id, roomId, messageId: m.id, emoji: r.emoji, count: r.count, added: r.added, user: r.user, encrypted: !!m.encrypted, message: m });
+      if (r.user !== null && r.user === this.me?.address) continue; // own reactions, like own messages
+      this.emit("reaction", { node: link.domain, conversation: q, conversationId: m.conversation_id, roomId, messageId: m.id, emoji: r.emoji, count: r.count, added: r.added, user: r.user, userId: r.userId, encrypted: !!m.encrypted, message: m });
     }
     if (changes.edited && m.author !== this.me?.address && m.device_id) {
       void this.track(
@@ -1483,7 +1488,29 @@ export class Bot {
     return m;
   }
 
-  /** The reaction counts of a message the bot has seen since it started (null otherwise; {@link messages} fetches it). */
+  /**
+   * Who reacted with `emoji` on a message (`messages:read`, PROTOCOL.md §7 "Reactions"), oldest first: one page of at
+   * most `limit` (1–100, default 50) reactors; pass `next` as `after` for the next page. Works for any message the bot
+   * may read, also those from before it started.
+   */
+  async reactors(
+    conversation: string | { conversation: string },
+    messageId: string,
+    emoji: string,
+    query: { after?: string; limit?: number } = {},
+  ): Promise<{ items: { user: string; userId: string; createdAt: string }[]; next: string | null }> {
+    if (!validReaction(emoji)) throw new RangeError("emoji: a Unicode emoji (at most 16 characters), :name: or <:name:ID>");
+    if (query.limit !== undefined && !(Number.isInteger(query.limit) && query.limit >= 1 && query.limit <= 100)) throw new RangeError("limit: 1 to 100");
+    if (query.after !== undefined && (typeof query.after !== "string" || query.after.length === 0 || query.after.length > 128)) throw new RangeError("after: the next value of a previous page");
+    const { id, link } = this.target(conversation);
+    const page = await link.api.reactions.list(id, ulid("messageId", messageId), emoji, query);
+    return { items: page.items.map((r) => ({ user: r.user, userId: r.user_id, createdAt: r.created_at })), next: page.next ?? null };
+  }
+
+  /**
+   * The reaction counts of a message the bot has seen since it started (null otherwise; {@link messages} fetches it,
+   * {@link reactors} lists who reacted).
+   */
   reactionsOf(conversation: string | { conversation: string }, messageId: string): Map<string, number> | null {
     return this.tracker.counts(this.qualified(conversation), messageId);
   }

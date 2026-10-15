@@ -3372,6 +3372,14 @@ export type MessageSnapshot = {
     text: string;
 };
 
+/**
+ * The `data` of a `message.update` event: the message without per-viewer state and, for a reaction change, the
+ * change.
+ */
+export type MessageUpdate = Message & {
+    reaction?: null | ReactionChange;
+};
+
 export type MineList = {
     bytes: number;
     /**
@@ -4723,9 +4731,58 @@ export type Reaction = {
     count: number;
     emoji: string;
     /**
-     * Did the requester react with it?
+     * Did the requester react with it? Always `false` in events (PROTOCOL.md §6): only responses carry the
+     * caller's view.
      */
     me: boolean;
+};
+
+/**
+ * The reaction change a `message.update` names (PROTOCOL.md §6): absent on every other cause of the event.
+ */
+export type ReactionChange = {
+    /**
+     * `false` for a removal.
+     */
+    added: boolean;
+    emoji: string;
+    /**
+     * The reactor, `username@domain`.
+     */
+    user: string;
+    /**
+     * The reactor's id on the hosting node.
+     */
+    user_id: string;
+};
+
+/**
+ * One user who reacted with an emoji.
+ */
+export type Reactor = {
+    /**
+     * When the user reacted (RFC 3339).
+     */
+    created_at: string;
+    /**
+     * `username@domain`
+     */
+    user: string;
+    /**
+     * The user's id on this node.
+     */
+    user_id: string;
+};
+
+export type ReactorList = {
+    /**
+     * Oldest reaction first.
+     */
+    items: Array<Reactor>;
+    /**
+     * `after` of the next page; null on the last page.
+     */
+    next?: string | null;
 };
 
 export type ReadRequest = {
@@ -10493,6 +10550,43 @@ export type RemoveConversationReactionResponses = {
 };
 
 export type RemoveConversationReactionResponse = RemoveConversationReactionResponses[keyof RemoveConversationReactionResponses];
+
+export type ListReactorsData = {
+    body?: never;
+    path: {
+        conversation_id: string;
+        message_id: string;
+        /**
+         * Percent-encoded
+         */
+        emoji: string;
+    };
+    query?: {
+        /**
+         * `next` of the previous page (opaque).
+         */
+        after?: string | null;
+        /**
+         * 1–100 (default 50).
+         */
+        limit?: number | null;
+    };
+    url: '/api/v1/conversations/{conversation_id}/messages/{message_id}/reactions/{emoji}';
+};
+
+export type ListReactorsErrors = {
+    400: ProblemDetails;
+    403: ProblemDetails;
+    404: ProblemDetails;
+};
+
+export type ListReactorsError = ListReactorsErrors[keyof ListReactorsErrors];
+
+export type ListReactorsResponses = {
+    200: ReactorList;
+};
+
+export type ListReactorsResponse = ListReactorsResponses[keyof ListReactorsResponses];
 
 export type AddConversationReactionData = {
     body?: never;

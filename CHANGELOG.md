@@ -24,6 +24,10 @@ package instead of a git dependency.
 
 ### Added
 
+- **Reactors** (tavrn-protocol#43, tavrn-node#83): the `reaction` event names the reactor from the node's `reaction`
+  field (`user`, the new `userId`), also on messages the bot has never seen, and no longer reports the bot's own
+  reactions; `bot.reactors(conversation, messageId, emoji, { after, limit })` and `api.reactions.list(conversationId,
+  messageId, emoji, { after, limit })` page who reacted with an emoji (`GET /conversations/{id}/messages/{message_id}/reactions/{emoji}`).
 - **Bot coverage** (`@tavrn/bot`, `bot/docs/COVERAGE.md` maps every feature a bot may use to the runtime): the typed
   `reaction` event (`bot.onReaction`, fixes #18; the reacting user once the node names it, tavrn-protocol#43) and
   `messageEdit`, `messageDelete`, `memberJoin`, `memberLeave`, `thread` and `dmRequest` events; helpers `messages`
