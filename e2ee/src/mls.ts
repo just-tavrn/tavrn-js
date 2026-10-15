@@ -45,7 +45,7 @@ import {
 } from "@tavrn/sdk";
 import { chainKeys, chainReaches } from "./identity";
 import { LruMap, fingerprint } from "./lru";
-import { envelopeFields, signatureNonce, type PlainEnvelope, type PlainStatus, type SignedFields } from "./plaintext";
+import { envelopeFields, envelopeSnapshot, sameSnapshot, signatureNonce, signedInputDigest, type PlainEnvelope, type PlainStatus, type SignedFields } from "./plaintext";
 import { assertEmbeds, withValidEmbeds } from "./embeds";
 import { sealedContent, webhookPayload, type SealedBy, type SealedContent } from "./sealed";
 import { TRUST_BACKUP_ULID, mergeTrust, openTrust, sealTrust, type TrustRecord } from "./trust";
@@ -646,10 +646,16 @@ export class MlsManager {
   /** `conversation|epoch|nonce` → the message id that used it first (§5.2 replay rule). */
   private readonly nonces = new LruMap<string, string>(NONCE_WINDOW);
   private readonly backupTried = new Set<string>();
-  /** Plaintext signature checks by message id and signature, with the fingerprint of the signed input. */
-  private readonly plainChecked = new LruMap<string, { fp: string; status: PlainStatus }>(DECRYPT_CACHE_LIMIT);
-  /** The same checks by envelope object (a re-render passes the same objects): no canonicalization on a hit. */
-  private plainByEnvelope = new WeakMap<PlainEnvelope, { q: string; status: PlainStatus }>();
+  /**
+   * Plaintext signature checks by message id and signature, with the SHA-256 of the exact signed input
+   * ({@link signedInputDigest}): an envelope changed under the same id and signature is checked again.
+   */
+  private readonly plainChecked = new LruMap<string, { digest: string; status: PlainStatus }>(DECRYPT_CACHE_LIMIT);
+  /**
+   * The same checks by envelope object (a re-render passes the same objects): no canonicalization on a hit, which
+   * also requires the object's values to be unchanged since ({@link envelopeSnapshot}).
+   */
+  private plainByEnvelope = new WeakMap<PlainEnvelope, { q: string; snapshot: unknown[]; status: PlainStatus }>();
   private readonly plainNonces = new LruMap<string, string>(NONCE_WINDOW);
   /** Consecutive failed background writes of the bookkeeping ({@link MlsBackgroundError}). */
   private saveFailures = 0;
@@ -1720,23 +1726,29 @@ export class MlsManager {
    */
   async verifyPlaintext(conversationId: string, m: PlainEnvelope): Promise<PlainStatus> {
     if (!m.signature) return "unsigned";
-    // The same envelope object again (a re-render): its last result, without canonicalizing it again.
+    // The same, unchanged envelope object again (a re-render): its last result, without canonicalizing it again.
+    const snapshot = envelopeSnapshot(m);
     const seen = this.plainByEnvelope.get(m);
-    if (seen?.q === conversationId) return seen.status;
+    if (seen?.q === conversationId && sameSnapshot(seen.snapshot, snapshot)) return seen.status;
     const fields = envelopeFields(conversationId, m);
     const nonce = signatureNonce(m.signature);
     if (!fields || !nonce || !m.content || typeof m.content !== "object" || Array.isArray(m.content)) return "invalid";
-    // Cached by the signed input itself: an envelope changed under the same id and signature is checked again.
-    const cacheKey = `${m.id}|${m.signature}`;
-    const fp = fingerprint(`${JSON.stringify(fields)}|${jcs(m.content)}`);
+    // Cached by a SHA-256 of the signed input: an envelope changed under the same id and signature is checked again.
+    // The input is serialized once, before any await: the digest and the check below cover the same bytes.
+    const fieldsJson = JSON.stringify(fields);
+    const contentJcs = jcs(m.content);
+    const signature = m.signature;
+    const id = m.id;
+    const cacheKey = `${id}|${signature}`;
+    const digest = await signedInputDigest(fieldsJson, contentJcs, signature);
     const cached = this.plainChecked.get(cacheKey);
-    if (cached?.fp === fp) {
-      this.plainByEnvelope.set(m, { q: conversationId, status: cached.status });
+    if (cached?.digest === digest) {
+      this.plainByEnvelope.set(m, { q: conversationId, snapshot, status: cached.status });
       return cached.status;
     }
     let key: Uint8Array | undefined;
     try {
-      key = (await this.verifiedDevices(m.author))?.get(fields.device_id) ?? (await this.verifiedDevices(m.author, true))?.get(fields.device_id);
+      key = (await this.verifiedDevices(fields.author))?.get(fields.device_id) ?? (await this.verifiedDevices(fields.author, true))?.get(fields.device_id);
     } catch {
       key = undefined;
     }
@@ -1744,7 +1756,7 @@ export class MlsManager {
     if (!key) return "unverifiable";
     let status: PlainStatus;
     try {
-      status = verifyPlaintext(JSON.stringify(fields), jcs(m.content), m.signature, key) ? "valid" : "invalid";
+      status = verifyPlaintext(fieldsJson, contentJcs, signature, key) ? "valid" : "invalid";
     } catch {
       return "unverifiable";
     }
@@ -1752,11 +1764,11 @@ export class MlsManager {
       // A second message with the same nonce in a conversation is a replay (§10.3).
       const replayKey = `${conversationId}|${nonce}`;
       const seen = this.plainNonces.get(replayKey);
-      if (seen && seen !== m.id) status = "replay";
-      else this.plainNonces.set(replayKey, m.id);
+      if (seen && seen !== id) status = "replay";
+      else this.plainNonces.set(replayKey, id);
     }
-    this.plainChecked.set(cacheKey, { fp, status });
-    this.plainByEnvelope.set(m, { q: conversationId, status });
+    this.plainChecked.set(cacheKey, { digest, status });
+    this.plainByEnvelope.set(m, { q: conversationId, snapshot, status });
     return status;
   }
 
