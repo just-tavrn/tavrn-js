@@ -1,0 +1,6 @@
+# Labels of this repository on top of the common set of scripts/github-labels.sh (name|colour|description).
+sdk|1d76db|@tavrn/sdk: API client, WebSocket, permissions, generated types
+e2ee|5319e7|@tavrn/e2ee: MLS session manager, key storage, codecs, search index
+bot|0e8a16|@tavrn/bot: bot runtime and example bots
+protocol|fbca04|Needs a change or clarification in tavrn-protocol
+ci|ededed|Workflows and build tooling
