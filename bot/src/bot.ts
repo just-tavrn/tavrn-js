@@ -23,6 +23,7 @@ import { TavrnApi, TavrnApiError, b64urlEncode, newUlid, resolveNode, type Attac
 import { threadTitle } from "./threads";
 import { CommandRouter, type CommandCrypto, type CommandHandler, type InvokeContext, type ReplyContent } from "./commands";
 import { ComponentRouter, type ComponentHandler, type Matcher } from "./components";
+import { ConversationDirectory, type ChannelInfo, type DirectoryLink } from "./directory";
 import { BotError } from "./errors";
 import { createKeyFile, defaultKeyFile, identityKeyOf, readKey } from "./keyfile";
 import { consoleLogger, type BotLogger } from "./logger";
@@ -384,15 +385,6 @@ export interface BotEvents {
 
 type Listener<A extends unknown[]> = (...args: A) => void | Promise<void>;
 
-interface ChannelInfo {
-  node: string;
-  roomId: string;
-  id: string;
-  kind: string;
-  encrypted: boolean;
-  noBots: boolean;
-}
-
 /** The backup store of a bot without `historyBackup`: lists nothing, has nothing, keeps nothing. */
 const NO_BACKUPS = {
   list: async () => ({ items: [] }),
@@ -418,9 +410,11 @@ export class Bot {
   private readonly components: ComponentRouter;
   private readonly links = new Map<string, NodeLink>();
   private readonly connecting = new Map<string, Promise<NodeLink | null>>();
-  private readonly channels = new Map<string, ChannelInfo>();
-  /** DMs: whether they are encrypted (always, on current nodes) and their members. */
-  private readonly direct = new Map<string, { encrypted: boolean; members: string[] }>();
+  /** Room channels and DMs the bot knows, per node. */
+  private readonly dir: ConversationDirectory;
+  private readonly channels: Map<string, ChannelInfo>;
+  /** Running resyncs per node; a request during one runs it once more afterwards. */
+  private readonly syncs = new Map<string, { again: boolean; done: Promise<void> }>();
   private readonly tracker = new MessageTracker();
   /** Nodes announcing `threads.client_ids` (PROTOCOL.md §7e), per domain. */
   private readonly clientIds = new Map<string, Promise<boolean>>();
@@ -446,6 +440,8 @@ export class Bot {
     this.token = opts.token.trim();
     this.commands = new CommandRouter({ logger: this.logger, autoDeferMs: opts.autoDeferMs });
     this.components = new ComponentRouter({ logger: this.logger, autoDeferMs: opts.autoDeferMs });
+    this.dir = new ConversationDirectory({ logger: this.logger, onRoomLoaded: (link, channels) => this.joinEager(link, channels) });
+    this.channels = this.dir.channels;
     this.allowInsecure = opts.allowInsecure ?? /^http:\/\//i.test(opts.node.trim());
     this.fetchImpl = opts.rateLimit === false ? opts.fetchImpl : retryingFetch(opts.fetchImpl ?? ((input, init) => fetch(input, init)), { logger: this.logger, ...opts.rateLimit });
     const waits = opts.rateLimit === false ? 0 : (opts.rateLimit?.retries ?? 3) * (opts.rateLimit?.maxWaitMs ?? 30_000);
@@ -823,44 +819,61 @@ export class Bot {
     return running;
   }
 
-  /** After connecting or a gap: Welcomes, the rooms and their channels, eager joins and catch-up. */
-  private async syncNode(link: NodeLink): Promise<void> {
+  /**
+   * After connecting or a gap: Welcomes, the rooms and their channels, eager joins and catch-up. Single flight per
+   * node: a resync requested while one runs (a flapping connection, `ready` and `resync` back to back) runs it once
+   * more afterwards instead of overlapping.
+   */
+  private syncNode(link: NodeLink): Promise<void> {
+    const running = this.syncs.get(link.domain);
+    if (running) {
+      running.again = true;
+      return running.done;
+    }
+    const sync = { again: false, done: Promise.resolve() };
+    sync.done = (async () => {
+      try {
+        do {
+          sync.again = false;
+          await this.syncNodeOnce(link);
+        } while (sync.again && this.state !== "stopping" && this.state !== "stopped");
+      } finally {
+        this.syncs.delete(link.domain);
+      }
+    })();
+    this.syncs.set(link.domain, sync);
+    return sync.done;
+  }
+
+  private async syncNodeOnce(link: NodeLink): Promise<void> {
     const mls = this.mls;
     if (!mls || this.state === "stopping" || this.state === "stopped") return;
     await mls.processWelcomes(link.domain).catch((e: unknown) => this.logger.warn("Welcomes could not be processed", { node: link.domain, error: e }));
-    let rooms: { id: string }[];
     try {
-      rooms = await link.api.rooms.list();
+      await this.dir.refreshRooms(link);
     } catch (e) {
       this.logger.warn("rooms could not be listed", { node: link.domain, error: e });
       return;
     }
-    for (const room of rooms) await this.loadRoom(link, room.id);
-    for (const q of this.channels.keys()) {
-      if (q.startsWith(`${link.domain}/`) && mls.hasGroup(q)) await mls.catchUp(q).catch(() => undefined);
+    // Commits of the gap are lost with its events: every group of the node catches up (the channel list carries no
+    // epoch to tell which ones are behind). The MLS queue runs them one after another.
+    for (const q of [...this.channels.keys()]) {
+      if (q.startsWith(`${link.domain}/`) && mls.hasGroup(q)) await mls.catchUp(q).catch((e: unknown) => this.logger.debug("catch-up failed", { conversation: q, error: e }));
     }
   }
 
   /** Reads a room's channels (the ones the bot can view) and joins their groups when eager. */
-  private async loadRoom(link: NodeLink, roomId: string): Promise<void> {
-    let channels: Channel[];
-    try {
-      channels = (await link.api.rooms.get(roomId)).channels;
-    } catch (e) {
-      this.logger.warn("room could not be loaded", { node: link.domain, room: roomId, error: e });
-      return;
-    }
-    for (const q of [...this.channels.keys()]) if (this.channels.get(q)?.roomId === roomId && q.startsWith(`${link.domain}/`)) this.channels.delete(q);
-    for (const c of channels) this.rememberChannel(link.domain, c);
+  private loadRoom(link: NodeLink, roomId: string): Promise<void> {
+    return this.dir.loadRoom(link, roomId);
+  }
+
+  /** Eager joins of a room's channels (after the directory loaded them). */
+  private async joinEager(link: DirectoryLink, channels: Channel[]): Promise<void> {
     if (this.opts.joinPolicy === "lazy") return;
     for (const c of channels) {
       const q = qualify(link.domain, c.id);
       if (this.eagerTarget(q)) await this.join(q, false);
     }
-  }
-
-  private rememberChannel(node: string, c: Channel) {
-    this.channels.set(qualify(node, c.id), { node, roomId: c.room_id, id: c.id, kind: c.kind, encrypted: !!c.encrypted, noBots: !!c.no_bots_effective });
   }
 
   private eagerTarget(q: string): boolean {
@@ -923,7 +936,7 @@ export class Bot {
       case "channel.update": {
         const c = data as unknown as Channel;
         if (typeof c.id !== "string" || typeof c.room_id !== "string") break;
-        this.rememberChannel(link.domain, c);
+        this.dir.remember(link.domain, c);
         const q = qualify(link.domain, c.id);
         if (this.opts.joinPolicy !== "lazy" && this.eagerTarget(q)) void this.track(this.join(q, false));
         break;
@@ -1037,8 +1050,8 @@ export class Bot {
     const node = typeof data.node === "string" && data.node ? data.node : link.domain;
     const roomId = String(data.room_id ?? "");
     this.logger.info("removed from a room", { node, room: roomId, reason: data.reason });
-    for (const [q, c] of [...this.channels]) if (c.node === node && c.roomId === roomId) this.channels.delete(q);
-    if (node !== this.claims?.iss && ![...this.channels.values()].some((c) => c.node === node)) {
+    const stillThere = this.dir.forgetRoom(node, roomId);
+    if (node !== this.claims?.iss && !stillThere) {
       this.links.get(node)?.close();
       this.links.delete(node);
     }
@@ -1178,17 +1191,16 @@ export class Bot {
 
   /** Whether a conversation is end-to-end encrypted: known channels, else the DM itself. */
   private async isEncrypted(link: NodeLink, q: string, id: string): Promise<boolean> {
-    const known = this.channels.get(q)?.encrypted ?? this.direct.get(q)?.encrypted;
+    const known = this.channels.get(q)?.encrypted ?? this.dir.direct.get(q)?.encrypted;
     if (known !== undefined) return known;
     try {
       const c = await link.api.conversations.get(id);
-      this.direct.set(q, { encrypted: !!c.encrypted, members: (c.members ?? []).map((u) => u.address) });
+      this.dir.rememberDirect(q, { encrypted: !!c.encrypted, members: (c.members ?? []).map((u) => u.address) });
       return !!c.encrypted;
     } catch (e) {
       if (code(e) !== "conversation.not_found" && !(e instanceof TavrnApiError && e.status === 404)) throw e;
     }
-    for (const room of await link.api.rooms.list()) await this.loadRoom(link, room.id);
-    const after = this.channels.get(q);
+    const after = await this.dir.find(link, q);
     if (!after) throw new BotError("not_member", `The bot is not a member of ${q}`);
     return after.encrypted;
   }
@@ -1219,7 +1231,7 @@ export class Bot {
   /** Joins an encrypted conversation's group before writing; in DMs also adds the members' new devices (§4.2). */
   private async prepareEncrypted(q: string): Promise<void> {
     if (!(await this.join(q, true))) throw new BotError("not_member", `The bot could not join the encryption group of ${q}`);
-    const dm = this.direct.get(q);
+    const dm = this.dir.direct.get(q);
     if (dm?.members.length) await this.mls!.addMissingDevices(q, dm.members).catch((e: unknown) => this.logger.warn("devices of the DM could not be added", { conversation: q, error: e }));
   }
 
@@ -1580,11 +1592,7 @@ export class Bot {
 
   /** The room channel behind a conversation (threads exist in room channels only). */
   private async channelOf(link: NodeLink, q: string): Promise<ChannelInfo> {
-    let c = this.channels.get(q);
-    if (!c) {
-      for (const room of await link.api.rooms.list()) await this.loadRoom(link, room.id);
-      c = this.channels.get(q);
-    }
+    const c = await this.dir.find(link, q);
     if (!c) throw new BotError("not_member", "Threads exist in room channels the bot can view only");
     return c;
   }
@@ -1885,7 +1893,7 @@ export class Bot {
     const home = this.home!;
     const c = await home.api.conversations.create({ kind: "dm", members: [user] });
     const q = qualify(home.domain, c.id);
-    this.direct.set(q, { encrypted: !!c.encrypted, members: (c.members ?? []).map((u) => u.address) });
+    this.dir.rememberDirect(q, { encrypted: !!c.encrypted, members: (c.members ?? []).map((u) => u.address) });
     if (c.encrypted) await this.prepareEncrypted(q);
     return q;
   }
