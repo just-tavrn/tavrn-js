@@ -528,6 +528,31 @@ export const CAUGHT_UP_REUSE_MS = 3_000;
 const KEY_REFETCH_MS = 2_000;
 /** Device lists are looked up again after this (the key cache TTL of nodes, FEDERATION.md §3.5). */
 export const KEY_TTL_MS = 3600 * 1000;
+
+/**
+ * Bounds of a keys document (`GET /users/{username}/keys`) the client checks: attested devices (the node's own cap
+ * for other nodes' users), retired devices (what a node lists at most) and continuity statements (a key is rotated
+ * rarely). Only a hostile home node serves more; every entry costs signature checks, so such a document is refused as
+ * a whole ({@link KeysDocumentError}) before anything in it is checked.
+ */
+export const KEYS_MAX_DEVICES = 100;
+export const KEYS_MAX_RETIRED = 1000;
+export const KEYS_MAX_CONTINUITY = 100;
+
+/**
+ * A keys document beyond {@link KEYS_MAX_DEVICES}, {@link KEYS_MAX_RETIRED} or {@link KEYS_MAX_CONTINUITY}: none of
+ * its devices is verified. The refusal is kept like a lookup ({@link KEY_TTL_MS}), so the document is not fetched and
+ * refused again for every message.
+ */
+export class KeysDocumentError extends Error {
+  constructor(
+    readonly address: string,
+    readonly detail: string,
+  ) {
+    super(`The keys document of ${address} was refused: ${detail}`);
+    this.name = "KeysDocumentError";
+  }
+}
 /** A failed trust sync before a first-use pin is tried again after this. */
 export const TRUST_RETRY_MS = 60_000;
 /** Ephemeral events whose nonces are remembered for replay detection. */
@@ -1880,7 +1905,11 @@ export class MlsManager {
         return d;
       },
       (e: unknown) => {
-        if (this.keyCache.get(address) === entry) this.keyCache.delete(address);
+        if (e instanceof KeysDocumentError) {
+          // Not transient: the refusal stands for the lookup's lifetime.
+          entry.pending = false;
+          entry.at = this.now();
+        } else if (this.keyCache.get(address) === entry) this.keyCache.delete(address);
         throw e;
       },
     );
@@ -1894,6 +1923,10 @@ export class MlsManager {
     const keys = await this.deps.api.keys(address);
     const out = new Map<string, Uint8Array>();
     if (keys.user !== address) return out;
+    const counted = (list: unknown) => (Array.isArray(list) ? list.length : 0);
+    if (counted(keys.devices) > KEYS_MAX_DEVICES) throw new KeysDocumentError(address, `${counted(keys.devices)} devices, at most ${KEYS_MAX_DEVICES} accepted`);
+    if (counted(keys.retired) > KEYS_MAX_RETIRED) throw new KeysDocumentError(address, `${counted(keys.retired)} retired devices, at most ${KEYS_MAX_RETIRED} accepted`);
+    if (counted(keys.continuity) > KEYS_MAX_CONTINUITY) throw new KeysDocumentError(address, `${counted(keys.continuity)} continuity statements, at most ${KEYS_MAX_CONTINUITY} accepted`);
     // Older nodes do not send `kind`: their accounts count as users.
     this.kinds.set(address, typeof keys.kind === "string" ? keys.kind : "user");
     if (!keys.identity_public_key) return out;
