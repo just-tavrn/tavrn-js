@@ -1,0 +1,51 @@
+# What a bot can do: protocol coverage of `@tavrn/bot`
+
+This table maps every protocol feature a bot may use (the route table and scopes of `APPLICATIONS.md` §2.4–§2.5)
+to what `@tavrn/bot` offers. **Typed** = a documented helper or event of the runtime (validated input, encryption
+where the conversation needs it, errors as `BotError` / `TavrnApiError`); **raw** = reachable only through
+`bot.api(node)` (the `@tavrn/sdk` client with the bot's credentials on that node) or the raw `event` stream;
+**closed** = the node does not let bots do it (not in the route table, or no scope unlocks it).
+
+Status as of the gap analysis (before this round); the column "now" is updated as helpers land.
+
+| Feature | Protocol | Scope | Before | Now |
+|---|---|---|---|---|
+| Messages: receive (decrypted), send text/content, reply, mentions | PROTOCOL.md §7, APPLICATIONS.md §3.3 | `messages:read` / `messages:write` | typed (`message`, `send`, `reply`) | typed |
+| Message history (context reading) | PROTOCOL.md §6 "read markers", §7 | `messages:read` | missing (no API access at all) | |
+| Message edit (own) / delete (own; others with `manage_messages`) | PROTOCOL.md §7, ENCRYPTION.md §5.2 | `messages:write` (+ `moderation`) | missing | |
+| Edit and delete events | PROTOCOL.md §6 | `messages:read` | raw `event` only | |
+| Reactions: add / remove | PROTOCOL.md §7 | `messages:write` | missing | |
+| Reaction events (js #18) | PROTOCOL.md §6 (`message.update`) | `messages:read` | raw `event` only; the node does not say who reacted | |
+| Embeds | APPLICATIONS.md §6.4 | `messages:write` | content object passed through, no validation | |
+| Attachments: upload (plaintext and encrypted), download (decrypted) | PROTOCOL.md §7, §7a, ENCRYPTION.md §6 | `messages:write` / `messages:read` | missing ("not supported yet") | |
+| Pins: pin, unpin, list | PROTOCOL.md §7 | `messages:write` / `messages:read` | missing | |
+| Typing indicator, read marker | PROTOCOL.md §6 | `messages:write` | missing | |
+| Threads: reply in thread, start from a message | PROTOCOL.md §7e | `messages:*` | typed (`replyInThread`, `threadId`) | typed |
+| Threads: create standalone / forum post, list, get, rename, archive, lock, delete, follow | PROTOCOL.md §7e | `messages:*` (+ `moderation` for others' threads) | missing | |
+| Thread events | PROTOCOL.md §7e | `messages:read` | raw `event` only | |
+| Polls: create, vote, retract, checked votes and tally, vote events | PROTOCOL.md §7g | `messages:*`, `create_polls` | typed | typed |
+| Polls: close early | PROTOCOL.md §7g | author or `manage_messages` | missing (sdk `polls.close` unreachable) | |
+| Search | PROTOCOL.md §7d, SEARCH.md | `messages:read` | missing | |
+| Commands, ephemeral replies, defer, follow-ups, locale | APPLICATIONS.md §5 | `commands` | typed | typed |
+| Rooms, channels, roles, member list, profiles (reads) | APPLICATIONS.md §2.4 "always", `members:read` | always / `members:read` | missing | |
+| Member join / leave events | PROTOCOL.md §6 | `members:read` | raw `event` only | |
+| Moderation: timeout, kick, ban, unban, ban list, audit log | MODERATION.md, APPLICATIONS.md §2.4 | `moderation` | missing | |
+| Moderation: purge, nickname moderation | MODERATION.md | `moderation` | missing | |
+| Reports (read or act) | MODERATION.md §1 | — | closed (`report.bot_forbidden`) | closed |
+| Auto-moderation rules | MODERATION.md §2 | — | closed (not in the route table) | closed |
+| Presence: status, custom status, activity | APPLICATIONS.md §7.1, PROTOCOL.md §6a | `presence` | missing | |
+| Presence of others | PROTOCOL.md §6a | `members:read` | missing | |
+| DMs: open a DM with a user, accept / decline message requests | PROTOCOL.md §8a, APPLICATIONS.md §2.5 | `dms` (+ `messages:*`) | missing (answers in DMs a user opened work) | |
+| Voice channel status | VOICE.md §2a | `rooms:manage` (`voice_status`) | missing | |
+| Voice: join with media, soundboard | VOICE.md | `voice` | closed in practice: the runtime has no media stack | closed |
+| Voice moderation: mute, move, disconnect | VOICE.md §7 | `moderation` | missing | |
+| Room management: channels, roles, overrides, invites, emojis | APPLICATIONS.md §2.4 | `rooms:manage` | missing | |
+| Webhooks: create, list, reset, delete (management) | APPLICATIONS.md §6.1 | `webhooks:manage` | missing | |
+| Files channels | FILES.md | — | closed (`FILES.md` §2: not in the route table) | closed |
+| Whiteboard | WHITEBOARD.md | `whiteboard` | missing | |
+| Hook requests (interactions URL, subscriptions) | APPLICATIONS.md §6.3 | — | typed (`verifyHookRequest`) | typed |
+| Token expiry / rotation | APPLICATIONS.md §2.2 | always | typed (`tokenExpiring`, `rotateToken`) | typed |
+| Rate limits (`429 Retry-After`) | APPLICATIONS.md §2.7 | — | missing: errors surface at once | |
+| Reconnect, resync, replaced connections | PROTOCOL.md §6, APPLICATIONS.md §2.6 | always | typed (socket backoff, resync reload, `replaced`) | typed |
+| Federated installations (rooms on other nodes) | APPLICATIONS.md §2.8, §4.5 | always | typed | typed |
+| Friends, blocks, group DMs, account settings | APPLICATIONS.md §2.5 | — | closed by design | closed |
