@@ -28,6 +28,10 @@ export type BotErrorCode =
   | "stopped"
   /** The message is not a poll the bot can read (PROTOCOL.md §7g): missing, undecryptable or no valid poll. */
   | "not_a_poll"
+  /** The message or attachment does not exist where the bot looked (or the bot cannot see it). */
+  | "not_found"
+  /** Only the author may do this (editing a message). */
+  | "not_author"
   /**
    * Not sent: the conversation's encryption group has a device the bot's `ghostPolicy` does not accept (a key never
    * attested, a changed identity key without a continuity chain, a non-member; ENCRYPTION.md §4.6).

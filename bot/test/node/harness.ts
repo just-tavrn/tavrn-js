@@ -254,15 +254,15 @@ export interface TestApp {
 }
 
 /** An application of `owner` with one token (all scopes unless narrowed). */
-export async function createApp(owner: TestUser, opts: { public?: boolean; expiresInDays?: number; name?: string } = {}): Promise<TestApp> {
-  const app = await owner.api.applications.create({ name: opts.name ?? "Echo Wetter", username: unique("echobot"), description: "test bot", public: opts.public ?? false, requested_permissions: "3" } as never);
+export async function createApp(owner: TestUser, opts: { public?: boolean; expiresInDays?: number; name?: string; permissions?: string } = {}): Promise<TestApp> {
+  const app = await owner.api.applications.create({ name: opts.name ?? "Echo Wetter", username: unique("echobot"), description: "test bot", public: opts.public ?? false, requested_permissions: opts.permissions ?? "3" } as never);
   const created = await owner.api.applications.createToken(app.id, { name: "main", ...(opts.expiresInDays ? { expires_in_days: opts.expiresInDays } : {}) } as never);
   return { id: app.id, ref: app.ref, botAddress: app.bot.address, botUsername: app.bot.username, tokenId: created.token.id, secret: created.secret };
 }
 
-/** Installs an application in a room (the caller manages the room). */
-export async function install(installer: TestUser, roomId: string, appRef: string): Promise<void> {
-  await installer.api.applications.install(roomId, { application: appRef, permissions: "3", create_role: true } as never);
+/** Installs an application in a room (the caller manages the room) with a role of `permissions` (default "3"). */
+export async function install(installer: TestUser, roomId: string, appRef: string, permissions = "3"): Promise<void> {
+  await installer.api.applications.install(roomId, { application: appRef, permissions, create_role: true } as never);
 }
 
 /** Waits until `check` returns a truthy value (polling). */

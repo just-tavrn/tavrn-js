@@ -17,9 +17,9 @@
  *
  * `stop()` closes the sockets, waits for running handlers and flushes the pending history backups (if enabled).
  */
-import { LocalKeyMismatchError, MlsError, checkPollVote, encryptPollVote, ensureDevice, localStatus, mlsApiOf, openMlsManager, parsePoll, pollContent, pollHash, pollVoteContent, qualify, signPlainPollVote, splitQualified, tallyPoll, type Decrypted, type MlsManager, type PlainStatus, type Poll, type PollInput, type PollSelection, type PollTally, type VoteCheck } from "@tavrn/e2ee";
+import { LocalKeyMismatchError, MlsError, checkPollVote, contentAttachments, decryptAttachment, encryptAttachment, encryptPollVote, ensureDevice, localStatus, mlsApiOf, openMlsManager, parsePoll, pollContent, pollHash, pollVoteContent, qualify, signPlainPollVote, signedAttachments, splitQualified, tallyPoll, verifyPlainAttachment, type ContentAttachment, type Decrypted, type MlsManager, type PlainStatus, type Poll, type PollInput, type PollSelection, type PollTally, type VoteCheck } from "@tavrn/e2ee";
 import { FileKeyStore, StateDirInUseError } from "@tavrn/e2ee/node";
-import { TavrnApi, TavrnApiError, b64urlEncode, resolveNode, type Channel, type CommandDefinition, type CommandSet, type Message, type NodeEndpoints, type PollVote, type TavrnEvent, type UserKeys, type UserPrivate, type WellKnown } from "@tavrn/sdk";
+import { TavrnApi, TavrnApiError, b64urlEncode, newUlid, resolveNode, type Attachment, type AuditEntry, type Ban, type Channel, type CommandDefinition, type CommandSet, type ConversationRequest, type CreateMessageRequest, type Member, type Message, type MyPresence, type NodeEndpoints, type PollVote, type Profile, type Room, type RoomDetail, type SearchQuery, type SearchResponse, type TavrnEvent, type Thread, type ThreadListQuery, type User, type UserKeys, type UserPrivate, type WellKnown } from "@tavrn/sdk";
 import { threadTitle } from "./threads";
 import { CommandRouter, type CommandCrypto, type CommandHandler, type InvokeContext, type ReplyContent } from "./commands";
 import { BotError } from "./errors";
@@ -27,6 +27,10 @@ import { createKeyFile, defaultKeyFile, identityKeyOf, readKey } from "./keyfile
 import { consoleLogger, type BotLogger } from "./logger";
 import { sealUnderPolicy, type GhostPolicy } from "./ghosts";
 import { NodeLink } from "./node-link";
+import { retryingFetch, type RetryOptions } from "./ratelimit";
+import { MessageTracker, validReaction } from "./reactions";
+import { MAX_ATTACHMENTS, asFile, uploadCategory, type BotFile, type DownloadedFile } from "./uploads";
+import { activityRequest, banSubject, checkContent, presenceRequest, reason as checkReason, timeoutMinutes, ulid, voiceStatus, type ActivityInput, type PresenceInput } from "./validate";
 import { appTokenClaims, type AppTokenClaims } from "./token";
 
 export const BOT_VERSION = "0.2.1";
@@ -77,6 +81,12 @@ export interface BotOptions {
    * backups are encrypted with the bot's key, so whoever holds the key file can read that history (design note 4.7).
    */
   historyBackup?: boolean;
+  /**
+   * `429` answers (APPLICATIONS.md §2.7): by default the runtime waits the announced `Retry-After` and repeats the
+   * request (3 times, at most 30 s per wait); beyond that the caller gets the `TavrnApiError` (status 429). `false`
+   * hands every `429` to the caller at once.
+   */
+  rateLimit?: RetryOptions | false;
   /** WebSocket implementation (Node.js 20 without `--experimental-websocket`: `import WebSocket from "ws"`). */
   WebSocketImpl?: typeof WebSocket;
   fetchImpl?: typeof fetch;
@@ -105,6 +115,8 @@ export interface BotMessage {
   /** Room of a channel message (null in DMs or when unknown). */
   roomId: string | null;
   author: string;
+  /** The author's id on the hosting node (for moderation: `timeout`, `kick`). */
+  authorId: string;
   /** `user`, `bot`, `webhook`, … (APPLICATIONS.md §1.5). */
   authorKind: string;
   deviceId: string | null;
@@ -121,7 +133,11 @@ export interface BotMessage {
   replyToId: string | null;
   /** The thread the message belongs to (PROTOCOL.md §7e), null for messages of the channel itself. */
   threadId: string | null;
+  /** The files attached to the message (names and types from the encrypted content in encrypted conversations). */
+  attachments: BotAttachment[];
   createdAt: string;
+  /** Set when the message was edited. */
+  editedAt: string | null;
   raw: Message;
   /** Answers in the same conversation (and the same thread), as a reply to this message. */
   reply(content: ReplyContent, opts?: SendOptions): Promise<Message>;
@@ -130,7 +146,119 @@ export interface BotMessage {
    * (`title` defaults to the start of the message's text). Room channels only.
    */
   replyInThread(content: ReplyContent, opts?: SendOptions & { title?: string }): Promise<Message>;
+  /** Adds a reaction to this message ({@link Bot.react}). */
+  react(emoji: string): Promise<Message>;
+  /** Downloads an attachment (the first one by default), decrypted and checked against its hash. */
+  download(attachmentId?: string): Promise<DownloadedFile>;
 }
+
+/** An attachment of a received message. */
+export interface BotAttachment {
+  id: string;
+  name: string;
+  mime: string;
+  size: number;
+  spoiler: boolean;
+}
+
+/**
+ * A reaction was added or removed (`message.update`, PROTOCOL.md §7). `user` is null while the node does not say who
+ * reacted (tavrn-protocol#43); without it the change is computed from the counts of messages the bot has seen since it
+ * started, so changes on older messages are reported only once the node names the user.
+ */
+export interface ReactionEvent {
+  node: string;
+  /** Qualified conversation id. */
+  conversation: string;
+  conversationId: string;
+  roomId: string | null;
+  messageId: string;
+  emoji: string;
+  /** The count after the change. */
+  count: number;
+  added: boolean;
+  user: string | null;
+  encrypted: boolean;
+  /** The message envelope after the change (content not decrypted; use {@link Bot.messages} for it). */
+  message: Message;
+}
+
+/** `message.delete`: a message was deleted (by its author or a moderator). */
+export interface MessageDeleteEvent {
+  node: string;
+  conversation: string;
+  conversationId: string;
+  roomId: string | null;
+  messageId: string;
+}
+
+/** `member.join` / `member.leave` (scope `members:read`). */
+export interface MemberEvent {
+  node: string;
+  roomId: string;
+  userId: string;
+  /** The member's address (joins; leaves name only the id). */
+  user: string | null;
+  /** The public user object of a join. */
+  profile: User | null;
+}
+
+/** `thread.create`, `thread.update`, `thread.delete` (PROTOCOL.md §7e). */
+export interface ThreadEvent {
+  node: string;
+  action: "create" | "update" | "delete";
+  roomId: string;
+  /** Qualified id of the thread's channel. */
+  conversation: string;
+  threadId: string;
+  /** The thread (title not decrypted; {@link Bot.thread} returns it decrypted); null for deletions. */
+  thread: Thread | null;
+}
+
+/** `conversation.request`: somebody asked to open a DM with the bot (PROTOCOL.md §8a, scope `dms` to answer). */
+export interface DmRequestEvent {
+  node: string;
+  conversation: string;
+  from: string;
+  request: ConversationRequest;
+}
+
+/** A thread with its title decrypted where the channel is encrypted. */
+export interface BotThread {
+  id: string;
+  node: string;
+  /** Qualified id of the thread's channel (pass it with `threadId` to `send`). */
+  conversation: string;
+  roomId: string;
+  channelId: string;
+  /** The title (decrypted); null when it cannot be read. */
+  title: string | null;
+  encrypted: boolean;
+  rootMessageId: string | null;
+  createdBy: string;
+  messageCount: number;
+  lastMessageAt: string;
+  archived: boolean;
+  locked: boolean;
+  tags: string[];
+  raw: Thread;
+}
+
+/** Options of {@link Bot.createThread}. */
+export interface CreateThreadOptions {
+  /** 1–100 characters (encrypted in encrypted channels). */
+  title: string;
+  /** Start the thread from this channel message (text and announcement channels). */
+  rootMessageId?: string;
+  /** The thread's first message; required for forum posts. */
+  content?: ReplyContent;
+  /** Forum posts: tag ids of the channel (at most 5). */
+  tags?: string[];
+  mentions?: string[];
+}
+
+/** A room on a node: a qualified id `<node>/<room id>`, a bare id of the home node, or an object naming both. */
+export type RoomRef = string | { node: string; roomId: string | null };
 
 export { threadTitle };
 
@@ -141,6 +269,11 @@ export interface SendOptions {
   mentions?: string[];
   /** Write into this thread of the channel (PROTOCOL.md §7e). */
   threadId?: string | null;
+  /**
+   * Files to attach (at most 10; needs `attach_files` and the channel's upload categories). Encrypted conversations
+   * get the files encrypted with a fresh key each; name, type and key travel inside the encrypted message.
+   */
+  files?: BotFile[];
 }
 
 /** Options of {@link Bot.createPoll}. */
@@ -213,6 +346,20 @@ export interface BotEvents {
   tokenRotated: [{ secret: string; expiresAt: string }];
   /** A member voted on a poll, changed or retracted a vote (the bot's own votes included). */
   pollVote: [PollVoteEvent];
+  /** A reaction was added or removed (js #18; see {@link ReactionEvent} for what the node tells). */
+  reaction: [ReactionEvent];
+  /** A message the bot had seen was edited by somebody else: the new version, decrypted. */
+  messageEdit: [BotMessage];
+  /** A message was deleted. */
+  messageDelete: [MessageDeleteEvent];
+  /** Somebody joined a room the bot is in (`members:read`). */
+  memberJoin: [MemberEvent];
+  /** Somebody left, was kicked or banned (`members:read`). */
+  memberLeave: [MemberEvent];
+  /** A thread was started, changed (title, archive, lock, counters) or deleted. */
+  thread: [ThreadEvent];
+  /** A message request (somebody who is not the owner opened a DM with the bot): answer it with `acceptDm`/`declineDm`. */
+  dmRequest: [DmRequestEvent];
   /** Every WebSocket event of every node, unchanged (for events the runtime does not interpret). */
   event: [{ node: string; event: TavrnEvent }];
   error: [Error];
@@ -263,7 +410,12 @@ export class Bot {
   private readonly links = new Map<string, NodeLink>();
   private readonly connecting = new Map<string, Promise<NodeLink | null>>();
   private readonly channels = new Map<string, ChannelInfo>();
-  private readonly direct = new Map<string, boolean>();
+  /** DMs: whether they are encrypted (always, on current nodes) and their members. */
+  private readonly direct = new Map<string, { encrypted: boolean; members: string[] }>();
+  private readonly tracker = new MessageTracker();
+  /** Nodes announcing `threads.client_ids` (PROTOCOL.md §7e), per domain. */
+  private readonly clientIds = new Map<string, Promise<boolean>>();
+  private readonly fetchImpl: typeof fetch | undefined;
   private readonly publicClients = new Map<string, TavrnApi>();
   private readonly inflight = new Set<Promise<unknown>>();
   private readonly joining = new Map<string, Promise<boolean>>();
@@ -283,6 +435,7 @@ export class Bot {
     this.token = opts.token.trim();
     this.commands = new CommandRouter({ logger: this.logger, autoDeferMs: opts.autoDeferMs });
     this.allowInsecure = opts.allowInsecure ?? /^http:\/\//i.test(opts.node.trim());
+    this.fetchImpl = opts.rateLimit === false ? opts.fetchImpl : retryingFetch(opts.fetchImpl ?? ((input, init) => fetch(input, init)), { logger: this.logger, ...opts.rateLimit });
   }
 
   // ---- Events and commands --------------------------------------------------------------------
@@ -413,7 +566,7 @@ export class Bot {
       endpoints,
       logger: this.logger,
       clientHeader: `tavrn-bot/${BOT_VERSION}`,
-      fetchImpl: this.opts.fetchImpl,
+      fetchImpl: this.fetchImpl,
       WebSocketImpl: this.opts.WebSocketImpl,
       handlers: {
         onEvent: (link: NodeLink, event: TavrnEvent) => this.onEvent(link, event),
@@ -435,7 +588,7 @@ export class Bot {
     if (/^https?:\/\//i.test(node)) {
       let doc: WellKnown;
       try {
-        doc = await new TavrnApi({ baseUrl: node, fetchImpl: this.opts.fetchImpl }).node.wellKnown();
+        doc = await new TavrnApi({ baseUrl: node, fetchImpl: this.fetchImpl }).node.wellKnown();
       } catch (e) {
         throw new BotError("node_invalid", `${node} is not reachable or not a tavrn node`, { cause: e });
       }
@@ -444,7 +597,7 @@ export class Bot {
     }
     if (node.toLowerCase() !== issuer) throw new BotError("node_invalid", `The token was issued by ${issuer}, not by ${node}`);
     try {
-      return await resolveNode(issuer, { allowInsecure: this.allowInsecure, fetchImpl: this.opts.fetchImpl });
+      return await resolveNode(issuer, { allowInsecure: this.allowInsecure, fetchImpl: this.fetchImpl });
     } catch (e) {
       throw new BotError("node_invalid", `The node ${issuer} could not be resolved`, { cause: e });
     }
@@ -573,7 +726,7 @@ export class Bot {
   /** Where another node lives: its discovery document, or the home node's resolution (SRV, development peers). */
   private resolve(domain: string): Promise<NodeEndpoints> {
     const home = this.home!;
-    return resolveNode(domain, { resolve: (d) => home.publicApi.federation.resolve(d), allowInsecure: this.allowInsecure, fetchImpl: this.opts.fetchImpl });
+    return resolveNode(domain, { resolve: (d) => home.publicApi.federation.resolve(d), allowInsecure: this.allowInsecure, fetchImpl: this.fetchImpl });
   }
 
   /** Public keys of `address` from the user's home node (FEDERATION.md §3.5). */
@@ -588,7 +741,7 @@ export class Bot {
     let client = this.publicClients.get(domain);
     if (!client) {
       const endpoints = await this.resolve(domain);
-      client = new TavrnApi({ baseUrl: endpoints.base, clientHeader: `tavrn-bot/${BOT_VERSION}`, fetchImpl: this.opts.fetchImpl });
+      client = new TavrnApi({ baseUrl: endpoints.base, clientHeader: `tavrn-bot/${BOT_VERSION}`, fetchImpl: this.fetchImpl });
       this.publicClients.set(domain, client);
     }
     return client.keys.get(username);
@@ -772,6 +925,44 @@ export class Bot {
         this.emit("pollVote", { node: link.domain, conversation: qualify(link.domain, data.conversation_id), messageId: data.message_id, user: data.user, record: retracted ? null : (data as unknown as PollVote), retracted });
         break;
       }
+      case "message.update":
+        this.onMessageUpdate(link, data as unknown as Message);
+        break;
+      case "message.delete": {
+        if (typeof data.conversation_id !== "string" || typeof data.id !== "string") break;
+        const q = qualify(link.domain, data.conversation_id);
+        this.tracker.forget(q, data.id);
+        this.emit("messageDelete", { node: link.domain, conversation: q, conversationId: data.conversation_id, roomId: typeof data.room_id === "string" ? data.room_id : null, messageId: data.id });
+        break;
+      }
+      case "member.join": {
+        const user = data.user as User | undefined;
+        if (typeof data.room_id !== "string" || !user || typeof user.id !== "string") break;
+        this.emit("memberJoin", { node: link.domain, roomId: data.room_id, userId: user.id, user: typeof user.address === "string" ? user.address : null, profile: user });
+        break;
+      }
+      case "member.leave":
+        if (typeof data.room_id !== "string" || typeof data.user_id !== "string") break;
+        this.emit("memberLeave", { node: link.domain, roomId: data.room_id, userId: data.user_id, user: typeof data.user === "string" ? data.user : null, profile: null });
+        break;
+      case "thread.create":
+      case "thread.update":
+      case "thread.delete": {
+        const action = event.type.slice("thread.".length) as ThreadEvent["action"];
+        const thread = action === "delete" ? null : ((data.thread ?? null) as Thread | null);
+        const channelId = thread?.channel_id ?? data.channel_id;
+        const threadId = thread?.id ?? data.id;
+        if (typeof data.room_id !== "string" || typeof channelId !== "string" || typeof threadId !== "string") break;
+        this.emit("thread", { node: link.domain, action, roomId: data.room_id, conversation: qualify(link.domain, channelId), threadId, thread });
+        break;
+      }
+      case "conversation.request": {
+        const request = data.request as ConversationRequest | undefined;
+        const conv = request?.conversation;
+        if (!request || !conv || typeof conv.id !== "string") break;
+        this.emit("dmRequest", { node: link.domain, conversation: qualify(link.domain, conv.id), from: request.from?.address ?? "", request });
+        break;
+      }
       default:
         break;
     }
@@ -820,54 +1011,99 @@ export class Bot {
   }
 
   private async onMessage(link: NodeLink, m: Message): Promise<void> {
-    const mls = this.mls;
     const me = this.me;
-    if (!mls || !me || typeof m?.id !== "string" || typeof m.conversation_id !== "string") return;
+    if (!this.mls || !me || typeof m?.id !== "string" || typeof m.conversation_id !== "string") return;
+    const q = qualify(link.domain, m.conversation_id);
+    this.tracker.remember(q, m);
     if (m.author === me.address || !m.device_id) return; // own messages (also of other devices) and system messages
+    const read = await this.readMessage(link, m);
+    // Plaintext that is no content object is dropped silently; encrypted messages that cannot be read are announced.
+    if (!("reason" in read)) this.emit("message", read);
+    else if (m.encrypted) this.emit("undecryptable", { node: link.domain, conversation: q, messageId: m.id, author: m.author, reason: read.reason });
+  }
+
+  /** `message.update`: reaction changes become `reaction` events, edits of others' messages `messageEdit`. */
+  private onMessageUpdate(link: NodeLink, m: Message): void {
+    if (typeof m?.id !== "string" || typeof m.conversation_id !== "string") return;
+    const q = qualify(link.domain, m.conversation_id);
+    const changes = this.tracker.update(q, m);
+    const roomId = this.channels.get(q)?.roomId ?? null;
+    for (const r of changes.reactions) {
+      this.emit("reaction", { node: link.domain, conversation: q, conversationId: m.conversation_id, roomId, messageId: m.id, emoji: r.emoji, count: r.count, added: r.added, user: r.user, encrypted: !!m.encrypted, message: m });
+    }
+    if (changes.edited && m.author !== this.me?.address && m.device_id) {
+      void this.track(
+        this.readMessage(link, m).then((read) => {
+          if (!("reason" in read)) this.emit("messageEdit", read);
+        }),
+      );
+    }
+  }
+
+  /** A message as the bot reads it: decrypted (joining the group if needed) or with the reason it cannot be read. */
+  private async readMessage(link: NodeLink, m: Message): Promise<BotMessage | { reason: UndecryptableEvent["reason"] }> {
+    const mls = this.mls!;
+    const me = this.me!;
     const q = qualify(link.domain, m.conversation_id);
     let content: Record<string, unknown>;
     let signature: PlainStatus | null = null;
+    let files: (BotAttachment & { crypto: ContentAttachment | null; sha256: string })[];
     if (m.encrypted) {
-      if (!mls.hasGroup(q) && !(await this.join(q, false))) {
-        this.emit("undecryptable", { node: link.domain, conversation: q, messageId: m.id, author: m.author, reason: "not_member" });
-        return;
-      }
+      if (!mls.hasGroup(q) && !(await this.join(q, false))) return { reason: "not_member" };
       const d = await mls.decrypt(q, m);
       if (!d.ok) {
         this.logger.debug("message not decrypted", { conversation: q, message: m.id, reason: d.reason });
-        this.emit("undecryptable", { node: link.domain, conversation: q, messageId: m.id, author: m.author, reason: d.reason });
-        return;
+        return { reason: d.reason };
       }
       content = d.content;
+      files = contentAttachments(content, m.attachments).map((a) => ({ id: a.id, name: a.name, mime: a.mime, size: a.size, spoiler: a.spoiler === true, crypto: a, sha256: a.sha256 }));
     } else {
-      if (!m.content || typeof m.content !== "object" || Array.isArray(m.content)) return;
+      if (!m.content || typeof m.content !== "object" || Array.isArray(m.content)) return { reason: "invalid" };
       content = m.content as Record<string, unknown>;
-      signature = await mls.verifyPlaintext(q, m).catch(() => "unverifiable" as const);
+      signature = m.device_id ? await mls.verifyPlaintext(q, m).catch(() => "unverifiable" as const) : null;
+      files = (m.attachments ?? []).map((a: Attachment) => ({ id: a.id, name: a.name, mime: a.mime, size: a.size, spoiler: a.spoiler === true, crypto: null, sha256: a.sha256 }));
     }
     const mentions = (m.mentions ?? []).map((a) => a.toLowerCase());
-    const message: BotMessage = {
+    const text = typeof content.body === "string" ? content.body : "";
+    const download = async (attachmentId?: string): Promise<DownloadedFile> => {
+      const f = attachmentId ? files.find((a) => a.id === attachmentId) : files[0];
+      if (!f) throw new BotError("not_found", attachmentId ? `Message ${m.id} has no attachment ${attachmentId}` : `Message ${m.id} has no attachments`);
+      const bytes = new Uint8Array(await (await link.api.attachments.download(f.id)).arrayBuffer());
+      let data: Uint8Array;
+      if (f.crypto) data = await decryptAttachment(bytes, f.crypto);
+      else {
+        await verifyPlainAttachment(bytes, f.sha256);
+        data = bytes;
+      }
+      return { id: f.id, name: f.name, mime: f.mime, size: data.length, data };
+    };
+    return {
       id: m.id,
       node: link.domain,
       conversationId: m.conversation_id,
       conversation: q,
       roomId: this.channels.get(q)?.roomId ?? null,
       author: m.author,
+      authorId: m.author_id,
       authorKind: m.author_kind ?? "user",
       deviceId: m.device_id ?? null,
       encrypted: !!m.encrypted,
       content,
-      text: typeof content.body === "string" ? content.body : "",
+      text,
       mentions,
       mentionsMe: mentions.includes(me.address.toLowerCase()),
       signature,
       replyToId: m.reply_to_id ?? null,
       threadId: m.thread_id ?? null,
+      attachments: files.map(({ id, name, mime, size, spoiler }) => ({ id, name, mime, size, spoiler })),
       createdAt: m.created_at,
+      editedAt: m.edited_at ?? null,
       raw: m,
       reply: (c, o = {}) => this.send(q, c, { ...o, replyTo: o.replyTo ?? m.id, threadId: o.threadId !== undefined ? o.threadId : (m.thread_id ?? null) }),
-      replyInThread: (c, o = {}) => this.replyInThread(q, m, typeof content.body === "string" ? content.body : "", c, o),
+      replyInThread: (c, o = {}) => this.replyInThread(q, m, text, c, o),
+      react: (emoji) => this.react(q, m.id, emoji),
+      download,
     };
-    this.emit("message", message);
   }
 
   private invokeContext(link: NodeLink): InvokeContext {
@@ -906,11 +1142,11 @@ export class Bot {
 
   /** Whether a conversation is end-to-end encrypted: known channels, else the DM itself. */
   private async isEncrypted(link: NodeLink, q: string, id: string): Promise<boolean> {
-    const known = this.channels.get(q)?.encrypted ?? this.direct.get(q);
+    const known = this.channels.get(q)?.encrypted ?? this.direct.get(q)?.encrypted;
     if (known !== undefined) return known;
     try {
       const c = await link.api.conversations.get(id);
-      this.direct.set(q, !!c.encrypted);
+      this.direct.set(q, { encrypted: !!c.encrypted, members: (c.members ?? []).map((u) => u.address) });
       return !!c.encrypted;
     } catch (e) {
       if (code(e) !== "conversation.not_found" && !(e instanceof TavrnApiError && e.status === 404)) throw e;
@@ -925,39 +1161,93 @@ export class Bot {
    * Sends a message: encrypted for the conversation's MLS group where the conversation is encrypted (joining it
    * first if needed), otherwise plaintext signed by the bot device. `conversation` is a qualified id
    * (`<node>/<id>`, as in {@link BotMessage.conversation}) or the bare id of a conversation on the home node.
-   * Attachments are not supported yet.
+   * `content` is text or a content object; text content is checked first (body length, embeds of APPLICATIONS.md
+   * §6.4), `opts.files` are uploaded (encrypted where the conversation is) and attached.
    */
   async send(conversation: string | { conversation: string }, content: ReplyContent, opts: SendOptions = {}): Promise<Message> {
     return this.sendObject(conversation, normalizeContent(content), opts, {});
   }
 
-  private async sendObject(conversation: string | { conversation: string }, object: Record<string, unknown>, opts: SendOptions, extra: { poll_closes_at?: string }): Promise<Message> {
+  private running(): void {
     if (this.state !== "running" && this.state !== "starting") throw new BotError("stopped", "The bot is not running");
-    const mls = this.mls!;
+  }
+
+  /** The qualified id, its node and bare id, and the link to that node. */
+  private target(conversation: string | { conversation: string }): { q: string; domain: string; id: string; link: NodeLink } {
+    this.running();
     const q = this.qualified(conversation);
     const { domain, id } = splitQualified(q);
-    const link = this.linkFor(domain);
+    return { q, domain, id, link: this.linkFor(domain) };
+  }
+
+  /** Joins an encrypted conversation's group before writing; in DMs also adds the members' new devices (§4.2). */
+  private async prepareEncrypted(q: string): Promise<void> {
+    if (!(await this.join(q, true))) throw new BotError("not_member", `The bot could not join the encryption group of ${q}`);
+    const dm = this.direct.get(q);
+    if (dm?.members.length) await this.mls!.addMissingDevices(q, dm.members).catch((e: unknown) => this.logger.warn("devices of the DM could not be added", { conversation: q, error: e }));
+  }
+
+  /** Runs an encrypted write once more after catching up when the node says the epoch is stale (ENCRYPTION.md §5.3). */
+  private async freshEpoch<T>(q: string, post: () => Promise<T>): Promise<T> {
+    try {
+      return await post();
+    } catch (e) {
+      if (!(e instanceof TavrnApiError && e.code === "mls.epoch_stale")) throw e;
+      await this.mls!.catchUp(q);
+      return post();
+    }
+  }
+
+  /** Uploads the files of a message: plaintext as they are, encrypted as ciphertext with their keys for the content. */
+  private async upload(link: NodeLink, id: string, encrypted: boolean, files: BotFile[]): Promise<{ stored: Attachment[]; keys: ContentAttachment[] }> {
+    if (files.length > MAX_ATTACHMENTS) throw new RangeError(`at most ${MAX_ATTACHMENTS} files per message`);
+    const stored: Attachment[] = [];
+    const keys: ContentAttachment[] = [];
+    for (const f of files) {
+      const file = await asFile(f);
+      if (!encrypted) {
+        stored.push({ ...(await link.api.attachments.uploadToConversation(id, file, file.name)), spoiler: f.spoiler === true });
+        continue;
+      }
+      // ENCRYPTION.md §6: only ciphertext leaves the bot; the category is declared (PROTOCOL.md §7a).
+      const { blob, meta } = await encryptAttachment(file);
+      const up = await link.api.attachments.uploadToConversation(id, blob, "", undefined, uploadCategory(file.name, file.type));
+      if (up.sha256 !== meta.sha256) throw new BotError("node_invalid", "The node stored another ciphertext than the bot uploaded");
+      stored.push(up);
+      keys.push({ id: up.id, ...meta, ...(f.spoiler ? { spoiler: true } : {}) });
+    }
+    return { stored, keys };
+  }
+
+  private async sendObject(conversation: string | { conversation: string }, object: Record<string, unknown>, opts: SendOptions, extra: { poll_closes_at?: string }): Promise<Message> {
+    const { q, id, link } = this.target(conversation);
+    const mls = this.mls!;
     const mentions = mentionList(opts.mentions);
     const replyTo = opts.replyTo ?? null;
     const threadId = opts.threadId ?? null;
     const thread = threadId ? { thread_id: threadId } : {};
-    if (await this.isEncrypted(link, q, id)) {
-      if (!(await this.join(q, true))) throw new BotError("not_member", `The bot could not join the encryption group of ${q}`);
+    const files = opts.files ?? [];
+    if (files.length && (object.type === "text" || object.type === "action") && typeof object.body === "string" && !object.body.trim()) object = { ...object, body: "📎" };
+    checkContent(object);
+    const encrypted = await this.isEncrypted(link, q, id);
+    if (encrypted) await this.prepareEncrypted(q);
+    const { stored, keys } = files.length ? await this.upload(link, id, encrypted, files) : { stored: [], keys: [] };
+    const attachments = stored.length ? { attachments: stored.map((a) => a.id) } : {};
+    let sent: Message;
+    if (encrypted) {
+      const content = keys.length ? { ...object, attachments: keys } : object;
       // Thread and reply are signed inside the content (ENCRYPTION.md §5.2); a stale epoch (§5.3) is caught up once.
-      const post = async () => {
-        const sealed = await this.seal(q, () => mls.encrypt(q, object, { ctx: { thread_id: threadId, reply_to: replyTo } }));
-        return link.api.conversations.send(id, { content: sealed.content, epoch: sealed.epoch, mentions, reply_to_id: replyTo, ...thread, ...extra });
-      };
-      try {
-        return await post();
-      } catch (e) {
-        if (!(e instanceof TavrnApiError && e.code === "mls.epoch_stale")) throw e;
-        await mls.catchUp(q);
-        return post();
-      }
+      sent = await this.freshEpoch(q, async () => {
+        const sealed = await this.seal(q, () => mls.encrypt(q, content, { ctx: { thread_id: threadId, reply_to: replyTo } }));
+        return link.api.conversations.send(id, { content: sealed.content, epoch: sealed.epoch, mentions, reply_to_id: replyTo, ...attachments, ...thread, ...extra });
+      });
+    } else {
+      const spoilers = stored.filter((a) => a.spoiler).map((a) => a.id);
+      const signature = mls.signPlaintext(q, { reply_to: replyTo, thread_id: threadId, mentions_everyone: false, mentions, attachments: signedAttachments(stored) }, object);
+      sent = await link.api.conversations.send(id, { content: object, mentions, reply_to_id: replyTo, signature, ...attachments, ...(spoilers.length ? { spoilers } : {}), ...thread, ...extra } satisfies CreateMessageRequest);
     }
-    const signature = mls.signPlaintext(q, { reply_to: replyTo, thread_id: threadId, mentions_everyone: false, mentions, attachments: [] }, object);
-    return link.api.conversations.send(id, { content: object, mentions, reply_to_id: replyTo, signature, ...thread, ...extra });
+    this.tracker.remember(q, sent);
+    return sent;
   }
 
   // ---- Polls (PROTOCOL.md §7g) ----------------------------------------------------------------------
@@ -1038,29 +1328,525 @@ export class Bot {
     return this.on("pollVote", listener);
   }
 
+  /**
+   * Closes a poll now, or moves its close time earlier (`at`, never later; PROTOCOL.md §7g). The bot must be the
+   * poll's author or hold `manage_messages` (scope `moderation`).
+   */
+  async closePoll(conversation: string | { conversation: string }, messageId: string, at?: string | Date): Promise<Message> {
+    const { id, link } = this.target(conversation);
+    return link.api.polls.close(id, ulid("messageId", messageId), at instanceof Date ? at.toISOString() : at);
+  }
+
   /** {@link BotMessage.replyInThread}: the message's thread, the thread it started, or a new one from it. */
   private async replyInThread(q: string, m: Message, text: string, content: ReplyContent, opts: SendOptions & { title?: string }): Promise<Message> {
     const existing = m.thread_id ?? m.thread?.id ?? null;
     if (existing) return this.send(q, content, { ...opts, threadId: existing });
-    const roomId = this.channels.get(q)?.roomId;
-    if (!roomId) throw new BotError("not_member", "Threads exist in room channels only");
-    const { domain, id } = splitQualified(q);
-    const link = this.linkFor(domain);
-    const title = threadTitle(opts.title ?? text);
-    const encrypted = await this.isEncrypted(link, q, id);
-    if (encrypted && !(await this.join(q, true))) throw new BotError("not_member", `The bot could not join the encryption group of ${q}`);
-    const mls = this.mls!;
-    const sealedTitle = encrypted ? await this.seal(q, () => mls.encryptThreadTitle(q, title)) : { title };
-    let threadId: string;
-    try {
-      threadId = (await link.api.threads.create(roomId, id, { ...sealedTitle, root_message_id: m.id })).id;
-    } catch (e) {
-      // Another member started the thread in between: write into theirs.
-      const started = e instanceof TavrnApiError && e.code === "thread.exists" ? (e.problem as { meta?: { thread_id?: unknown } }).meta?.thread_id : undefined;
-      if (typeof started !== "string") throw e;
-      threadId = started;
+    const { title, ...send } = opts;
+    const threadId = (await this.startThread(q, { title: threadTitle(title ?? text), rootMessageId: m.id })).id;
+    return this.send(q, content, { ...send, threadId });
+  }
+
+  // ---- Messages: history, edits, reactions, pins -----------------------------------------------
+
+  /**
+   * The API client with the bot's credentials on `node` (default: the home node), for routes without a helper here.
+   * Requests go through the same rate-limit handling; encrypted content is the caller's to handle.
+   */
+  api(node?: string): TavrnApi {
+    this.running();
+    return this.linkFor(node ?? this.claims!.iss).api;
+  }
+
+  /** One message of a conversation (the page around it), or `not_found`. */
+  private async fetchMessage(link: NodeLink, id: string, messageId: string): Promise<Message> {
+    const [message] = await link.api.conversations.messages(id, { around: ulid("messageId", messageId), limit: 1 }).catch((e: unknown) => {
+      if (code(e) === "message.not_found") return [];
+      throw e;
+    });
+    if (!message || message.id !== messageId) throw new BotError("not_found", `No message ${messageId} in this conversation`);
+    return message;
+  }
+
+  /**
+   * A page of a conversation's history as the bot reads it (scope `messages:read`): decrypted, newest first (`after`:
+   * oldest first, as the node pages). Messages the bot cannot read (sent before it joined, …) are left out; the
+   * bot's own messages are included. `threadId` pages one thread.
+   */
+  async messages(conversation: string | { conversation: string }, query: { limit?: number; before?: string; after?: string; around?: string; threadId?: string } = {}): Promise<BotMessage[]> {
+    const { q, id, link } = this.target(conversation);
+    const { threadId, ...page } = query;
+    if (page.limit !== undefined && !(Number.isInteger(page.limit) && page.limit >= 1 && page.limit <= 100)) throw new RangeError("limit: 1 to 100");
+    const list = await link.api.conversations.messages(id, { ...page, ...(threadId ? { thread: threadId } : {}) });
+    const out: BotMessage[] = [];
+    for (const m of list) {
+      this.tracker.remember(q, m);
+      const read = await this.readMessage(link, m);
+      if (!("reason" in read)) out.push(read);
     }
-    return this.send(q, content, { ...opts, threadId });
+    return out;
+  }
+
+  /**
+   * Edits one of the bot's messages. Text replaces the body and keeps the rest of the content (attachments, embeds);
+   * a content object replaces the content (the attachments of an encrypted message stay unless it names its own).
+   * Encrypted messages are encrypted again under the current epoch with the same signed context, plaintext ones
+   * signed again. Polls cannot be edited (`message.poll_immutable`).
+   */
+  async edit(conversation: string | { conversation: string }, messageId: string, content: ReplyContent, opts: { mentions?: string[] } = {}): Promise<Message> {
+    const { q, id, link } = this.target(conversation);
+    const m = await this.fetchMessage(link, id, messageId);
+    if (m.author !== this.me!.address) throw new BotError("not_author", "A bot can edit only its own messages");
+    const encrypted = !!m.encrypted;
+    if (encrypted) await this.prepareEncrypted(q);
+    const mls = this.mls!;
+    let previous: Record<string, unknown> | null = null;
+    if (encrypted) {
+      const d = await mls.decrypt(q, m);
+      previous = d.ok ? d.content : null;
+    } else if (m.content && typeof m.content === "object" && !Array.isArray(m.content)) previous = m.content as Record<string, unknown>;
+    let next: Record<string, unknown>;
+    if (typeof content === "string") {
+      if (!previous) throw new BotError("not_found", `Message ${messageId} cannot be read, so its text cannot be replaced`);
+      const { ctx: _ctx, ...rest } = previous;
+      next = { ...rest, type: previous.type === "action" ? "action" : "text", body: content };
+    } else {
+      next = normalizeContent(content);
+      if (encrypted && previous && Array.isArray(previous.attachments) && next.attachments === undefined) next = { ...next, attachments: previous.attachments };
+    }
+    checkContent(next);
+    const mentions = opts.mentions ? mentionList(opts.mentions) : (m.mentions ?? []);
+    const ctx = { thread_id: m.thread_id ?? null, reply_to: m.reply_to_id ?? null };
+    let edited: Message;
+    if (encrypted) {
+      edited = await this.freshEpoch(q, async () => {
+        const sealed = await this.seal(q, () => mls.encrypt(q, next, { ctx }));
+        return link.api.conversations.edit(id, messageId, { content: sealed.content, epoch: sealed.epoch, mentions, mentions_everyone: m.mentions_everyone });
+      });
+    } else {
+      const signature = mls.signPlaintext(q, { reply_to: ctx.reply_to, thread_id: ctx.thread_id, mentions_everyone: m.mentions_everyone, mentions, attachments: signedAttachments(m.attachments ?? []) }, next);
+      edited = await link.api.conversations.edit(id, messageId, { content: next, mentions, mentions_everyone: m.mentions_everyone, signature });
+    }
+    this.tracker.remember(q, edited);
+    return edited;
+  }
+
+  /**
+   * Deletes a message: the bot's own, or anybody's with `manage_messages` (scope `moderation`). Entries of the
+   * welcome channel cannot be deleted (`message.system_protected`).
+   */
+  async deleteMessage(conversation: string | { conversation: string }, messageId: string): Promise<void> {
+    const { q, id, link } = this.target(conversation);
+    await link.api.conversations.deleteMessage(id, ulid("messageId", messageId));
+    this.tracker.forget(q, messageId);
+  }
+
+  /**
+   * Adds a reaction (`add_reactions`, scope `messages:write`): a Unicode emoji, `:name:` of the room's custom emojis or
+   * a custom emoji token `<:name:ID>`. Reactions are plaintext metadata, also in encrypted conversations.
+   */
+  async react(conversation: string | { conversation: string }, messageId: string, emoji: string): Promise<Message> {
+    if (!validReaction(emoji)) throw new RangeError("emoji: a Unicode emoji (at most 16 characters), :name: or <:name:ID>");
+    const { q, id, link } = this.target(conversation);
+    const m = await link.api.conversations.react(id, ulid("messageId", messageId), emoji);
+    this.tracker.update(q, m);
+    return m;
+  }
+
+  /** Removes the bot's reaction. */
+  async unreact(conversation: string | { conversation: string }, messageId: string, emoji: string): Promise<Message> {
+    if (!validReaction(emoji)) throw new RangeError("emoji: a Unicode emoji (at most 16 characters), :name: or <:name:ID>");
+    const { q, id, link } = this.target(conversation);
+    const m = await link.api.conversations.unreact(id, ulid("messageId", messageId), emoji);
+    this.tracker.update(q, m);
+    return m;
+  }
+
+  /** The reaction counts of a message the bot has seen since it started (null otherwise; {@link messages} fetches it). */
+  reactionsOf(conversation: string | { conversation: string }, messageId: string): Map<string, number> | null {
+    return this.tracker.counts(this.qualified(conversation), messageId);
+  }
+
+  /** Listens to reactions ({@link BotEvents.reaction}); returns the unsubscribe function. */
+  onReaction(listener: (event: ReactionEvent) => void | Promise<void>): () => void {
+    return this.on("reaction", listener);
+  }
+
+  /** Pins a message (`pin_messages`, scope `messages:write`; at most 50 per conversation). */
+  async pin(conversation: string | { conversation: string }, messageId: string): Promise<Message> {
+    const { id, link } = this.target(conversation);
+    return link.api.conversations.pin(id, ulid("messageId", messageId));
+  }
+
+  async unpin(conversation: string | { conversation: string }, messageId: string): Promise<Message> {
+    const { id, link } = this.target(conversation);
+    return link.api.conversations.unpin(id, ulid("messageId", messageId));
+  }
+
+  /** The pinned messages, decrypted (unreadable ones left out). */
+  async pins(conversation: string | { conversation: string }): Promise<BotMessage[]> {
+    const { id, link } = this.target(conversation);
+    const out: BotMessage[] = [];
+    for (const m of (await link.api.conversations.pins(id)).messages) {
+      const read = await this.readMessage(link, m);
+      if (!("reason" in read)) out.push(read);
+    }
+    return out;
+  }
+
+  /** Shows "… is typing" for a few seconds (scope `messages:write`); false while the connection is down. */
+  typing(conversation: string | { conversation: string }): boolean {
+    const { id, link } = this.target(conversation);
+    return link.typing(id);
+  }
+
+  /** Moves the bot's read marker (scope `messages:write`); only needed by bots that show unread state somewhere. */
+  async markRead(conversation: string | { conversation: string }, messageId: string): Promise<void> {
+    const { id, link } = this.target(conversation);
+    await link.api.conversations.markRead(id, ulid("messageId", messageId));
+  }
+
+  // ---- Threads (PROTOCOL.md §7e) -----------------------------------------------------------------
+
+  /** Whether the node keeps thread ids chosen by the client (`threads.client_ids`), cached per node. */
+  private nodeKeepsThreadIds(link: NodeLink): Promise<boolean> {
+    let known = this.clientIds.get(link.domain);
+    if (!known) {
+      known = link.api.node.info().then(
+        (info) => Array.isArray(info.capabilities) && info.capabilities.includes("threads.client_ids"),
+        () => false,
+      );
+      this.clientIds.set(link.domain, known);
+    }
+    return known;
+  }
+
+  /** The room channel behind a conversation (threads exist in room channels only). */
+  private async channelOf(link: NodeLink, q: string): Promise<ChannelInfo> {
+    let c = this.channels.get(q);
+    if (!c) {
+      for (const room of await link.api.rooms.list()) await this.loadRoom(link, room.id);
+      c = this.channels.get(q);
+    }
+    if (!c) throw new BotError("not_member", "Threads exist in room channels the bot can view only");
+    return c;
+  }
+
+  /**
+   * Creates a thread: the request with the title (sealed in encrypted channels, bound to the thread id where the node
+   * keeps client ids) and the optional first message; an existing thread of the same root comes back instead.
+   */
+  private async startThread(q: string, o: CreateThreadOptions): Promise<Thread> {
+    const { id, link } = this.target(q);
+    const c = await this.channelOf(link, q);
+    const title = threadTitle(o.title);
+    if (!o.title.trim() || Array.from(o.title.trim()).length > 100) throw new RangeError("title: 1 to 100 characters");
+    if (c.kind === "forum" && o.content === undefined) throw new RangeError("forum posts need a first message (content)");
+    if (o.tags && (o.tags.length > 5 || c.kind !== "forum")) throw new RangeError("tags: forum posts only, at most 5");
+    const encrypted = await this.isEncrypted(link, q, id);
+    if (encrypted) await this.prepareEncrypted(q);
+    const mls = this.mls!;
+    const mentions = mentionList(o.mentions);
+    const content = o.content === undefined ? null : normalizeContent(o.content);
+    if (content) checkContent(content);
+    const request = async (threadId: string | undefined) => {
+      const sealedTitle = encrypted ? await this.seal(q, () => mls.encryptThreadTitle(q, title, threadId)) : { title };
+      let message: CreateMessageRequest | undefined;
+      if (content && encrypted) {
+        const sealed = await this.seal(q, () => mls.encrypt(q, content, threadId ? { ctx: { thread_id: threadId, reply_to: null } } : {}));
+        message = { content: sealed.content, epoch: sealed.epoch, mentions };
+      } else if (content) {
+        const signature = threadId ? mls.signPlaintext(q, { reply_to: null, thread_id: threadId, mentions_everyone: false, mentions, attachments: [] }, content) : null;
+        message = { content, mentions, ...(signature ? { signature } : {}) };
+      }
+      return link.api.threads.create(c.roomId, id, {
+        ...(threadId ? { id: threadId } : {}),
+        ...sealedTitle,
+        ...(o.rootMessageId ? { root_message_id: ulid("rootMessageId", o.rootMessageId) } : {}),
+        ...(o.tags?.length ? { tags: o.tags } : {}),
+        ...(message ? { message } : {}),
+      });
+    };
+    // A client id binds the encrypted title and the first message's signature to the thread; a node that refuses the
+    // id (clock far off, id taken) gets the request without one.
+    const picked = (encrypted || content) && (await this.nodeKeepsThreadIds(link)) ? newUlid() : undefined;
+    try {
+      try {
+        return await this.freshEpoch(q, () => request(picked));
+      } catch (e) {
+        if (!picked || (code(e) !== "thread.id_invalid" && code(e) !== "thread.id_taken")) throw e;
+        return await this.freshEpoch(q, () => request(undefined));
+      }
+    } catch (e) {
+      // Another member started the thread of this root in between: theirs is the thread.
+      const started = code(e) === "thread.exists" ? ((e as TavrnApiError).problem as { meta?: { thread_id?: unknown } }).meta?.thread_id : undefined;
+      if (typeof started !== "string") throw e;
+      const thread = await link.api.threads.get(started);
+      if (content) await this.send(q, content, { threadId: thread.id, mentions });
+      return thread;
+    }
+  }
+
+  /** A thread as the bot reads it: the title decrypted and verified in encrypted channels. */
+  private async toThread(domain: string, t: Thread): Promise<BotThread> {
+    const q = qualify(domain, t.channel_id);
+    let title: string | null = t.title;
+    if (t.encrypted) {
+      const mls = this.mls!;
+      if (!mls.hasGroup(q)) await this.join(q, false);
+      const d = mls.hasGroup(q) ? await mls.decryptThreadTitle(q, t).catch(() => null) : null;
+      title = d?.ok ? d.title : null;
+    }
+    return {
+      id: t.id,
+      node: domain,
+      conversation: q,
+      roomId: t.room_id,
+      channelId: t.channel_id,
+      title,
+      encrypted: t.encrypted,
+      rootMessageId: t.root_message_id ?? null,
+      createdBy: t.created_by,
+      messageCount: t.message_count,
+      lastMessageAt: t.last_message_at,
+      archived: !!t.archived_at,
+      locked: t.locked,
+      tags: t.tags ?? [],
+      raw: t,
+    };
+  }
+
+  /**
+   * Starts a thread in a room channel (scope `messages:write`, `create_threads` in text and announcement channels):
+   * from a channel message (`rootMessageId`), standalone, or as a forum post (`content` required, optional `tags`).
+   * `content` becomes the thread's first message. Write more with `send(thread.conversation, …, { threadId })`.
+   */
+  async createThread(conversation: string | { conversation: string }, opts: CreateThreadOptions): Promise<BotThread> {
+    const q = this.qualified(conversation);
+    return this.toThread(splitQualified(q).domain, await this.startThread(q, opts));
+  }
+
+  /** Threads of a channel (scope `messages:read`): active ones by default, newest activity first. */
+  async threads(conversation: string | { conversation: string }, query: ThreadListQuery = {}): Promise<{ items: BotThread[]; next: string | null }> {
+    const { q, id, link } = this.target(conversation);
+    const c = await this.channelOf(link, q);
+    const page = await link.api.threads.list(c.roomId, id, query);
+    return { items: await Promise.all(page.items.map((t) => this.toThread(link.domain, t))), next: page.next ?? null };
+  }
+
+  /** One thread; `conversation` names the node (any conversation of it, typically the channel). */
+  async thread(conversation: string | { conversation: string }, threadId: string): Promise<BotThread> {
+    const { link } = this.target(conversation);
+    return this.toThread(link.domain, await link.api.threads.get(ulid("threadId", threadId)));
+  }
+
+  /**
+   * Renames, archives, unarchives, locks or retags a thread: the bot's own, others' with `manage_threads` (scope
+   * `moderation`). A new title is encrypted in encrypted channels and bound to the thread.
+   */
+  async updateThread(conversation: string | { conversation: string }, threadId: string, change: { title?: string; archived?: boolean; locked?: boolean; tags?: string[] }): Promise<BotThread> {
+    const { link } = this.target(conversation);
+    ulid("threadId", threadId);
+    let title = {};
+    if (change.title !== undefined) {
+      const t = change.title.trim();
+      if (!t || Array.from(t).length > 100) throw new RangeError("title: 1 to 100 characters");
+      const current = await link.api.threads.get(threadId);
+      const cq = qualify(link.domain, current.channel_id);
+      if (await this.isEncrypted(link, cq, current.channel_id)) {
+        await this.prepareEncrypted(cq);
+        const mls = this.mls!;
+        title = await this.seal(cq, () => mls.encryptThreadTitle(cq, t, threadId));
+      } else title = { title: t };
+    }
+    const req = { ...title, ...(change.archived !== undefined ? { archived: change.archived } : {}), ...(change.locked !== undefined ? { locked: change.locked } : {}), ...(change.tags ? { tags: change.tags } : {}) };
+    if (!Object.keys(req).length) throw new RangeError("updateThread: title, archived, locked or tags");
+    return this.toThread(link.domain, await link.api.threads.update(threadId, req));
+  }
+
+  /** Archives a thread (it reopens with the next message unless locked). */
+  archiveThread(conversation: string | { conversation: string }, threadId: string, archived = true): Promise<BotThread> {
+    return this.updateThread(conversation, threadId, { archived });
+  }
+
+  /** Deletes a thread with all its messages (own threads with only own messages; else `manage_threads`). */
+  async deleteThread(conversation: string | { conversation: string }, threadId: string): Promise<void> {
+    const { link } = this.target(conversation);
+    await link.api.threads.delete(ulid("threadId", threadId));
+  }
+
+  /** Follows or unfollows a thread (the bot follows threads it started or wrote in). */
+  async followThread(conversation: string | { conversation: string }, threadId: string, follow = true): Promise<void> {
+    const { link } = this.target(conversation);
+    await (follow ? link.api.threads.follow(ulid("threadId", threadId)) : link.api.threads.unfollow(ulid("threadId", threadId)));
+  }
+
+  // ---- Rooms, members, moderation ------------------------------------------------------------------
+
+  /** The node and bare id of a room reference. */
+  private roomTarget(room: RoomRef): { link: NodeLink; roomId: string } {
+    this.running();
+    let node: string;
+    let roomId: string | null;
+    if (typeof room === "string") {
+      const slash = room.indexOf("/");
+      node = slash > 0 ? room.slice(0, slash) : this.claims!.iss;
+      roomId = slash > 0 ? room.slice(slash + 1) : room;
+    } else ({ node, roomId } = room);
+    if (!roomId) throw new BotError("not_member", "This conversation belongs to no room (a DM)");
+    return { link: this.linkFor(node), roomId: ulid("roomId", roomId) };
+  }
+
+  /** The rooms the bot is in on a node (default: the home node). */
+  async rooms(node?: string): Promise<Room[]> {
+    this.running();
+    return this.linkFor(node ?? this.claims!.iss).api.rooms.list();
+  }
+
+  /** A room with the channels, categories and roles the bot can see (always allowed). */
+  async room(room: RoomRef): Promise<RoomDetail> {
+    const { link, roomId } = this.roomTarget(room);
+    return link.api.rooms.get(roomId);
+  }
+
+  /** A page of the room's members (scope `members:read`), ordered by id; `after` = the last user id of the page. */
+  async members(room: RoomRef, query: { limit?: number; after?: string } = {}): Promise<Member[]> {
+    const { link, roomId } = this.roomTarget(room);
+    return link.api.members.list(roomId, query);
+  }
+
+  /** A user's public profile (always allowed), from the bot's home node. */
+  async profile(address: string): Promise<Profile> {
+    this.running();
+    return this.home!.api.users.profile(address.trim().toLowerCase());
+  }
+
+  /**
+   * Times a member out (scope `moderation`, `moderate_members`): `minutes` 1–40320 (28 days), 0 lifts the timeout.
+   * `userId` is the member's id on the room's node (`m.authorId`, `interaction.userId`).
+   */
+  async timeout(room: RoomRef, userId: string, minutes: number, opts: { reason?: string } = {}): Promise<Member> {
+    const { link, roomId } = this.roomTarget(room);
+    const r = checkReason(opts.reason);
+    return link.api.members.timeout(roomId, ulid("userId", userId), { minutes: timeoutMinutes(minutes), ...(r ? { reason: r } : {}) });
+  }
+
+  /** Removes a member from the room (scope `moderation`, `kick_members`). */
+  async kick(room: RoomRef, userId: string, opts: { reason?: string } = {}): Promise<void> {
+    const { link, roomId } = this.roomTarget(room);
+    await link.api.members.kick(roomId, ulid("userId", userId), checkReason(opts.reason));
+  }
+
+  /** Bans an address or a whole domain from the room (scope `moderation`, `ban_members`); members are removed. */
+  async ban(room: RoomRef, subject: string, opts: { reason?: string } = {}): Promise<Ban> {
+    const { link, roomId } = this.roomTarget(room);
+    const r = checkReason(opts.reason);
+    return link.api.members.ban(roomId, { subject: banSubject(subject), ...(r ? { reason: r } : {}) });
+  }
+
+  async unban(room: RoomRef, subject: string): Promise<void> {
+    const { link, roomId } = this.roomTarget(room);
+    await link.api.members.unban(roomId, banSubject(subject));
+  }
+
+  /** The room's bans (scope `moderation`). */
+  async bans(room: RoomRef): Promise<Ban[]> {
+    const { link, roomId } = this.roomTarget(room);
+    return link.api.members.bans(roomId);
+  }
+
+  /** The room's audit log, newest first (scope `moderation`, `view_audit_log`). */
+  async auditLog(room: RoomRef, query: { limit?: number; before?: string } = {}): Promise<AuditEntry[]> {
+    const { link, roomId } = this.roomTarget(room);
+    return link.api.rooms.auditLog(roomId, query);
+  }
+
+  /**
+   * Searches a room's plaintext channels (scope `messages:read`, SEARCH.md): the node indexes no encrypted content, so
+   * encrypted channels are not searched (`searched` in the answer tells what was).
+   */
+  async search(room: RoomRef, query: SearchQuery): Promise<SearchResponse> {
+    const { link, roomId } = this.roomTarget(room);
+    if (query.limit !== undefined && !(Number.isInteger(query.limit) && query.limit >= 1 && query.limit <= 50)) throw new RangeError("limit: 1 to 50");
+    return link.api.search.room(roomId, query);
+  }
+
+  /**
+   * Sets the status line of a voice channel (VOICE.md §2a; `voice_status`, which the scope `rooms:manage` unlocks):
+   * plain text up to 128 characters, "" clears it.
+   */
+  async setVoiceStatus(room: RoomRef, channelId: string, status: string): Promise<Channel> {
+    const { link, roomId } = this.roomTarget(room);
+    return link.api.channels.update(roomId, ulid("channelId", channelId), { status: voiceStatus(status) });
+  }
+
+  // ---- Presence (APPLICATIONS.md §7) ------------------------------------------------------------------
+
+  /** Runs a presence change on every node the bot is connected to (presence is kept per node, PROTOCOL.md §6a). */
+  private async everyNode<T>(what: string, fn: (link: NodeLink) => Promise<T>): Promise<T> {
+    this.running();
+    const home = this.home!;
+    const result = await fn(home);
+    await Promise.all(
+      [...this.links.values()]
+        .filter((l) => l !== home)
+        .map((l) => fn(l).catch((e: unknown) => this.logger.warn(`${what} failed on a room node`, { node: l.domain, error: e }))),
+    );
+    return result;
+  }
+
+  /**
+   * Sets the bot's status and custom status (scope `presence`) on every connected node, e.g.
+   * `{ status: "dnd", customStatus: { text: "Deploying", emoji: "🚀" } }`; `customStatus: null` clears it.
+   */
+  async setPresence(presence: PresenceInput): Promise<MyPresence> {
+    const req = presenceRequest(presence);
+    return this.everyNode("presence", (l) => l.api.presence.set(req));
+  }
+
+  /** Sets the bot's activity (scope `presence`): `{ type: "watching", name: "3 servers" }`. */
+  async setActivity(activity: ActivityInput): Promise<MyPresence> {
+    const req = activityRequest(activity);
+    return this.everyNode("activity", (l) => l.api.presence.setActivity(req));
+  }
+
+  clearActivity(): Promise<MyPresence> {
+    return this.everyNode("activity", (l) => l.api.presence.clearActivity());
+  }
+
+  // ---- DMs (PROTOCOL.md §8a) -------------------------------------------------------------------------
+
+  /**
+   * Opens (or returns) the 1:1 DM with a user of any node (scope `dms`; writing needs `messages:write`). The DM lives
+   * on the bot's home node and is encrypted: the bot creates its group and adds the user's devices. People who are
+   * not the owner get a message request under their own `dm_policy`. Returns the qualified conversation id.
+   */
+  async openDm(address: string): Promise<string> {
+    this.running();
+    const user = address.trim().toLowerCase();
+    if (!/^[^@\s]+@[^@\s]+$/.test(user)) throw new RangeError("address: user@node");
+    const home = this.home!;
+    const c = await home.api.conversations.create({ kind: "dm", members: [user] });
+    const q = qualify(home.domain, c.id);
+    this.direct.set(q, { encrypted: !!c.encrypted, members: (c.members ?? []).map((u) => u.address) });
+    if (c.encrypted) await this.prepareEncrypted(q);
+    return q;
+  }
+
+  /** Sends a DM ({@link openDm} plus {@link send}). */
+  async dm(address: string, content: ReplyContent, opts: SendOptions = {}): Promise<Message> {
+    return this.send(await this.openDm(address), content, opts);
+  }
+
+  /** Accepts a message request (`dmRequest`, scope `dms`). */
+  async acceptDm(conversation: string | { conversation: string }): Promise<void> {
+    const { id, link } = this.target(conversation);
+    await link.api.requests.accept(id);
+  }
+
+  /** Declines a message request; `block` also blocks its sender for the bot. */
+  async declineDm(conversation: string | { conversation: string }, opts: { block?: boolean; reason?: string } = {}): Promise<void> {
+    const { id, link } = this.target(conversation);
+    await link.api.requests.decline(id, { ...(opts.block ? { block: true } : {}), ...(opts.reason ? { reason: checkReason(opts.reason) } : {}) });
   }
 
   // ---- Tokens ---------------------------------------------------------------------------------
