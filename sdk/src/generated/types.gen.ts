@@ -2456,15 +2456,16 @@ export type FilesInfo = {
     backend: string;
     /**
      * Members with `manage_channels`: the external store's host (`""` for the node's storage), for the deletion
-     * dialog (FILES.md §9); `null` for everybody else.
+     * dialog (FILES.md §9); `null` for everybody else and always for bots.
      */
     backend_host?: string | null;
     /**
-     * Members with `manage_channels`: the object prefix on the external store (`""` for the node's storage).
+     * Members with `manage_channels`: the object prefix on the external store (`""` for the node's storage); `null`
+     * for everybody else and always for bots.
      */
     backend_prefix?: string | null;
     /**
-     * The requester may configure the storage backend.
+     * The requester may configure the storage backend (never a bot: the backend routes are closed to app tokens).
      */
     can_configure: boolean;
     /**

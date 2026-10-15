@@ -21,6 +21,7 @@ import { LocalKeyMismatchError, MlsError, checkPollVote, contentAttachments, dec
 import { FileKeyStore, StateDirInUseError } from "@tavrn/e2ee/node";
 import { TavrnApi, TavrnApiError, b64urlEncode, newUlid, resolveNode, type Attachment, type AuditEntry, type Ban, type Channel, type CommandDefinition, type CommandSet, type ConversationRequest, type CreateMessageRequest, type Member, type Message, type MyPresence, type NodeEndpoints, type PollVote, type Profile, type Room, type RoomDetail, type SearchQuery, type SearchResponse, type TavrnEvent, type Thread, type ThreadListQuery, type User, type UserKeys, type UserPrivate, type WellKnown } from "@tavrn/sdk";
 import { threadTitle } from "./threads";
+import { BotFiles, type FilesEvent } from "./files";
 import { CommandRouter, type CommandCrypto, type CommandHandler, type InvokeContext, type ReplyContent } from "./commands";
 import { ComponentRouter, type ComponentHandler, type Matcher } from "./components";
 import { ClaimGuard } from "./claims";
@@ -45,7 +46,7 @@ export const BOT_VERSION = "0.2.1";
 /** Default state directory (`TAVRN_BOT_STATE_DIR`, APPLICATIONS.md §3.3). */
 export const DEFAULT_STATE_DIR = ".tavrn-state";
 /** Channel kinds whose MLS groups the bot joins (voice groups only carry frame keys). */
-export const JOINABLE_KINDS = new Set(["text", "announcement", "forum"]);
+export const JOINABLE_KINDS = new Set(["text", "announcement", "forum", "files"]);
 const READY_TIMEOUT_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 30_000;
 const STOP_TIMEOUT_MS = 30_000;
@@ -384,6 +385,8 @@ export interface BotEvents {
   thread: [ThreadEvent];
   /** A message request (somebody who is not the owner opened a DM with the bot): answer it with `acceptDm`/`declineDm`. */
   dmRequest: [DmRequestEvent];
+  /** The content of a folder of a files channel changed (`files.update`, `messages:read`): list it again with `bot.files`. */
+  files: [FilesEvent];
   /** Every WebSocket event of every node, unchanged (for events the runtime does not interpret). */
   event: [{ node: string; event: TavrnEvent }];
   error: [Error];
@@ -442,6 +445,8 @@ export class Bot {
   private allowInsecure: boolean;
   /** Deadline of API requests: the request itself plus the longest rate-limit waits. */
   private readonly requestTimeoutMs: number;
+  /** Files channels (FILES.md §3 "Bots"): list, download, upload, folders, delete; encrypted where the channel is. */
+  readonly files: BotFiles;
 
   constructor(private readonly opts: BotOptions) {
     this.logger = opts.logger ?? consoleLogger();
@@ -454,6 +459,22 @@ export class Bot {
     this.fetchImpl = opts.rateLimit === false ? opts.fetchImpl : retryingFetch(opts.fetchImpl ?? ((input, init) => fetch(input, init)), { logger: this.logger, ...opts.rateLimit });
     const waits = opts.rateLimit === false ? 0 : (opts.rateLimit?.retries ?? 3) * (opts.rateLimit?.maxWaitMs ?? 30_000);
     this.requestTimeoutMs = (opts.requestTimeoutMs ?? REQUEST_TIMEOUT_MS) + waits;
+    this.files = new BotFiles({
+      target: (c) => {
+        const t = this.target(c);
+        return { q: t.q, domain: t.domain, id: t.id, api: t.link.api };
+      },
+      channel: async (q) => {
+        const c = await this.channelOf(this.target(q).link, q).catch((e: unknown) => {
+          throw e instanceof BotError ? new BotError("not_member", `The bot cannot view the files channel ${q}`) : e;
+        });
+        return { roomId: c.roomId, kind: c.kind, encrypted: c.encrypted };
+      },
+      join: (q, create) => this.join(q, create),
+      mls: () => this.mls!,
+      seal: (q, fn) => this.seal(q, fn),
+      freshEpoch: (q, fn) => this.freshEpoch(q, fn),
+    });
   }
 
   // ---- Events and commands --------------------------------------------------------------------
@@ -1021,6 +1042,12 @@ export class Bot {
         const threadId = thread?.id ?? data.id;
         if (typeof data.room_id !== "string" || typeof channelId !== "string" || typeof threadId !== "string") break;
         this.emit("thread", { node: link.domain, action, roomId: data.room_id, conversation: qualify(link.domain, channelId), threadId, thread });
+        break;
+      }
+      case "files.update": {
+        if (typeof data.room_id !== "string" || typeof data.channel_id !== "string") break;
+        const folderId = typeof data.parent_id === "string" ? data.parent_id : null;
+        this.emit("files", { node: link.domain, conversation: qualify(link.domain, data.channel_id), roomId: data.room_id, channelId: data.channel_id, folderId });
         break;
       }
       case "conversation.request": {

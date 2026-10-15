@@ -6,7 +6,8 @@
 - is a full **end-to-end encryption** member: it reads and writes encrypted channels like any device,
 - delivers **messages** (decrypted) to your code and sends replies (encrypted where needed),
 - answers **commands** (`/weather berlin`) with replies, "thinking…" plus follow-ups, or replies only the invoker sees,
-- reacts, edits, pins, attaches files, starts threads, runs polls, moderates, opens DMs and shows its presence through
+- reacts, edits, pins, attaches files, keeps files channels, starts threads, runs polls, moderates, opens DMs and shows
+  its presence through
   typed helpers (["What a bot can do"](#what-a-bot-can-do), the full table in [`docs/COVERAGE.md`](docs/COVERAGE.md)),
 - follows its **installations** to other nodes (federation) on its own and waits out rate limits.
 
@@ -97,6 +98,7 @@ These variables belong to the bot process, not to the node.
 | `memberJoin` / `memberLeave` | somebody joined or left a room (`roomId`, `userId`, `user`; scope `members:read`) |
 | `thread` | a thread was created, updated (title, archive, lock, counters) or deleted (`action`, `threadId`, `conversation`, `thread`) |
 | `dmRequest` | somebody who is not the owner opened a DM with the bot (`conversation`, `from`); answer with `acceptDm` / `declineDm` |
+| `files` | the content of a folder of a files channel changed (`conversation`, `roomId`, `channelId`, `folderId`; `null` = top level); scope `messages:read` |
 | `event` | every WebSocket event of every node, unchanged |
 | `error` | connection ended (`token_refused`, `replaced`), a listener failed |
 
@@ -168,7 +170,27 @@ footer, timestamp }] }`, at most 10 per message, no remote images; encrypted lik
 mime }] })` uploads up to 10 files. In encrypted conversations each file is encrypted with its own key and only
 ciphertext reaches the node (its upload category is declared from the name and type, PROTOCOL.md §7a).
 `m.attachments` lists received files, `await m.download(id?)` returns `{ name, mime, size, data }`, decrypted and
-checked against its hash. Files channels are not open to bots (tavrn-protocol#44).
+checked against its hash.
+
+**Files channels** (FILES.md §3 "Bots"; browsing `messages:read`, writing `messages:write` with the channel's
+`attach_files`): `bot.files` keeps folders that outlive message retention, encrypted where the channel is (records and
+chunks like the web client; the node sees no name and no content):
+
+```ts
+const channel = "files.example.org/01J…"; // the files channel's qualified id (or a bare id on the home node)
+const builds = (await bot.files.list(channel)).find((e) => e.kind === "folder" && e.name === "Builds")
+  ?? (await bot.files.createFolder(channel, "Builds"));
+await bot.files.upload(channel, { path: "./dist/report.pdf", folder: builds, rename: true }); // or { name, data, mime }
+for (const e of await bot.files.list(channel, builds)) {
+  if (e.kind === "file" && !e.locked && e.name.endsWith(".log")) console.log((await bot.files.download(e)).data.length);
+}
+bot.on("files", (e) => console.log("changed:", e.conversation, e.folderId));
+```
+
+`list` returns every entry of a folder (folders first, then by name); entries whose record the bot cannot open
+(written before it could read the channel) come back `locked` with size and dates only. `upload` refuses a taken name
+with `409 files.name_taken` unless `rename: true` numbers it (`report (2).pdf`). `delete(entry)` removes the bot's own
+entries; others' need `manage_files` (scope `rooms:manage`). The storage backend of a files channel is closed to bots.
 
 **History, edits, deletions, pins** (`messages:read` / `messages:write`): `bot.messages(conversation, { limit, before,
 after, around, threadId })` returns readable messages decrypted; `bot.edit(conversation, id, "new text")` edits the
