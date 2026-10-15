@@ -44,7 +44,7 @@ against a real node.
 | Voice moderation: mute, move, disconnect | VOICE.md §7 | `moderation` | missing | raw: `bot.api(node).voice.serverMute/move/disconnect` |
 | Room management: channels, roles, overrides, invites, emojis | APPLICATIONS.md §2.4 | `rooms:manage` | missing | raw: `bot.api(node).channels/roles/invites/emojis` |
 | Webhooks: create, list, reset, delete (management) | APPLICATIONS.md §6.1 | `webhooks:manage` | missing | raw: `bot.api(node).webhooks` |
-| Files channels | FILES.md | — | closed (`FILES.md` §2: not in the route table) | closed; proposal tavrn-protocol#44 |
+| Files channels: list, download, upload (bytes or a file on disk), folders, delete; `files.update` events | FILES.md §3 "Bots", §8 | `messages:read` / `messages:write` (others' entries: `rooms:manage`) | closed (`FILES.md` §2: not in the route table) | typed: `bot.files.list()`, `get()`, `download()`, `upload()`, `createFolder()`, `delete()`, event `files` (encrypted channels: records and chunks through `@tavrn/e2ee`); rename/move raw: `bot.api(node).files.update`; storage backend closed |
 | Whiteboard | WHITEBOARD.md | `whiteboard` | missing | raw (no drawing support in the runtime) |
 | Hook requests (interactions URL, subscriptions) | APPLICATIONS.md §6.3 | — | typed (`verifyHookRequest`) | typed |
 | Token expiry / rotation | APPLICATIONS.md §2.2 | always | typed (`tokenExpiring`, `rotateToken`) | typed |

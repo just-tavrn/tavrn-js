@@ -20,6 +20,7 @@ export { consoleLogger, silentLogger, type BotLogger, type LogFields } from "./l
 export { appTokenClaims, type AppTokenClaims } from "./token";
 export { MessageTracker, validReaction, type MessageChanges, type ReactionChange } from "./reactions";
 export { retryAfterMs, retryingFetch, type RetryOptions } from "./ratelimit";
+export { BotFiles, type BotFileEntry, type BotFileUpload, type FilesEvent, type FolderRef } from "./files";
 export { MAX_ATTACHMENTS, uploadCategory, type BotFile, type DownloadedFile, type UploadCategory } from "./uploads";
 export {
   ACTIVITY_TYPES,

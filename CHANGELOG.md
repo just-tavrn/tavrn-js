@@ -24,6 +24,13 @@ package instead of a git dependency.
 
 ### Added
 
+- **Files channels for bots** (tavrn-protocol#44): `bot.files.list(channel, folder?)` (every page, decrypted and
+  sorted in encrypted channels, unreadable records as `locked` entries), `get`, `download(entry)`, `upload(channel,
+  { name, data | path, mime, folder, rename })`, `createFolder` and `delete` (own entries; others' with
+  `rooms:manage`), and the event `files` for `files.update`. Encrypted files channels use the records and chunked
+  encryption of `@tavrn/e2ee` like the web client; taken names are refused (`files.name_taken`) or numbered. The bot
+  joins encrypted files channels eagerly like text channels (`JOINABLE_KINDS` includes `files`).
+
 - **Reactors** (tavrn-protocol#43, tavrn-node#83): the `reaction` event names the reactor from the node's `reaction`
   field (`user`, the new `userId`), also on messages the bot has never seen, and no longer reports the bot's own
   reactions; `bot.reactors(conversation, messageId, emoji, { after, limit })` and `api.reactions.list(conversationId,
