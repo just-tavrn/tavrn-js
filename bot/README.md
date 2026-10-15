@@ -75,6 +75,8 @@ Node.js 22 and newer have a global `WebSocket`. On Node.js 20 start with `--expe
 | `ghostPolicy` | | `strict` (default) or `accept`: what the bot does about unknown devices in an encryption group, see "Unknown devices" below. |
 | `historyBackup` | | `false` (default): no history backup on the node. `true`: back up the epoch keys (encrypted) and restore them into a fresh state directory. See "History backups" below. |
 | `rateLimit` | | `429` answers (APPLICATIONS.md §2.7): by default the runtime waits the announced `Retry-After` and repeats the request (`{ retries: 3, maxWaitMs: 30000 }`); `false` hands every `429` to your code. |
+| `requestTimeoutMs` | | Deadline of one API request (default 30000 ms, the `rateLimit` waits on top): a node that does not answer fails the call with `TavrnApiError` `network.timeout` instead of stalling the bot. File transfers have 10 minutes. |
+| `stopTimeoutMs` | | How long `stop()` waits for running handlers and background work (default 30000 ms). |
 
 These variables belong to the bot process, not to the node.
 
@@ -136,7 +138,10 @@ late votes; `retractVote()` takes the bot's vote back. Voting needs `messages:wr
 Every helper takes the conversation as `bot.send` does (a qualified id `<node>/<id>`, a bare id of the home node, or a
 received message/interaction); room helpers take a room the same way (`m`, `"<node>/<room id>"` or a bare id). Each
 names the scope it needs; the room permissions decide where. Inputs are checked with the protocol's limits first
-(`RangeError`/`TypeError`), refusals of the node arrive as `TavrnApiError` with its `code`. The complete list, with
+(`RangeError`/`TypeError`, also for a malformed conversation id), refusals of the node arrive as `TavrnApiError` with its
+`code` (`network.timeout` when the node did not answer in time), and the runtime's own failures as `BotError` (for
+example `not_member`, `ghost`, or `encryption_unavailable` when the conversation's encryption could not be brought up to
+date: nothing was sent, try again). The complete list, with
 what the node keeps closed to bots, is [`docs/COVERAGE.md`](docs/COVERAGE.md).
 
 **Reactions** (`messages:write` to react, `messages:read` for the events). Reactions are plaintext metadata, also in

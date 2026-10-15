@@ -24,6 +24,23 @@ package instead of a git dependency.
 
 ### Added
 
+- `@tavrn/sdk`: request deadlines and abort signals. `ApiOptions.timeoutMs` (default 30 s), `transferTimeoutMs` (file
+  uploads and downloads, default 10 minutes), `maxResponseBytes` (JSON answers, default 32 MiB, checked against
+  `Content-Length` and while reading) and `signal`; `api.withSignal(signal)` binds every call of a client to one
+  signal. Failures on the way are `TavrnApiError` with status 0 and the codes `network.timeout`, `request.aborted`,
+  `response.too_large` and `request.invalid_path` (next to `network.error`). Discovery (`resolveNode`, `discoverNode`,
+  `identityOfHost`: `timeoutMs`, `signal`, default `DISCOVERY_TIMEOUT_MS` = 15 s) and the hook verifier's key fetch
+  (`timeoutMs`) read at most `MAX_DISCOVERY_BYTES` within their deadline.
+- `@tavrn/sdk`: the upload category table of PROTOCOL.md §7a in one place, `uploads.ts`: `classifyUpload(name, type,
+  head?)` (content first when the first bytes are given, then the extension, then the type, as the node does),
+  `declaredCategory`, `executableKind`, `extensionOf`, `extensionsOf`, `DANGEROUS_EXTENSIONS`, `UPLOAD_HEAD_BYTES`;
+  it runs the protocol's new `testvectors/upload_categories.json`. `isUlid` for canonical ULIDs.
+- `@tavrn/sdk`: `TavrnSocket` watches the connection: without any frame for `livenessMs` (default 75 s, two missed
+  pings of the node; 0 turns it off) it closes the connection locally (code 4000) and reconnects, which resyncs.
+  `onListenerError` receives the errors of event listeners.
+- `@tavrn/bot`: `requestTimeoutMs` (default 30 s per API request, rate-limit waits on top) and `stopTimeoutMs`
+  (default 30 s: `stop()` no longer waits forever for a handler that never finishes); the error code
+  `encryption_unavailable`.
 - **Reactors** (tavrn-protocol#43, tavrn-node#83): the `reaction` event names the reactor from the node's `reaction`
   field (`user`, the new `userId`), also on messages the bot has never seen, and no longer reports the bot's own
   reactions; `bot.reactors(conversation, messageId, emoji, { after, limit })` and `api.reactions.list(conversationId,
@@ -73,6 +90,23 @@ package instead of a git dependency.
 
 ### Changed
 
+- `@tavrn/sdk`: every route goes through one request layer. Downloads (attachments, files, emoji, sounds, whiteboards,
+  backups) and uploads now refresh the token on `401`, send `Tavrn-Client`, report network failures as
+  `TavrnApiError` (never a raw `TypeError`) and pass Blobs through without copying them. An aborted upload reports
+  `request.aborted` (was `upload.aborted`); `files.downloadResponse` takes an optional signal; `exchange` takes an
+  optional `signal` and lost its internal retry parameters. Ids in paths are percent-encoded, and a request whose
+  path would hold an empty or dot segment is refused before it is sent.
+- `@tavrn/sdk`: the generated fetch client (`src/generated/client`, `core`, `client.gen.ts`) is gone; only the types
+  are generated, `TavrnApi` is the client.
+- `@tavrn/bot`: encrypted uploads declare the category from the file's first bytes, name and type with the SDK's
+  table (`uploadCategory(name, mime, head?)`). A malformed conversation id is a `RangeError`; errors of the session
+  manager surface as `BotError` (`not_member`, `encryption_unavailable`, with the `MlsError` as `cause`), node
+  refusals stay `TavrnApiError`. Resyncs of a node never overlap (one more run when requested during one), rooms load
+  with bounded concurrency, an unknown conversation id reloads the rooms once and is then remembered for 30 s. DMs
+  claim KeyPackages for a member's missing device only while that device is due: after a claim that left it missing
+  the bot waits (1 minute, doubling up to 30 minutes, or until `devices.changed`). Failures of background work are
+  logged. Rate-limit waits end when the request's signal aborts.
+- `just protocol` also updates a stale checkout of the protocol submodule (the pin moved), not only a missing one.
 - `@tavrn/e2ee`: fewer round trips before a voice join. `ghostCheck` looks the members' devices up in parallel (one
   round trip instead of one per user); `LeafCleaner` skips the fresh lookups when the roster is unchanged since its
   last check without findings (`FRESH_REUSE_MS`, not with a pending removal of a leaf in the group); `selfUpdate` does
@@ -84,6 +118,8 @@ package instead of a git dependency.
 
 ### Fixed
 
+- `@tavrn/sdk`: a socket whose token provider failed once (or whose WebSocket could not be created) never connected
+  again; it retries with backoff now. A throwing event listener no longer keeps the other listeners from the event.
 - `@tavrn/e2ee`: `LeafCleaner.clean` takes `noWait` for a voice join, which must not wait for the election: it joins
   a running cleanup and ends its election wait, runs at once when this device is elected and otherwise returns the new
   outcome `postponed` without committing (the caller cleans again later, in the background); `isRunning(q)` tells
@@ -110,6 +146,11 @@ package instead of a git dependency.
 
 ### Security
 
+- `@tavrn/sdk`: response bodies from other nodes are read with a size cap (discovery documents, hook keys, JSON
+  answers) and within a deadline.
+- `@tavrn/e2ee`: key pins and verified contacts that decrypt but cannot be parsed are no longer replaced by empty
+  ones (which would trust every key again without a warning): `openMlsManager` throws `E2eeError`
+  `state_unreadable` and the stored blob stays.
 - `@tavrn/e2ee`: content (messages, thread titles, ephemeral events) waits for an explicit `acknowledgeGhosts` while
   the roster has a ghost leaf; a ghost check alone no longer counts as shown, and `encrypt` lost `knownGhosts`.
 - `@tavrn/e2ee`: a claimed KeyPackage is added only when its leaf carries the attested key and identity of its device.

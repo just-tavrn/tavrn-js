@@ -7,8 +7,9 @@ Node.js and is shared by the web client, [`@tavrn/e2ee`](../e2ee/README.md) and 
 
 | Module | Contents |
 |---|---|
-| `TavrnApi` | one instance per node: route groups (`auth`, `rooms`, `channels`, `conversations`, `threads`, `keys`, `mls`, `history`, `historyRequests`, `files`, `voice`, `calls`, `invites`, `applications`, `admin`, …), Problem Details as `TavrnApiError`, token refresh on 401, re-authentication on `403 auth.reauth_required` |
-| `TavrnSocket` | `/api/v1/ws`: hello/ready, events, ping/pong, reconnection with backoff, token refresh on close code 4001 |
+| `TavrnApi` | one instance per node: route groups (`auth`, `rooms`, `channels`, `conversations`, `threads`, `keys`, `mls`, `history`, `historyRequests`, `files`, `voice`, `calls`, `invites`, `applications`, `admin`, …), Problem Details as `TavrnApiError`, token refresh on 401, re-authentication on `403 auth.reauth_required`; one request layer for JSON and binary routes with a deadline (`timeoutMs`, 30 s; `transferTimeoutMs`, 10 minutes for files), a size cap for JSON answers (`maxResponseBytes`), abort signals (`signal`, `withSignal`) and percent-encoded ids |
+| `TavrnSocket` | `/api/v1/ws`: hello/ready, events, ping/pong, a liveness watchdog (`livenessMs`), reconnection with backoff, token refresh on close code 4001, isolated event listeners (`onListenerError`) |
+| uploads | `classifyUpload`, `declaredCategory`, `executableKind`: the upload categories of PROTOCOL.md §7a (the node's table and order, checked against `testvectors/upload_categories.json`) for the `Tavrn-Upload-Category` of encrypted uploads and for file pickers |
 | `createRefresher` | single-flight token refresh shared between tabs (Web Locks when available) |
 | permissions | `Permission` bits, `computePermissions` (roles, category and channel overrides for roles and members), the channel-scoped set (`CHANNEL_SCOPED`, `isChannelScoped`), `inheritedOverrideValue` for override editors, bot caps and app token scopes ([`permissions.md`](https://github.com/just-tavrn/tavrn-protocol/blob/main/permissions.md)) |
 | age | `ageOn`, `ADULT_AGE`, `AGE_ERRORS` and the age gate type: the rules of `age.v1` (PROTOCOL.md §5e) for form hints and locked channels; the node decides |
