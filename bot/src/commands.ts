@@ -14,7 +14,7 @@ import { validateModal, type Modal } from "@tavrn/sdk";
 import { BotError } from "./errors";
 import type { BotLogger } from "./logger";
 import { threadTitle } from "./threads";
-import { checkContent } from "./validate";
+import { checkContent, mentionList, normalizeContent as normalize } from "./validate";
 
 /** `data` of the `command.invoke` event (§5.6). */
 export interface CommandInvokeData {
@@ -84,15 +84,6 @@ export type InteractionResult = Record<string, unknown> | undefined;
 
 const ERROR_MAX = 200;
 
-function normalize(content: ReplyContent): Record<string, unknown> {
-  if (typeof content === "string") return { type: "text", body: content };
-  if (!content || typeof content !== "object" || Array.isArray(content)) throw new TypeError("content must be text or a content object");
-  return content;
-}
-
-function mentionList(list: string[] | undefined): string[] {
-  return [...new Set((list ?? []).map((a) => a.trim().toLowerCase()).filter(Boolean))];
-}
 
 /** One invocation of a command (§5.5–§5.8). The first answer counts; `reply` after `defer` sends a follow-up. */
 export class Interaction {
@@ -306,6 +297,43 @@ export class Interaction {
 }
 
 /** Generic notices (the node sees them in encrypted conversations, §5.7). */
+/** What a command and a component interaction offer the shared handler run. */
+interface Answerable {
+  readonly answered: boolean;
+  autoDefer(): Promise<unknown>;
+  error(message: string): Promise<unknown>;
+}
+
+/**
+ * Runs the handler of a command, component or modal interaction: defers automatically when it has not answered after
+ * `autoDeferMs`, answers a generic notice when it throws or returns without answering, and logs both. Never throws.
+ */
+export async function runInteraction(
+  interaction: Answerable,
+  run: () => unknown,
+  opts: { logger: BotLogger; autoDeferMs: number; what: string; fields: Record<string, unknown>; messages: { noAnswer: string; failed: string } },
+): Promise<void> {
+  const log = opts.logger;
+  const timer = setTimeout(() => void interaction.autoDefer(), opts.autoDeferMs);
+  try {
+    await run();
+    if (!interaction.answered) {
+      log.warn(`${opts.what} handler returned without answering`, opts.fields);
+      await interaction.error(opts.messages.noAnswer).catch(() => undefined);
+    }
+  } catch (e) {
+    log.error(`${opts.what} handler failed`, { ...opts.fields, error: e });
+    if (!interaction.answered) await interaction.error(opts.messages.failed).catch(() => undefined);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Answers an interaction that gets no handler with a generic error notice; a failure of that is logged. */
+export function answerError(ctx: InvokeContext, interactionId: string, message: string, log: BotLogger): Promise<unknown> {
+  return ctx.request("POST", `/interactions/${encodeURIComponent(interactionId)}/callback`, { type: "error", message }).catch((e: unknown) => log.warn("could not answer the interaction", { interaction: interactionId, error: e }));
+}
+
 const MSG = {
   unknown: "This command is not available right now.",
   failed: "The command failed.",
@@ -359,32 +387,20 @@ export class CommandRouter {
       log.warn("malformed command.invoke ignored", { node: ctx.node });
       return null;
     }
-    const answerError = (message: string) => ctx.request("POST", `/interactions/${encodeURIComponent(data.interaction_id)}/callback`, { type: "error", message }).catch((e: unknown) => log.warn("could not answer the interaction", { interaction: data.interaction_id, error: e }));
+    const answer = (message: string) => answerError(ctx, data.interaction_id, message, log);
     const handler = this.handlers.get(data.command.name);
     if (!handler) {
       log.warn("command without a handler", { command: data.command.name, interaction: data.interaction_id });
-      await answerError(MSG.unknown);
+      await answer(MSG.unknown);
       return null;
     }
     const args = await this.arguments(data, ctx);
     if (!args.ok) {
-      await answerError(args.reason === "joining" ? MSG.joining : MSG.args);
+      await answer(args.reason === "joining" ? MSG.joining : MSG.args);
       return null;
     }
     const interaction = new Interaction(data, args.args, ctx);
-    const timer = setTimeout(() => void interaction.autoDefer(), this.autoDeferMs);
-    try {
-      await handler(interaction);
-      if (!interaction.answered) {
-        log.warn("command handler returned without answering", { command: data.command.name, interaction: data.interaction_id });
-        await interaction.error(MSG.noAnswer).catch(() => undefined);
-      }
-    } catch (e) {
-      log.error("command handler failed", { command: data.command.name, interaction: data.interaction_id, error: e });
-      if (!interaction.answered) await interaction.error(MSG.failed).catch(() => undefined);
-    } finally {
-      clearTimeout(timer);
-    }
+    await runInteraction(interaction, () => handler(interaction), { logger: log, autoDeferMs: this.autoDeferMs, what: "command", fields: { command: data.command.name, interaction: data.interaction_id }, messages: MSG });
     return interaction;
   }
 

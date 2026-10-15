@@ -5,7 +5,7 @@
  * `TypeError`), never a security boundary.
  */
 import { assertEmbeds } from "@tavrn/e2ee";
-import type { Activity, PresenceRequest } from "@tavrn/sdk";
+import { isUlid, type Activity, type PresenceRequest } from "@tavrn/sdk";
 
 /** `body` of text content (PROTOCOL.md §7). */
 export const MAX_TEXT_CHARS = 4000;
@@ -159,6 +159,18 @@ export function voiceStatus(status: string): string {
 
 /** A ULID in canonical form (ids of messages, users, rooms, threads). */
 export function ulid(name: string, id: string): string {
-  if (typeof id !== "string" || !/^[0-9A-HJKMNP-TV-Z]{26}$/.test(id)) throw new RangeError(`${name} must be an id (ULID)`);
+  if (typeof id !== "string" || !isUlid(id)) throw new RangeError(`${name} must be an id (ULID)`);
   return id;
+}
+
+/** Text or a content object as the content object of a message. */
+export function normalizeContent(content: string | Record<string, unknown>): Record<string, unknown> {
+  if (typeof content === "string") return { type: "text", body: content };
+  if (!content || typeof content !== "object" || Array.isArray(content)) throw new TypeError("content must be text or a content object");
+  return content;
+}
+
+/** Mentioned addresses: trimmed, lowercase, without duplicates. */
+export function mentionList(list: string[] | undefined): string[] {
+  return [...new Set((list ?? []).map((a) => a.trim().toLowerCase()).filter(Boolean))];
 }

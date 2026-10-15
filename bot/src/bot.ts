@@ -31,7 +31,7 @@ import { NodeLink } from "./node-link";
 import { retryingFetch, type RetryOptions } from "./ratelimit";
 import { MessageTracker, validReaction } from "./reactions";
 import { MAX_ATTACHMENTS, asFile, type BotFile, type DownloadedFile } from "./uploads";
-import { activityRequest, banSubject, checkContent, presenceRequest, reason as checkReason, timeoutMinutes, ulid, voiceStatus, type ActivityInput, type PresenceInput } from "./validate";
+import { activityRequest, banSubject, checkContent, mentionList, normalizeContent, presenceRequest, reason as checkReason, timeoutMinutes, ulid, voiceStatus, type ActivityInput, type PresenceInput } from "./validate";
 import { appTokenClaims, type AppTokenClaims } from "./token";
 
 export const BOT_VERSION = "0.2.1";
@@ -397,15 +397,6 @@ function code(e: unknown): string | undefined {
   return e instanceof TavrnApiError ? e.code : undefined;
 }
 
-function normalizeContent(content: ReplyContent): Record<string, unknown> {
-  if (typeof content === "string") return { type: "text", body: content };
-  if (!content || typeof content !== "object" || Array.isArray(content)) throw new TypeError("content must be text or a content object");
-  return content;
-}
-
-function mentionList(list: string[] | undefined): string[] {
-  return [...new Set((list ?? []).map((a) => a.trim().toLowerCase()).filter(Boolean))];
-}
 
 export class Bot {
   readonly logger: BotLogger;
