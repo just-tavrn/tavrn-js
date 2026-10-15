@@ -24,6 +24,11 @@ package instead of a git dependency.
 
 ### Added
 
+- **Moderation bots read the room's report inbox** (tavrn-protocol#45, `MODERATION.md` §1.4a): `bot.reports(room,
+  { status, limit, before })`, `bot.report(id, node?)` and the `report` event (`bot.onReport`) for bots with
+  `moderation` and "Moderate members" in the room; metadata only (`AppReport`: kind, category, target, status, counts,
+  times, the reported message's id, the reporter as a pseudonym). `api.reports.roomForApp` and `api.reports.getForApp`
+  in `@tavrn/sdk`. Reports stay read-only for bots.
 - **Reactors** (tavrn-protocol#43, tavrn-node#83): the `reaction` event names the reactor from the node's `reaction`
   field (`user`, the new `userId`), also on messages the bot has never seen, and no longer reports the bot's own
   reactions; `bot.reactors(conversation, messageId, emoji, { after, limit })` and `api.reactions.list(conversationId,

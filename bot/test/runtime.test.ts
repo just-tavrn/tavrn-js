@@ -7,7 +7,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createBot, type Bot, type BotMessage, type DmRequestEvent, type MemberEvent, type MessageDeleteEvent, type ReactionEvent, type ThreadEvent } from "../src";
+import { createBot, type Bot, type BotMessage, type DmRequestEvent, type MemberEvent, type MessageDeleteEvent, type ReactionEvent, type ReportEvent, type ThreadEvent } from "../src";
 import { silentLogger } from "../src/logger";
 import { ALICE, ALICE_ID, BASE, BOT_ADDRESS, CHANNEL, DOMAIN, FORUM, FakeNode, ROOM, TOKEN, VOICE, message, respond, settle } from "./fake-node";
 
@@ -283,6 +283,56 @@ describe("threads (PROTOCOL.md §7e)", () => {
     expect(events.map((e) => [e.action, e.threadId, e.conversation, !!e.thread])).toEqual([
       ["create", THREAD, `${DOMAIN}/${CHANNEL}`, true],
       ["delete", THREAD, `${DOMAIN}/${CHANNEL}`, false],
+    ]);
+  });
+});
+
+describe("reports (MODERATION.md §1.4a, tavrn-protocol#45)", () => {
+  const REPORT = "01J9ZK3G5M8Q2W4E6R8T0Y2P01";
+  const appReport = { id: REPORT, source: "user", scope: "room", kind: "message", room_id: ROOM, room_name: "Room", conversation_id: CHANNEL, conversation_kind: "channel", message_id: MSG, message_exists: true, target: null, target_address: ALICE, reporter: "anon-x1", category: "spam", evidence_count: 0, action_count: 0, status: "open", created_at: "2026-10-15T10:00:00Z", updated_at: "2026-10-15T10:00:00Z", resolved_at: null };
+
+  it("reads the room's inbox and single reports with checked queries, never writing", async () => {
+    await startBot();
+    node.route("GET", /\/rooms\/[^/]+\/reports$/, () => ({ reports: [appReport], open: 1 }));
+    node.route("GET", /\/reports\/[^/]+$/, () => appReport);
+    const list = await bot.reports({ node: DOMAIN, roomId: ROOM }, { status: "open", limit: 20, before: REPORT });
+    expect(list).toEqual({ reports: [appReport], open: 1 });
+    await bot.reports(ROOM);
+    const calls = node.requests(/\/rooms\/[^/]+\/reports$/);
+    expect(calls.map((c) => [c.path, Object.fromEntries(c.query)])).toEqual([
+      [`/api/v1/rooms/${ROOM}/reports`, { status: "open", limit: "20", before: REPORT }],
+      [`/api/v1/rooms/${ROOM}/reports`, {}],
+    ]);
+    expect(await bot.report(REPORT)).toEqual(appReport);
+    expect(await bot.report(`${DOMAIN}/${REPORT}`)).toEqual(appReport);
+    expect(node.requests(/\/reports\/[^/]+$/, "GET").map((c) => c.path)).toEqual([`/api/v1/reports/${REPORT}`, `/api/v1/reports/${REPORT}`]);
+    await expect(bot.reports(ROOM, { status: "closed" as "open" })).rejects.toThrow(RangeError);
+    await expect(bot.reports(ROOM, { limit: 0 })).rejects.toThrow(RangeError);
+    await expect(bot.reports(ROOM, { limit: 101 })).rejects.toThrow(RangeError);
+    await expect(bot.reports(ROOM, { before: "nope" })).rejects.toThrow(RangeError);
+    await expect(bot.report("not-an-id")).rejects.toThrow(RangeError);
+    await expect(bot.reports({ node: DOMAIN, roomId: null })).rejects.toMatchObject({ code: "not_member" });
+    // Read-only: nothing but GETs reached the report routes.
+    expect(node.requests(/\/reports/).every((c) => c.method === "GET")).toBe(true);
+  });
+
+  it("surfaces the node's refusals unchanged", async () => {
+    await startBot();
+    node.route("GET", /\/rooms\/[^/]+\/reports$/, () => respond(403, { type: "about:blank", title: "Forbidden", status: 403, code: "report.view_forbidden", detail: "Missing permission: Moderate members" }));
+    await expect(bot.reports(ROOM)).rejects.toMatchObject({ code: "report.view_forbidden" });
+  });
+
+  it("turns report.create and report.update into report events", async () => {
+    await startBot();
+    const events: ReportEvent[] = [];
+    bot.onReport((e) => void events.push(e));
+    node.emit("report.create", { report: { id: REPORT, scope: "room", source: "user", kind: "message", room_id: ROOM, room_name: "Room", conversation_id: CHANNEL, category: "spam", created_at: "2026-10-15T10:00:00Z" } });
+    node.emit("report.update", { id: REPORT, scope: "room", room_id: ROOM, status: "resolved" });
+    node.emit("report.update", { scope: "room" });
+    await settle();
+    expect(events).toEqual([
+      { node: DOMAIN, action: "create", reportId: REPORT, roomId: ROOM, status: "open", kind: "message", category: "spam", source: "user", createdAt: "2026-10-15T10:00:00Z" },
+      { node: DOMAIN, action: "update", reportId: REPORT, roomId: ROOM, status: "resolved", kind: null, category: null, source: null, createdAt: null },
     ]);
   });
 });

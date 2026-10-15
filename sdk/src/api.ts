@@ -197,7 +197,7 @@ import type { BackendInfo, BackendRequest, BackendTest, DeleteResult, FileEntry,
 import type { AdminApplication, AdminApplicationUpdate, ApplicationBlock, ApplicationBlockRequest, InstallIndexEntry, InstallRequest, Installation, PublicApplication } from "./generated/types.gen";
 import type { PeerResolution } from "./generated/types.gen";
 import type { PushRegistration, PushSubscriptionRequest, VapidInfo } from "./generated/types.gen";
-import type { AdminRoom, AutomodRule, AutomodSettings, CreateReportRequest, ModerationReport, ReportActionRequest, ReportActionResult, ReportCreated, ReportList, UpdateReportRequest } from "./generated/types.gen";
+import type { AdminRoom, AppReport, AppReportList, AutomodRule, AutomodSettings, CreateReportRequest, ModerationReport, ReportActionRequest, ReportActionResult, ReportCreated, ReportList, UpdateReportRequest } from "./generated/types.gen";
 import type { AcceptTermsRequest, AccountDeletion, CounterDecision, CounterNoticeRequest, DataSummary, DeleteAccountRequest, DeletionStarted, LegalContact, LegalDocument, LegalTemplate, Notice, NoticeAction, NoticeActionResult, NoticeCreated, NoticeDetail, NoticeRequest, NoticeStatus, TermsStatus, UploaderNotice } from "./generated/types.gen";
 import type { Modal } from "./components";
 import type { Callback, ComponentInvokeRequest, ModalSubmitRequest, CommandApproval, CommandApprovalRequest, CommandApprovalSettings, CommandDefinition, CommandSet, FollowUp, FollowUpResponse, InvokeRequest, InvokeResponse, PaletteCommand, PutCommandSettings, RoomCommand, RoomCommands } from "./generated/types.gen";
@@ -1213,6 +1213,13 @@ export class TavrnApi {
     forward: (reportId: string) => this.post<ModerationReport>(`/reports/${encodeURIComponent(reportId)}/forward`, {}),
     room: (roomId: string, query?: { status?: string; limit?: number; before?: string }) => this.get<ReportList>(`/rooms/${roomId}/reports`, query),
     admin: (query?: { status?: string; scope?: string; limit?: number; before?: string }) => this.get<ReportList>("/admin/reports", query),
+    /**
+     * Moderation bots (app token scope `moderation`, `moderate_members` in the room, MODERATION.md §1.4a): the room's
+     * reports in the reduced shape, metadata only, the reporter as a pseudonym. App tokens always get this shape.
+     */
+    roomForApp: (roomId: string, query?: { status?: string; limit?: number; before?: string }) => this.get<AppReportList>(`/rooms/${roomId}/reports`, query),
+    /** Moderation bots: one report of a room they moderate in the reduced shape (MODERATION.md §1.4a). */
+    getForApp: (reportId: string) => this.get<AppReport>(`/reports/${encodeURIComponent(reportId)}`),
   };
 
   /** Content rules of a room's unencrypted channels (MODERATION.md §2, capability `automod.v1`). */

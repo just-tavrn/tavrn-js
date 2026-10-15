@@ -193,7 +193,6 @@ encrypted content), events `memberJoin` / `memberLeave`.
 **Moderation** (`moderation`; the room permissions still decide): `bot.timeout(room, userId, minutes, { reason })` (0
 lifts it, at most 28 days), `bot.kick(room, userId)`, `bot.ban(room, "user@node" | "domain")`, `bot.unban`,
 `bot.bans`, `bot.auditLog`. `userId` is the member's id on the room's node: `m.authorId`, `interaction.userId`.
-Reports stay closed to bots (tavrn-protocol#45).
 
 ```ts
 bot.on("message", async (m) => {
@@ -201,6 +200,24 @@ bot.on("message", async (m) => {
     await bot.deleteMessage(m.conversation, m.id);
     await bot.timeout(m, m.authorId, 60, { reason: "spam link" });
   }
+});
+```
+
+**Reports** (`moderation` and "Moderate members" in the room; MODERATION.md §1.4a): read-only and metadata only.
+`bot.reports(room, { status, limit, before })` lists the room's reports newest first, `bot.report(id)` reads one, and
+the `report` event (`bot.onReport`) tells about new and changed ones. A report names its kind, category, the reported
+user (`target_address`), status, `evidence_count`, `action_count`, times and the reported `message_id`; the reporter
+is a pseudonym (the same for the same reporter in that room), and the reason, snapshots and released messages never
+reach bots. Creating, triaging and acting on reports stay with people: escalate to them instead.
+
+```ts
+const modChannel = process.env.MOD_CHANNEL!; // "<node>/<channel id>" of the moderators' channel
+bot.onReport(async (e) => {
+  if (e.action !== "create" || !e.roomId) return;
+  const open = await bot.reports({ node: e.node, roomId: e.roomId }, { status: "open", limit: 100 });
+  const report = await bot.report(e.reportId, e.node);
+  const about = open.reports.filter((r) => r.target_address === report.target_address).length;
+  if (about >= 3) await bot.send(modChannel, `${about} open reports about ${report.target_address}`);
 });
 ```
 
