@@ -186,7 +186,8 @@ describe("TavrnApi", () => {
     expect(got!.etag).toBe('"abc"');
     await api.backups.put("n.example", "C", new Uint8Array([9]), got!.etag);
     const put = calls[2]!;
-    expect(put.url).toBe("/api/v1/users/me/backups/n.example/C");
+    // Same origin (no base URL): binary routes resolve like the JSON routes.
+    expect(new URL(put.url).pathname).toBe("/api/v1/users/me/backups/n.example/C");
     expect((put.init.headers as Record<string, string>)["If-Match"]).toBe('"abc"');
     expect((put.init.headers as Record<string, string>).Authorization).toBe("Bearer tok");
     await api.backups.put("n.example", "D", new Uint8Array([9]), null);

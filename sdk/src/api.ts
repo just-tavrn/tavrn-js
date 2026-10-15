@@ -4,6 +4,7 @@
  * (`src/generated`, from the protocol's `openapi.json` via `just generate`). Errors always arrive as `TavrnApiError` with Problem Details.
  */
 import { TavrnApiError, toProblem } from "./errors";
+import { DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_TIMEOUT_MS, DEFAULT_TRANSFER_TIMEOUT_MS, deadline, discard, readText, safePath, transportError, type Deadline } from "./http";
 import type {
   AccountInvite,
   Application,
@@ -275,9 +276,41 @@ export interface ApiOptions {
    * (e.g. a dialog that calls `auth.reauth`) and resolve true to repeat the request once with the new reauth token.
    */
   onReauthRequired?: (methods: string[]) => Promise<boolean>;
+  /**
+   * Deadline of a request in milliseconds (default 30 s; 0 = none): the answer must be complete by then, otherwise
+   * the request fails with `TavrnApiError` `network.timeout` (status 0). Uploads and downloads of files use
+   * {@link ApiOptions.transferTimeoutMs}.
+   */
+  timeoutMs?: number;
+  /** Deadline of file uploads and downloads (attachments, files channels, backups; default 10 minutes; 0 = none). */
+  transferTimeoutMs?: number;
+  /** Largest JSON answer read (default 32 MiB): a larger one fails with `response.too_large` before it is buffered. */
+  maxResponseBytes?: number;
+  /** Aborts every request of this client (`request.aborted`); {@link TavrnApi.withSignal} scopes one to a task. */
+  signal?: AbortSignal;
 }
 
 type Query = Record<string, string | number | undefined | null>;
+
+/** How {@link TavrnApi} sends one request: JSON (`body`) or raw (`raw`), and what the answer is. */
+interface SendInit {
+  /** JSON body. */
+  body?: unknown;
+  /** Raw body (files, ciphertext), sent unchanged. */
+  raw?: BodyInit;
+  query?: Query;
+  headers?: Record<string, string>;
+  /** Upload progress (XMLHttpRequest where the runtime has it). */
+  onProgress?: (fraction: number) => void;
+  /** Aborts this request (in addition to the client's signal). */
+  signal?: AbortSignal;
+  /** A file transfer: the transfer timeout applies. */
+  transfer?: boolean;
+  /** No credentials, no refresh (public documents such as `/.well-known/tavrn`). */
+  anonymous?: boolean;
+  /** The path is absolute on the node (`/.well-known/tavrn`) instead of below `/api/v1`. */
+  root?: boolean;
+}
 
 /** Filters of `GET /rooms/{room_id}/search` (PROTOCOL.md §7d). Dates: RFC 3339 or `YYYY-MM-DD`. */
 export interface SearchQuery {
@@ -310,6 +343,52 @@ export interface ThreadListQuery {
 export const SEARCH_MARK_START = "\u0001";
 export const SEARCH_MARK_END = "\u0002";
 
+/** Problem Details are small; a refusal is read up to this size. */
+const PROBLEM_MAX_BYTES = 64 * 1024;
+
+/** A signal that aborts when either one does. */
+function anySignal(a: AbortSignal, b: AbortSignal): AbortSignal {
+  const c = new AbortController();
+  for (const s of [a, b]) {
+    if (s.aborted) {
+      c.abort(s.reason);
+      break;
+    }
+    s.addEventListener("abort", () => c.abort(s.reason), { once: true });
+  }
+  return c.signal;
+}
+
+/** Response headers of an XMLHttpRequest. */
+function xhrHeaders(raw: string): Headers {
+  const headers = new Headers();
+  for (const line of raw.trim().split(/[\r\n]+/)) {
+    const at = line.indexOf(":");
+    if (at > 0) headers.append(line.slice(0, at).trim(), line.slice(at + 1).trim());
+  }
+  return headers;
+}
+
+/** An upload with progress through XMLHttpRequest (fetch reports no upload progress), answered as a `Response`. */
+function xhrSend(url: string, method: string, headers: Record<string, string>, body: BodyInit | undefined, onProgress: (fraction: number) => void, signal: AbortSignal | undefined): Promise<Response> {
+  return new Promise<Response>((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason);
+    const xhr = new XMLHttpRequest();
+    xhr.open(method, url);
+    xhr.responseType = "arraybuffer";
+    for (const [k, v] of Object.entries(headers)) xhr.setRequestHeader(k, v);
+    xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
+    xhr.onload = () => {
+      const empty = xhr.status === 204 || xhr.status === 205 || xhr.status === 304;
+      resolve(new Response(empty ? null : (xhr.response as ArrayBuffer), { status: xhr.status, statusText: xhr.statusText, headers: xhrHeaders(xhr.getAllResponseHeaders()) }));
+    };
+    xhr.onerror = () => reject(new TypeError("upload failed"));
+    xhr.onabort = () => reject(signal?.reason ?? new TypeError("upload aborted"));
+    signal?.addEventListener("abort", () => xhr.abort(), { once: true });
+    xhr.send((body ?? null) as XMLHttpRequestBodyInit | null);
+  });
+}
+
 export class TavrnApi {
   private readonly opts: ApiOptions;
 
@@ -327,48 +406,9 @@ export class TavrnApi {
     return (await this.exchange<T>(method, path, { body, query })).data;
   }
 
-  /** Like {@link TavrnApi.request} with extra request headers; also returns the response headers. */
-  async exchange<T>(method: string, path: string, init: { body?: unknown; query?: Query; headers?: Record<string, string> } = {}, retried = false, reauthed = false): Promise<{ data: T; headers: Headers }> {
-    const { body, query } = init;
-    const url = new URL(`${this.baseUrl}/api/v1${path}`, typeof location !== "undefined" ? location.origin : "http://localhost");
-    for (const [k, v] of Object.entries(query ?? {})) if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
-    const headers: Record<string, string> = { Accept: "application/json", ...init.headers };
-    if (body !== undefined) headers["Content-Type"] = "application/json";
-    const token = this.opts.getToken?.();
-    if (token) headers.Authorization = `Bearer ${token}`;
-    if (this.opts.clientHeader) headers["Tavrn-Client"] = this.opts.clientHeader;
-    const reauth = token ? this.opts.reauthToken?.() : null;
-    if (reauth) headers["Tavrn-Reauth"] = reauth;
-    const doFetch = this.opts.fetchImpl ?? fetch;
-    let resp: Response;
-    try {
-      resp = await doFetch(url.toString(), { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
-    } catch (e) {
-      throw new TavrnApiError({ type: "about:blank", title: "Network error", status: 0, detail: e instanceof Error ? e.message : String(e), code: "network.error" });
-    }
-    if (resp.status === 401 && !retried && this.opts.refreshToken && token) {
-      const fresh = await this.opts.refreshToken();
-      if (fresh && fresh !== token) return this.exchange<T>(method, path, init, true, reauthed);
-    }
-    if (resp.status === 204) return { data: undefined as T, headers: resp.headers };
-    const text = await resp.text();
-    let json: unknown = null;
-    if (text) {
-      try {
-        json = JSON.parse(text);
-      } catch {
-        json = null;
-      }
-    }
-    if (!resp.ok) {
-      const problem = toProblem(resp.status, json, resp.statusText);
-      if (resp.status === 403 && problem.code === "auth.reauth_required" && !reauthed && this.opts.onReauthRequired) {
-        const methods = ((problem as { meta?: { methods?: unknown } }).meta?.methods as string[] | undefined) ?? [];
-        if (await this.opts.onReauthRequired(methods)) return this.exchange<T>(method, path, init, retried, true);
-      }
-      throw new TavrnApiError(problem);
-    }
-    return { data: json as T, headers: resp.headers };
+  /** Like {@link TavrnApi.request} with extra request headers and an optional signal; also returns the response headers. */
+  async exchange<T>(method: string, path: string, init: { body?: unknown; query?: Query; headers?: Record<string, string>; signal?: AbortSignal } = {}): Promise<{ data: T; headers: Headers }> {
+    return this.json<T>(method, path, init);
   }
 
   /**
@@ -379,26 +419,125 @@ export class TavrnApi {
     return new TavrnApi({ ...this.opts, getToken: () => token, refreshToken: undefined });
   }
 
-  private authHeaders(): Record<string, string> {
-    const headers: Record<string, string> = {};
-    const token = this.opts.getToken?.();
-    if (token) headers.Authorization = `Bearer ${token}`;
-    if (this.opts.clientHeader) headers["Tavrn-Client"] = this.opts.clientHeader;
-    return headers;
+  /**
+   * The same client with every request bound to `signal` as well (`request.aborted` once it aborts), e.g. for the
+   * requests of one view or task: `api.withSignal(controller.signal).messages.list(…)`.
+   */
+  withSignal(signal: AbortSignal): TavrnApi {
+    const outer = this.opts.signal;
+    return new TavrnApi({ ...this.opts, signal: outer ? anySignal(outer, signal) : signal });
   }
 
-  /** Binary request (backups): returns the response; errors become `TavrnApiError`, 404 can be allowed. */
-  private async binary(method: string, path: string, init: { body?: Uint8Array; headers?: Record<string, string>; allow404?: boolean } = {}): Promise<Response | null> {
-    const doFetch = this.opts.fetchImpl ?? fetch;
+  private get maxResponseBytes(): number {
+    return this.opts.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+  }
+
+  /**
+   * The request layer every route goes through: URL and path check, credentials, client and reauth headers, the
+   * deadline, one refresh on `401`, one re-authentication on `403 auth.reauth_required`, Problem Details as
+   * `TavrnApiError`. Returns a `2xx` answer (or an allowed `404`) whose body the caller reads under `deadline`.
+   */
+  private async send(method: string, path: string, init: SendInit & { allow404?: boolean; accept?: boolean }, retried = false, reauthed = false): Promise<{ resp: Response; deadline: Deadline }> {
+    if (!safePath(path)) throw transportError("request.invalid_path", "an id is empty or a dot segment");
+    const url = new URL(`${this.baseUrl}${init.root ? "" : "/api/v1"}${path}`, typeof location !== "undefined" ? location.origin : "http://localhost");
+    for (const [k, v] of Object.entries(init.query ?? {})) if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
+    const headers: Record<string, string> = init.accept ? { Accept: "application/json", ...init.headers } : { ...init.headers };
+    if (init.body !== undefined) headers["Content-Type"] = "application/json";
+    const token = init.anonymous ? null : this.opts.getToken?.();
+    if (token) headers.Authorization = `Bearer ${token}`;
+    if (this.opts.clientHeader) headers["Tavrn-Client"] = this.opts.clientHeader;
+    const reauth = token ? this.opts.reauthToken?.() : null;
+    if (reauth) headers["Tavrn-Reauth"] = reauth;
+    const body = init.raw ?? (init.body === undefined ? undefined : JSON.stringify(init.body));
+    const ms = init.transfer ? (this.opts.transferTimeoutMs ?? DEFAULT_TRANSFER_TIMEOUT_MS) : (this.opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+    const d = deadline(ms, this.opts.signal, init.signal);
     let resp: Response;
     try {
-      resp = await doFetch(`${this.baseUrl}/api/v1${path}`, { method, headers: { ...this.authHeaders(), ...init.headers }, body: init.body as BodyInit | undefined });
+      if (d.signal?.aborted) throw d.signal.reason;
+      resp =
+        init.onProgress && typeof XMLHttpRequest !== "undefined"
+          ? await xhrSend(url.toString(), method, headers, body, init.onProgress, d.signal)
+          : await (this.opts.fetchImpl ?? fetch)(url.toString(), { method, headers, body, signal: d.signal });
     } catch (e) {
-      throw new TavrnApiError({ type: "about:blank", title: "Network error", status: 0, detail: e instanceof Error ? e.message : String(e), code: "network.error" });
+      d.done();
+      throw d.failure(e);
     }
-    if (resp.status === 404 && init.allow404) return null;
-    if (!resp.ok) throw new TavrnApiError(toProblem(resp.status, await resp.json().catch(() => null), resp.statusText));
-    return resp;
+    if (resp.status === 401 && !retried && token && this.opts.refreshToken) {
+      const fresh = await this.opts.refreshToken().catch(() => null);
+      if (fresh && fresh !== token) {
+        d.done();
+        discard(resp);
+        return this.send(method, path, init, true, reauthed);
+      }
+    }
+    if (resp.ok || (resp.status === 404 && init.allow404)) return { resp, deadline: d };
+    let json: unknown = null;
+    try {
+      const text = await readText(resp, PROBLEM_MAX_BYTES);
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      json = null;
+    } finally {
+      d.done();
+    }
+    const problem = toProblem(resp.status, json, resp.statusText);
+    if (resp.status === 403 && problem.code === "auth.reauth_required" && !reauthed && this.opts.onReauthRequired) {
+      const methods = ((problem as { meta?: { methods?: unknown } }).meta?.methods as string[] | undefined) ?? [];
+      if (await this.opts.onReauthRequired(methods)) return this.send(method, path, init, retried, true);
+    }
+    throw new TavrnApiError(problem);
+  }
+
+  /** {@link TavrnApi.send} and a read of the answer under the same deadline; null for an allowed `404`. */
+  private async receive<T>(method: string, path: string, init: SendInit & { allow404?: boolean; accept?: boolean }, read: (resp: Response) => Promise<T>): Promise<T | null> {
+    const { resp, deadline: d } = await this.send(method, path, init);
+    try {
+      if (!resp.ok) {
+        discard(resp);
+        return null;
+      }
+      return await read(resp);
+    } catch (e) {
+      throw d.failure(e);
+    } finally {
+      d.done();
+    }
+  }
+
+  /** A JSON answer (an empty body or `204` is `undefined`, an unparsable one `null`). */
+  private async json<T>(method: string, path: string, init: SendInit): Promise<{ data: T; headers: Headers }> {
+    const max = this.maxResponseBytes;
+    return (await this.receive(method, path, { ...init, accept: true }, async (resp) => {
+      if (resp.status === 204) {
+        discard(resp);
+        return { data: undefined as T, headers: resp.headers };
+      }
+      const text = await readText(resp, max);
+      let data: unknown = null;
+      if (text) {
+        try {
+          data = JSON.parse(text);
+        } catch {
+          data = null;
+        }
+      }
+      return { data: data as T, headers: resp.headers };
+    }))!;
+  }
+
+  /** A raw body (file, ciphertext) with a JSON answer. */
+  private async rawJson<T>(method: string, path: string, raw: BodyInit, headers: Record<string, string>, opts: { transfer?: boolean; onProgress?: (fraction: number) => void; signal?: AbortSignal } = {}): Promise<T> {
+    return (await this.json<T>(method, path, { raw, headers, ...opts })).data;
+  }
+
+  /** A binary answer as bytes (and its headers); null for `404` when `allow404`. */
+  private async bytes(path: string, opts: { allow404?: boolean; transfer?: boolean; headers?: Record<string, string> } = {}): Promise<{ bytes: Uint8Array; headers: Headers } | null> {
+    return this.receive("GET", path, opts, async (resp) => ({ bytes: new Uint8Array(await resp.arrayBuffer()), headers: resp.headers }));
+  }
+
+  /** A binary answer as a Blob. */
+  private async blob(method: string, path: string, opts: { raw?: BodyInit; headers?: Record<string, string>; transfer?: boolean } = {}): Promise<Blob> {
+    return (await this.receive(method, path, opts, (resp) => resp.blob()))!;
   }
 
   private clipHeaders(name: string, file: Blob, durationMs: number, emoji?: string): Record<string, string> {
@@ -408,79 +547,16 @@ export class TavrnApi {
   }
 
   /** Raw upload to a conversation or channel route (`Tavrn-File-Name` may be empty for ciphertext). */
-  private async uploadTo(url: string, file: Blob, name: string, onProgress?: (fraction: number) => void, category?: string): Promise<Attachment> {
-    const headers: Record<string, string> = { "Content-Type": file.type || "application/octet-stream", "Tavrn-File-Name": encodeURIComponent(name), ...this.authHeaders() };
+  private uploadTo(path: string, file: Blob, name: string, onProgress?: (fraction: number) => void, category?: string): Promise<Attachment> {
+    const headers: Record<string, string> = { "Content-Type": file.type || "application/octet-stream", "Tavrn-File-Name": encodeURIComponent(name) };
     // Encrypted uploads declare their category (PROTOCOL.md §7a); plaintext ones are classified by the node.
     if (category) headers["Tavrn-Upload-Category"] = category;
-    if (typeof XMLHttpRequest !== "undefined" && onProgress) {
-      return new Promise<Attachment>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open("POST", url);
-        for (const [k, v] of Object.entries(headers)) xhr.setRequestHeader(k, v);
-        xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
-        xhr.onload = () => {
-          let json: unknown = null;
-          try {
-            json = JSON.parse(xhr.responseText);
-          } catch {
-            json = null;
-          }
-          if (xhr.status >= 200 && xhr.status < 300) resolve(json as Attachment);
-          else reject(new TavrnApiError(toProblem(xhr.status, json, xhr.statusText)));
-        };
-        xhr.onerror = () => reject(new TavrnApiError({ type: "about:blank", title: "Network error", status: 0, detail: "Upload aborted", code: "network.error" }));
-        xhr.send(file);
-      });
-    }
-    const resp = await (this.opts.fetchImpl ?? fetch)(url, { method: "POST", headers, body: file });
-    const json: unknown = await resp.json().catch(() => null);
-    if (!resp.ok) throw new TavrnApiError(toProblem(resp.status, json, resp.statusText));
-    return json as Attachment;
-  }
-
-  /** Raw POST of a blob with progress (XMLHttpRequest when available) and abort; the answer is JSON. */
-  private async sendBlob<T>(url: string, file: Blob, headers: Record<string, string>, onProgress?: (fraction: number) => void, signal?: AbortSignal): Promise<T> {
-    if (typeof XMLHttpRequest !== "undefined" && onProgress) {
-      return new Promise<T>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open("POST", url);
-        for (const [k, v] of Object.entries(headers)) xhr.setRequestHeader(k, v);
-        xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
-        xhr.onload = () => {
-          let json: unknown = null;
-          try {
-            json = JSON.parse(xhr.responseText);
-          } catch {
-            json = null;
-          }
-          if (xhr.status >= 200 && xhr.status < 300) resolve(json as T);
-          else reject(new TavrnApiError(toProblem(xhr.status, json, xhr.statusText)));
-        };
-        const aborted = () => reject(new TavrnApiError({ type: "about:blank", title: "Aborted", status: 0, detail: "Upload aborted", code: "upload.aborted" }));
-        xhr.onerror = () => reject(new TavrnApiError({ type: "about:blank", title: "Network error", status: 0, detail: "Upload failed", code: "network.error" }));
-        xhr.onabort = aborted;
-        signal?.addEventListener("abort", () => xhr.abort(), { once: true });
-        xhr.send(file);
-      });
-    }
-    const resp = await (this.opts.fetchImpl ?? fetch)(url, { method: "POST", headers, body: file, signal });
-    const json: unknown = await resp.json().catch(() => null);
-    if (!resp.ok) throw new TavrnApiError(toProblem(resp.status, json, resp.statusText));
-    return json as T;
+    return this.rawJson<Attachment>("POST", path, file, headers, { transfer: true, onProgress });
   }
 
   /** Raw upload (images for the media pipeline, design note 4.9): the body is the file, the answer JSON. */
-  private async rawUpload<T>(path: string, file: Blob): Promise<T> {
-    const headers: Record<string, string> = { "Content-Type": file.type || "application/octet-stream", ...this.authHeaders() };
-    let resp: Response;
-    try {
-      resp = await (this.opts.fetchImpl ?? fetch)(`${this.baseUrl}/api/v1${path}`, { method: "PUT", headers, body: file });
-    } catch (e) {
-      throw new TavrnApiError({ type: "about:blank", title: "Network error", status: 0, detail: e instanceof Error ? e.message : String(e), code: "network.error" });
-    }
-    const json: unknown = await resp.json().catch(() => null);
-    if (!resp.ok) throw new TavrnApiError(toProblem(resp.status, json, resp.statusText));
-    return json as T;
+  private rawUpload<T>(path: string, file: Blob): Promise<T> {
+    return this.rawJson<T>("PUT", path, file, { "Content-Type": file.type || "application/octet-stream" });
   }
 
   /**
@@ -512,9 +588,9 @@ export class TavrnApi {
   node = {
     info: () => this.get<NodeInfo>("/node"),
     wellKnown: async (): Promise<WellKnown> => {
-      const resp = await (this.opts.fetchImpl ?? fetch)(`${this.baseUrl}/.well-known/tavrn`);
-      if (!resp.ok) throw new TavrnApiError(toProblem(resp.status, null, resp.statusText));
-      return (await resp.json()) as WellKnown;
+      const doc = (await this.json<WellKnown | null>("GET", "/.well-known/tavrn", { root: true, anonymous: true })).data;
+      if (!doc || typeof doc !== "object") throw new TavrnApiError({ type: "about:blank", title: "Invalid node", status: 0, detail: "no discovery document", code: "federation.peer_invalid" });
+      return doc;
     },
   };
 
@@ -811,16 +887,14 @@ export class TavrnApi {
     list: () => this.get<BackupList>("/users/me/backups"),
     /** The blob and its ETag, or null if there is no backup yet. */
     get: async (domain: string, conversationUlid: string): Promise<{ blob: Uint8Array; etag: string } | null> => {
-      const resp = await this.binary("GET", `/users/me/backups/${encodeURIComponent(domain)}/${encodeURIComponent(conversationUlid)}`, { allow404: true });
-      if (!resp) return null;
-      return { blob: new Uint8Array(await resp.arrayBuffer()), etag: resp.headers.get("ETag") ?? "" };
+      const r = await this.bytes(`/users/me/backups/${encodeURIComponent(domain)}/${encodeURIComponent(conversationUlid)}`, { allow404: true, transfer: true });
+      return r ? { blob: r.bytes, etag: r.headers.get("ETag") ?? "" } : null;
     },
     /** Stores the blob; `etag` (If-Match) is required when replacing (412 `backup.etag_mismatch`). */
     put: async (domain: string, conversationUlid: string, blob: Uint8Array, etag: string | null): Promise<BackupInfo> => {
       const headers: Record<string, string> = { "Content-Type": "application/octet-stream" };
       if (etag) headers["If-Match"] = etag;
-      const resp = await this.binary("PUT", `/users/me/backups/${encodeURIComponent(domain)}/${encodeURIComponent(conversationUlid)}`, { body: blob, headers });
-      return (await resp!.json()) as BackupInfo;
+      return this.rawJson<BackupInfo>("PUT", `/users/me/backups/${encodeURIComponent(domain)}/${encodeURIComponent(conversationUlid)}`, blob as BodyInit, headers, { transfer: true });
     },
   };
 
@@ -931,8 +1005,7 @@ export class TavrnApi {
     uploadBackground: (file: Blob) => this.rawUpload<Background>("/users/me/background", file),
     deleteBackground: () => this.del<Background>("/users/me/background"),
     backgroundImage: async (variant: "still" | "animated"): Promise<Blob> => {
-      const resp = await this.binary("GET", `/users/me/background/${variant}`);
-      return resp!.blob();
+      return this.blob("GET", `/users/me/background/${encodeURIComponent(variant)}`);
     },
   };
 
@@ -951,30 +1024,26 @@ export class TavrnApi {
     list: () => this.get<SceneList>("/users/me/whiteboards"),
     /** The encrypted scene blob, or null if there is no such scene. */
     get: async (sceneId: string): Promise<Uint8Array | null> => {
-      const resp = await this.binary("GET", `/users/me/whiteboards/${encodeURIComponent(sceneId)}`, { allow404: true });
-      return resp ? new Uint8Array(await resp.arrayBuffer()) : null;
+      return (await this.bytes(`/users/me/whiteboards/${encodeURIComponent(sceneId)}`, { allow404: true }))?.bytes ?? null;
     },
     /** Creates (`name` required) or replaces (`name` optional) a scene. */
     put: async (sceneId: string, blob: Uint8Array, name?: string): Promise<SceneInfo> => {
       const headers: Record<string, string> = { "Content-Type": "application/octet-stream" };
       if (name !== undefined) headers["Tavrn-Scene-Name"] = encodeURIComponent(name);
-      const resp = await this.binary("PUT", `/users/me/whiteboards/${encodeURIComponent(sceneId)}`, { body: blob, headers });
-      return (await resp!.json()) as SceneInfo;
+      return this.rawJson<SceneInfo>("PUT", `/users/me/whiteboards/${encodeURIComponent(sceneId)}`, blob as BodyInit, headers);
     },
     rename: (sceneId: string, name: string) => this.patch<SceneInfo>(`/users/me/whiteboards/${encodeURIComponent(sceneId)}`, { name }),
     delete: (sceneId: string) => this.del(`/users/me/whiteboards/${encodeURIComponent(sceneId)}`),
     /** The encrypted thumbnail, or null without one. */
     thumbnail: async (sceneId: string): Promise<Uint8Array | null> => {
-      const resp = await this.binary("GET", `/users/me/whiteboards/${encodeURIComponent(sceneId)}/thumbnail`, { allow404: true });
-      return resp ? new Uint8Array(await resp.arrayBuffer()) : null;
+      return (await this.bytes(`/users/me/whiteboards/${encodeURIComponent(sceneId)}/thumbnail`, { allow404: true }))?.bytes ?? null;
     },
     putThumbnail: async (sceneId: string, blob: Uint8Array): Promise<void> => {
-      await this.binary("PUT", `/users/me/whiteboards/${encodeURIComponent(sceneId)}/thumbnail`, { body: blob, headers: { "Content-Type": "application/octet-stream" } });
+      await this.rawJson("PUT", `/users/me/whiteboards/${encodeURIComponent(sceneId)}/thumbnail`, blob as BodyInit, { "Content-Type": "application/octet-stream" });
     },
     /** Runs an image through the media pipeline (sanitized, fit into 1280 px); nothing is stored. */
     convertBackground: async (file: Blob): Promise<Blob> => {
-      const resp = await this.binary("POST", "/users/me/whiteboards/background", { body: new Uint8Array(await file.arrayBuffer()), headers: { "Content-Type": "application/octet-stream" } });
-      return resp!.blob();
+      return this.blob("POST", "/users/me/whiteboards/background", { raw: file, headers: { "Content-Type": "application/octet-stream" } });
     },
   };
 
@@ -1281,24 +1350,17 @@ export class TavrnApi {
   attachments = {
     /** Uploads a raw file; the blob is bound when the message is sent. */
     upload: (roomId: string, channelId: string, file: Blob, name: string, onProgress?: (fraction: number) => void): Promise<Attachment> =>
-      this.uploadTo(`${this.baseUrl}/api/v1/rooms/${roomId}/channels/${channelId}/uploads`, file, name, onProgress),
+      this.uploadTo(`/rooms/${roomId}/channels/${channelId}/uploads`, file, name, onProgress),
     /**
      * Upload to any conversation (channel, DM, group DM). In encrypted conversations `file` is ciphertext and
      * `category` declares the upload category of the plaintext file (`images` … `other` or `executable`).
      */
     uploadToConversation: (conversationId: string, file: Blob, name: string, onProgress?: (fraction: number) => void, category?: string): Promise<Attachment> =>
-      this.uploadTo(`${this.baseUrl}/api/v1/conversations/${conversationId}/uploads`, file, name, onProgress, category),
+      this.uploadTo(`/conversations/${conversationId}/uploads`, file, name, onProgress, category),
     /** What the requester may upload in a conversation (upload categories, PROTOCOL.md §7a). */
     policy: (conversationId: string) => this.get<UploadPolicy>(`/conversations/${conversationId}/upload-policy`),
     /** Loads a file as a Blob (with the token); for <img>, use URL.createObjectURL. */
-    download: async (blobId: string): Promise<Blob> => {
-      const headers: Record<string, string> = {};
-      const token = this.opts.getToken?.();
-      if (token) headers.Authorization = `Bearer ${token}`;
-      const resp = await (this.opts.fetchImpl ?? fetch)(`${this.baseUrl}/api/v1/blobs/${blobId}`, { headers });
-      if (!resp.ok) throw new TavrnApiError(toProblem(resp.status, await resp.json().catch(() => null), resp.statusText));
-      return resp.blob();
-    },
+    download: (blobId: string): Promise<Blob> => this.blob("GET", `/blobs/${blobId}`, { transfer: true }),
   };
 
   reactions = {
@@ -1335,11 +1397,10 @@ export class TavrnApi {
       this.post<FileEntry>(`/rooms/${roomId}/channels/${channelId}/files/folders`, { name, parent_id: parentId }),
     /** Raw upload into a folder; `rename` stores a taken name as `name (2).ext` instead of failing with 409. */
     upload: (roomId: string, channelId: string, file: Blob, name: string, opts: { parentId?: string | null; rename?: boolean; onProgress?: (fraction: number) => void; signal?: AbortSignal } = {}): Promise<FileEntry> => {
-      const headers: Record<string, string> = { "Content-Type": file.type || "application/octet-stream", "Tavrn-File-Name": encodeURIComponent(name), ...this.authHeaders() };
+      const headers: Record<string, string> = { "Content-Type": file.type || "application/octet-stream", "Tavrn-File-Name": encodeURIComponent(name) };
       if (opts.parentId) headers["Tavrn-Parent"] = opts.parentId;
       if (opts.rename) headers["Tavrn-Conflict"] = "rename";
-      const url = `${this.baseUrl}/api/v1/rooms/${roomId}/channels/${channelId}/files/upload`;
-      return this.sendBlob<FileEntry>(url, file, headers, opts.onProgress, opts.signal);
+      return this.rawJson<FileEntry>("POST", `/rooms/${roomId}/channels/${channelId}/files/upload`, file, headers, { transfer: true, onProgress: opts.onProgress, signal: opts.signal });
     },
     /** Encrypted channels: a folder with a client-chosen id and its entry record. */
     createFolderEncrypted: (roomId: string, channelId: string, req: { id: string; record: string; record_epoch: number; parent_id: string | null }) =>
@@ -1357,16 +1418,17 @@ export class TavrnApi {
         "Tavrn-Record": req.record,
         "Tavrn-Record-Epoch": String(req.recordEpoch),
         "Tavrn-Upload-Category": req.category,
-        ...this.authHeaders(),
       };
       if (req.parentId) headers["Tavrn-Parent"] = req.parentId;
-      const url = `${this.baseUrl}/api/v1/rooms/${roomId}/channels/${channelId}/files/upload`;
-      return this.sendBlob<FileEntry>(url, ciphertext, headers, req.onProgress, req.signal);
+      return this.rawJson<FileEntry>("POST", `/rooms/${roomId}/channels/${channelId}/files/upload`, ciphertext, headers, { transfer: true, onProgress: req.onProgress, signal: req.signal });
     },
     /** The raw response of a download (encrypted channels: the ciphertext as a stream), optionally of a byte range. */
-    downloadResponse: async (roomId: string, channelId: string, entryId: string, range?: { start: number; end: number }): Promise<Response> => {
+    downloadResponse: async (roomId: string, channelId: string, entryId: string, range?: { start: number; end: number }, signal?: AbortSignal): Promise<Response> => {
       const headers: Record<string, string> = range ? { Range: `bytes=${range.start}-${range.end}` } : {};
-      return (await this.binary("GET", `/rooms/${roomId}/channels/${channelId}/files/${entryId}/download`, { headers })) as Response;
+      // A stream for the caller: the deadline covers the response headers; the body stays abortable with `signal`.
+      const { resp, deadline: d } = await this.send("GET", `/rooms/${roomId}/channels/${channelId}/files/${entryId}/download`, { headers, signal, transfer: true });
+      d.stopTimer();
+      return resp;
     },
     /** The requester's own entries (no names or records) with totals, for deleting without keys (FILES.md §8.8). */
     mine: (roomId: string, channelId: string, query: { limit?: number; after?: string | null } = {}) =>
@@ -1376,17 +1438,15 @@ export class TavrnApi {
       this.get<RecordList>(`/rooms/${roomId}/channels/${channelId}/files/records`, { epoch: query.epoch, since: query.since, after: query.after ?? undefined, limit: query.limit }),
     /** Encrypted channels: stores the thumbnail ciphertext of a file (at most 1 MiB). */
     putThumbnail: async (roomId: string, channelId: string, entryId: string, ciphertext: Uint8Array): Promise<void> => {
-      await this.binary("PUT", `/rooms/${roomId}/channels/${channelId}/files/${entryId}/thumbnail`, { body: ciphertext, headers: { "Content-Type": "application/octet-stream" } });
+      await this.rawJson("PUT", `/rooms/${roomId}/channels/${channelId}/files/${entryId}/thumbnail`, ciphertext as BodyInit, { "Content-Type": "application/octet-stream" });
     },
     /** Encrypted channels: the thumbnail ciphertext, or null when the file has none. */
     thumbnail: async (roomId: string, channelId: string, entryId: string): Promise<Uint8Array | null> => {
-      const resp = await this.binary("GET", `/rooms/${roomId}/channels/${channelId}/files/${entryId}/thumbnail`, { allow404: true });
-      return resp ? new Uint8Array(await resp.arrayBuffer()) : null;
+      return (await this.bytes(`/rooms/${roomId}/channels/${channelId}/files/${entryId}/thumbnail`, { allow404: true }))?.bytes ?? null;
     },
     /** The file's content (with the token); ranges are for streaming players and are not needed here. */
     download: async (roomId: string, channelId: string, entryId: string): Promise<Blob> => {
-      const resp = await this.binary("GET", `/rooms/${roomId}/channels/${channelId}/files/${entryId}/download`);
-      return (resp as Response).blob();
+      return this.blob("GET", `/rooms/${roomId}/channels/${channelId}/files/${entryId}/download`, { transfer: true });
     },
     /** Rename (`name`) and/or move (`parent_id`, `null` = top level). */
     update: (roomId: string, channelId: string, entryId: string, req: UpdateEntryRequest) => this.patch<FileEntry>(`/rooms/${roomId}/channels/${channelId}/files/${entryId}`, req),
@@ -1403,24 +1463,9 @@ export class TavrnApi {
 
   emojis = {
     list: (roomId: string) => this.get<Emoji[]>(`/rooms/${roomId}/emojis`),
-    create: async (roomId: string, name: string, file: Blob): Promise<Emoji> => {
-      const headers: Record<string, string> = { "Content-Type": file.type || "application/octet-stream", "Tavrn-Emoji-Name": name };
-      const token = this.opts.getToken?.();
-      if (token) headers.Authorization = `Bearer ${token}`;
-      const resp = await (this.opts.fetchImpl ?? fetch)(`${this.baseUrl}/api/v1/rooms/${roomId}/emojis`, { method: "POST", headers, body: file });
-      const json: unknown = await resp.json().catch(() => null);
-      if (!resp.ok) throw new TavrnApiError(toProblem(resp.status, json, resp.statusText));
-      return json as Emoji;
-    },
+    create: (roomId: string, name: string, file: Blob): Promise<Emoji> => this.rawJson<Emoji>("POST", `/rooms/${roomId}/emojis`, file, { "Content-Type": file.type || "application/octet-stream", "Tavrn-Emoji-Name": name }),
     delete: (roomId: string, emojiId: string) => this.del(`/rooms/${roomId}/emojis/${emojiId}`),
-    image: async (roomId: string, emojiId: string): Promise<Blob> => {
-      const headers: Record<string, string> = {};
-      const token = this.opts.getToken?.();
-      if (token) headers.Authorization = `Bearer ${token}`;
-      const resp = await (this.opts.fetchImpl ?? fetch)(`${this.baseUrl}/api/v1/rooms/${roomId}/emojis/${emojiId}/image`, { headers });
-      if (!resp.ok) throw new TavrnApiError(toProblem(resp.status, null, resp.statusText));
-      return resp.blob();
-    },
+    image: (roomId: string, emojiId: string): Promise<Blob> => this.blob("GET", `/rooms/${roomId}/emojis/${emojiId}/image`),
     /** Public URL of any emoji of this node (room or personal; design note 4.13); `still` = the first frame. */
     imageUrl: (emojiId: string, still = false, host?: string) => {
       const q = [still ? "still=1" : "", host ? `host=${encodeURIComponent(host)}` : ""].filter(Boolean).join("&");
@@ -1429,10 +1474,7 @@ export class TavrnApi {
     /** Personal emojis on the home node (design note 4.13). */
     personal: {
       list: () => this.get<PersonalEmojis>("/users/me/emojis"),
-      create: async (name: string, file: Blob): Promise<UserEmoji> => {
-        const resp = await this.binary("POST", "/users/me/emojis", { body: new Uint8Array(await file.arrayBuffer()), headers: { "Content-Type": file.type || "application/octet-stream", "Tavrn-Emoji-Name": name } });
-        return (await resp!.json()) as UserEmoji;
-      },
+      create: (name: string, file: Blob): Promise<UserEmoji> => this.rawJson<UserEmoji>("POST", "/users/me/emojis", file, { "Content-Type": file.type || "application/octet-stream", "Tavrn-Emoji-Name": name }),
       rename: (emojiId: string, name: string) => this.patch<UserEmoji>(`/users/me/emojis/${emojiId}`, { name }),
       delete: (emojiId: string) => this.del(`/users/me/emojis/${emojiId}`),
     },
@@ -1498,10 +1540,7 @@ export class TavrnApi {
   soundboard = {
     list: (roomId: string) => this.get<Sound[]>(`/rooms/${roomId}/soundboard`),
     /** Uploads a clip (`manage_emojis`); `durationMs` is declared by the client (the node cannot decode audio). */
-    create: async (roomId: string, name: string, file: Blob, durationMs: number, emoji?: string): Promise<Sound> => {
-      const resp = await this.binary("POST", `/rooms/${roomId}/soundboard`, { body: new Uint8Array(await file.arrayBuffer()), headers: this.clipHeaders(name, file, durationMs, emoji) });
-      return (await resp!.json()) as Sound;
-    },
+    create: (roomId: string, name: string, file: Blob, durationMs: number, emoji?: string): Promise<Sound> => this.rawJson<Sound>("POST", `/rooms/${roomId}/soundboard`, file, this.clipHeaders(name, file, durationMs, emoji)),
     /** Rename a clip or set its emoji (`emoji: null` removes it). */
     update: (roomId: string, soundId: string, patch: UpdateSound) => this.patch<Sound>(`/rooms/${roomId}/soundboard/${soundId}`, patch),
     delete: (roomId: string, soundId: string) => this.del(`/rooms/${roomId}/soundboard/${soundId}`),
@@ -1513,15 +1552,12 @@ export class TavrnApi {
     /** Personal clips on the home node (design note 4.13). */
     personal: {
       list: () => this.get<PersonalSounds>("/users/me/sounds"),
-      create: async (name: string, file: Blob, durationMs: number, emoji?: string): Promise<UserSound> => {
-        const resp = await this.binary("POST", "/users/me/sounds", { body: new Uint8Array(await file.arrayBuffer()), headers: this.clipHeaders(name, file, durationMs, emoji) });
-        return (await resp!.json()) as UserSound;
-      },
+      create: (name: string, file: Blob, durationMs: number, emoji?: string): Promise<UserSound> => this.rawJson<UserSound>("POST", "/users/me/sounds", file, this.clipHeaders(name, file, durationMs, emoji)),
       update: (soundId: string, patch: UpdateSound) => this.patch<UserSound>(`/users/me/sounds/${soundId}`, patch),
       delete: (soundId: string) => this.del(`/users/me/sounds/${soundId}`),
     },
     /** The clip's audio file (with the session token). */
-    audio: async (roomId: string, soundId: string): Promise<Blob> => (await this.binary("GET", `/rooms/${roomId}/soundboard/${soundId}/audio`))!.blob(),
+    audio: (roomId: string, soundId: string): Promise<Blob> => this.blob("GET", `/rooms/${roomId}/soundboard/${soundId}/audio`),
   };
 
   messages = {
