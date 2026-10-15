@@ -384,6 +384,13 @@ function applyOverrides(perms: bigint, overrides: OverrideInput[], everyoneRoleI
   return perms;
 }
 
+/**
+ * Which layer decides a neutral bit in an override editor: `role` the role base, `category` the category's overrides
+ * below the channel being edited, `everyone` the `@everyone` override of the edited layer, `roles` (member subjects)
+ * the overrides of the member's roles in the edited layer.
+ */
+export type InheritedSource = "role" | "category" | "everyone" | "roles";
+
 /** Whose value an override editor shows behind a neutral bit. */
 export interface InheritedInput {
   everyone_role_id: string;
@@ -394,24 +401,36 @@ export interface InheritedInput {
   subject: { type: "role"; id: string } | { type: "member"; id: string; roles: string[] };
   /** `null` in the category editor (only the roles are below); in the channel editor the category's overrides. */
   category_overrides: OverrideInput[] | null;
+  /** The overrides of the edited layer (the category or the channel); the subject's own override may be included, it is skipped. */
+  layer_overrides: OverrideInput[];
 }
 
 /**
  * The value a bit has for an override's subject when the override leaves it neutral ("–"), and which layer decides
- * it: the role base (`@everyone` plus the subject's role, or the member's roles) and, in the channel editor, the
- * category's overrides on top (protocol/permissions.md "Evaluation"). `source` is `category` when one of the
- * category's overrides that apply to the subject allows or denies the bit.
+ * it (protocol/permissions.md "Evaluation"): the role base (`@everyone` plus the subject's role, or the member's
+ * roles); in the channel editor the category's overrides on top; then, inside the edited layer, the `@everyone`
+ * override (not for `@everyone` itself) and, for a member subject, the overrides of the member's roles. The subject's
+ * own override is never applied. `source` names the last of these that allows or denies the bit.
  */
-export function inheritedOverrideValue(input: InheritedInput, bit: bigint): { allowed: boolean; source: "role" | "category" } {
-  const roleIds = input.subject.type === "member" ? input.subject.roles : input.subject.id === input.everyone_role_id ? [] : [input.subject.id];
+export function inheritedOverrideValue(input: InheritedInput, bit: bigint): { allowed: boolean; source: InheritedSource } {
+  const subject = input.subject;
+  const everyoneId = input.everyone_role_id;
+  const roleIds = subject.type === "member" ? subject.roles : subject.id === everyoneId ? [] : [subject.id];
   const memberRoles: [string, bigint][] = input.roles.filter(([id]) => roleIds.includes(id)).map(([id, p]) => [id, big(p)]);
   const base = roomLevelPermissions(false, big(input.everyone_permissions), memberRoles);
   if (hasPermission(base, Permission.ADMINISTRATOR)) return { allowed: true, source: "role" };
-  const userId = input.subject.type === "member" ? input.subject.id : "";
-  const overrides = input.category_overrides ?? [];
-  const applies = (o: OverrideInput) =>
-    o.subject_type === "role" ? o.subject_id === input.everyone_role_id || roleIds.includes(o.subject_id) : o.subject_id === userId;
-  const touched = overrides.some((o) => applies(o) && ((big(o.allow) | big(o.deny)) & bit & CHANNEL_SCOPED) !== 0n);
-  const perms = applyOverrides(base, overrides, input.everyone_role_id, userId, memberRoles);
-  return { allowed: hasPermission(perms, bit), source: touched ? "category" : "role" };
+  const userId = subject.type === "member" ? subject.id : "";
+  const touches = (o: OverrideInput) => ((big(o.allow) | big(o.deny)) & bit & CHANNEL_SCOPED) !== 0n;
+  let source: InheritedSource = "role";
+  // The category below the edited channel: every override that applies to the subject.
+  const below = input.category_overrides ?? [];
+  const applies = (o: OverrideInput) => (o.subject_type === "role" ? o.subject_id === everyoneId || roleIds.includes(o.subject_id) : o.subject_id === userId);
+  if (below.some((o) => applies(o) && touches(o))) source = "category";
+  let perms = applyOverrides(base, below, everyoneId, userId, memberRoles);
+  // The edited layer: role overrides only (a member's own override is the one being edited), never the subject's own.
+  const layer = input.layer_overrides.filter((o) => o.subject_type === "role" && !(subject.type === "role" && o.subject_id === subject.id));
+  if (layer.some((o) => o.subject_id === everyoneId && touches(o))) source = "everyone";
+  if (layer.some((o) => o.subject_id !== everyoneId && roleIds.includes(o.subject_id) && touches(o))) source = "roles";
+  perms = applyOverrides(perms, layer, everyoneId, "", memberRoles);
+  return { allowed: hasPermission(perms, bit), source };
 }

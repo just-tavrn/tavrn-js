@@ -158,6 +158,11 @@ package instead of a git dependency.
 
 ### Fixed
 
+- `@tavrn/sdk`: `inheritedOverrideValue` (the hint of the override editors) applies the overrides of the edited layer
+  (#42): the new required `InheritedInput.layer_overrides` takes them, and the `@everyone` override of that layer
+  (for every subject but `@everyone`) and, for a member subject, the overrides of the member's roles apply before the
+  subject's own, which is skipped. `source` (`InheritedSource`) gains `everyone` and `roles`. A category whose
+  `@everyone` override denies `view_channel` showed a neutral role as allowed; the evaluation was always right.
 - `@tavrn/sdk`: a socket whose token provider failed once (or whose WebSocket could not be created) never connected
   again; it retries with backoff now. A throwing event listener no longer keeps the other listeners from the event.
 - `@tavrn/e2ee`: `LeafCleaner.clean` takes `noWait` for a voice join, which must not wait for the election: it joins
