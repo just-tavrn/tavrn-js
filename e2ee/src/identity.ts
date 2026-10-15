@@ -5,7 +5,7 @@
  * as {@link IDENTITY_SEED} and on the home node wrapped under the master secret (`identity_blob`). Every device of
  * the account follows the published key when the keys document's continuity chain leads to it from the derived key.
  */
-import { IdentityKey, continuityReaches, signContinuity, unwrapIdentityKey, verifyDeviceAttestation, wrapIdentityKey } from "@tavrn/crypto";
+import { IdentityKey, continuityKeys, continuityReaches, signContinuity, unwrapIdentityKey, verifyDeviceAttestation, wrapIdentityKey } from "@tavrn/crypto";
 import { TavrnApiError, b64urlDecode, b64urlEncode, type TavrnApi } from "@tavrn/sdk";
 import { E2eeError } from "./errors";
 import { withMasterSecret, type KeyStore } from "./keystore";
@@ -29,21 +29,27 @@ export interface IdentityDocument {
   continuity?: ContinuityStatement[] | null;
 }
 
+/**
+ * Longest chain that is followed, as in the crypto core: a longer one (only a hostile node serves one) is not even
+ * serialized.
+ */
+export const MAX_CHAIN = 10_000;
+
 /** Is `to` reachable from `from` through valid, consecutive statements of `chain`? `true` for `from === to`. */
 export function chainReaches(chain: readonly ContinuityStatement[] | null | undefined, from: string, to: string): boolean {
   if (from === to) return true;
-  if (!chain?.length) return false;
+  if (!chain?.length || chain.length > MAX_CHAIN) return false;
   return continuityReaches(JSON.stringify(chain), from, to);
 }
 
 /**
  * The keys that lead to `current` through valid statements of `chain`, `current` included: attestations made under
- * them (retired devices, ENCRYPTION.md §3.3) stay trustworthy after a rotation.
+ * them (retired devices, ENCRYPTION.md §3.3) stay trustworthy after a rotation. One call into the crypto core, which
+ * verifies every statement at most once.
  */
 export function chainKeys(chain: readonly ContinuityStatement[] | null | undefined, current: string): Set<string> {
-  const out = new Set([current]);
-  for (const s of chain ?? []) if (!out.has(s.old_key) && chainReaches(chain, s.old_key, current)) out.add(s.old_key);
-  return out;
+  if (!chain?.length || chain.length > MAX_CHAIN) return new Set([current]);
+  return new Set(continuityKeys(JSON.stringify(chain), current));
 }
 
 /** RFC 3339 time without fractions (the form the node checks against its clock). */

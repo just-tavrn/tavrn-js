@@ -68,6 +68,31 @@ describe("continuity chains", () => {
     expect([...chainKeys(chain, pk(k3))].sort()).toEqual([pk(k0), pk(k1), pk(k2), pk(k3)].sort());
     expect([...chainKeys([chain[0]!, forged, chain[2]!], pk(k3))].sort()).toEqual([pk(k2), pk(k3)].sort());
   });
+
+  it("collects the keys of a long chain in one pass (a hostile node serves hundreds of statements)", () => {
+    const keys = Array.from({ length: 301 }, () => IdentityKey.generate());
+    const chain = keys.slice(1).map((k, i) => sign(keys[i]!, k));
+    const t = performance.now();
+    const found = chainKeys(chain, pk(keys[300]!));
+    const ms = performance.now() - t;
+    expect(found.size).toBe(301);
+    // One walk per statement verified ~45k signatures here (seconds); one pass verifies 300.
+    expect(ms).toBeLessThan(1000);
+    // A break in the middle: only the keys after it lead to the current key.
+    const broken = [...chain];
+    broken[150] = { ...broken[150]!, sig_new: broken[149]!.sig_new };
+    expect(chainKeys(broken, pk(keys[300]!)).size).toBe(150);
+    // Same answer as a walk per key (on 40 statements around the break).
+    const tail = broken.slice(130, 170);
+    const slow = new Set([pk(keys[170]!), ...tail.map((s) => s.old_key).filter((k) => chainReaches(tail, k, pk(keys[170]!)))]);
+    expect([...chainKeys(tail, pk(keys[170]!))].sort()).toEqual([...slow].sort());
+    expect(slow.size).toBe(20);
+    // Longer than the crypto core follows: not even serialized.
+    const long = Array.from({ length: 10_001 }, () => chain[0]!);
+    expect([...chainKeys(long, pk(keys[1]!))]).toEqual([pk(keys[1]!)]);
+    expect(chainReaches(long, pk(keys[0]!), pk(keys[1]!))).toBe(false);
+    for (const k of keys) k.free();
+  });
 });
 
 function account() {
