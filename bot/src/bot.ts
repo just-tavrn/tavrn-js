@@ -25,7 +25,7 @@ import { CommandRouter, type CommandCrypto, type CommandHandler, type InvokeCont
 import { ComponentRouter, type ComponentHandler, type Matcher } from "./components";
 import { ClaimGuard } from "./claims";
 import { ConversationDirectory, type ChannelInfo, type DirectoryLink } from "./directory";
-import { BotError } from "./errors";
+import { BotError, botErrorOf } from "./errors";
 import { createKeyFile, defaultKeyFile, identityKeyOf, readKey } from "./keyfile";
 import { consoleLogger, type BotLogger } from "./logger";
 import { sealUnderPolicy, type GhostPolicy } from "./ghosts";
@@ -517,9 +517,10 @@ export class Bot {
     return home.api.commands.setMine(commands);
   }
 
+  /** Background work `stop()` waits for; a failure that nothing else handled is logged. */
   private track<T>(p: Promise<T>): Promise<T> {
     this.inflight.add(p);
-    void p.finally(() => this.inflight.delete(p)).catch(() => undefined);
+    void p.finally(() => this.inflight.delete(p)).catch((e: unknown) => this.logger.warn("background task failed", { error: e }));
     return p;
   }
 
@@ -1182,14 +1183,27 @@ export class Bot {
 
   /** An encryption under the bot's ghost policy (see {@link BotOptions.ghostPolicy}). */
   private seal<T>(q: string, fn: () => Promise<T>): Promise<T> {
-    return sealUnderPolicy(this.mls!, q, this.opts.ghostPolicy ?? "strict", this.logger, fn);
+    return sealUnderPolicy(this.mls!, q, this.opts.ghostPolicy ?? "strict", this.logger, fn).catch((e: unknown) => {
+      throw botErrorOf(e, q);
+    });
+  }
+
+  /** A catch-up before a retried write, with the session manager's errors as `BotError`. */
+  private async catchUp(q: string): Promise<void> {
+    await this.mls!.catchUp(q).catch((e: unknown) => {
+      throw botErrorOf(e, q);
+    });
   }
 
   /** `<node>/<id>` for a qualified id, a bare id of the home node, or a received message's conversation. */
   private qualified(conversation: string | { conversation: string }): string {
     const raw = typeof conversation === "string" ? conversation : conversation.conversation;
     const q = raw.includes("/") ? raw : qualify(this.claims!.iss, raw);
-    splitQualified(q);
+    try {
+      splitQualified(q);
+    } catch {
+      throw new RangeError("conversation: a qualified id <node>/<id> or an id of the home node");
+    }
     return q;
   }
 
@@ -1248,7 +1262,7 @@ export class Bot {
       return await post();
     } catch (e) {
       if (!(e instanceof TavrnApiError && e.code === "mls.epoch_stale")) throw e;
-      await this.mls!.catchUp(q);
+      await this.catchUp(q);
       return post();
     }
   }
@@ -1358,17 +1372,10 @@ export class Bot {
     const mls = this.mls!;
     const content = pollVoteContent(poll, messageId, hash, selection);
     if (!encrypted) return link.api.polls.vote(id, messageId, { content, signature: signPlainPollVote(mls, q, content) });
-    const post = async () => {
+    return this.freshEpoch(q, async () => {
       const sealed = await this.seal(q, () => encryptPollVote(mls, q, content));
       return link.api.polls.vote(id, messageId, { content: sealed.content, epoch: sealed.epoch });
-    };
-    try {
-      return await post();
-    } catch (e) {
-      if (!(e instanceof TavrnApiError && e.code === "mls.epoch_stale")) throw e;
-      await mls.catchUp(q);
-      return post();
-    }
+    });
   }
 
   /** Retracts the bot's vote. */

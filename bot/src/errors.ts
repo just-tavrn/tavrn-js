@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 /** Errors of the bot runtime with stable codes (log them, branch on `code`, never on the message). */
+import { MlsError } from "@tavrn/e2ee";
 
 export type BotErrorCode =
   /** The token is not an app token of a bot (`typ` ≠ `app`, malformed, or the account is no bot). */
@@ -36,7 +37,12 @@ export type BotErrorCode =
    * Not sent: the conversation's encryption group has a device the bot's `ghostPolicy` does not accept (a key never
    * attested, a changed identity key without a continuity chain, a non-member; ENCRYPTION.md §4.6).
    */
-  | "ghost";
+  | "ghost"
+  /**
+   * The conversation's encryption could not be brought up to date before sending (the handshake log could not be
+   * processed, a concurrent change won, the state is busy): nothing was sent; try again. `cause` has the details.
+   */
+  | "encryption_unavailable";
 
 export class BotError extends Error {
   constructor(
@@ -46,5 +52,22 @@ export class BotError extends Error {
   ) {
     super(message, options);
     this.name = "BotError";
+  }
+}
+
+/**
+ * Errors of the session manager at the runtime's boundary: `BotError` (`not_member`, `encryption_unavailable`) with
+ * the `MlsError` as `cause`; anything else passes unchanged (refusals of the node stay `TavrnApiError`).
+ */
+export function botErrorOf(e: unknown, conversation: string): unknown {
+  if (!(e instanceof MlsError)) return e;
+  switch (e.code) {
+    case "not_joined":
+    case "no_group":
+      return new BotError("not_member", `The bot is not a member of the encryption group of ${conversation}`, { cause: e });
+    case "invalid_id":
+      return new RangeError(`conversation: ${conversation} is no qualified id <node>/<id>`, { cause: e });
+    default:
+      return new BotError("encryption_unavailable", `The encryption of ${conversation} could not be brought up to date (${e.code}); nothing was sent, try again`, { cause: e });
   }
 }
