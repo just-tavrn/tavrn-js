@@ -108,9 +108,14 @@ in a row (the bot runtime does, with `BotError("state_unwritable")`).
 `decrypt` failures (`Decrypted.reason`): `missing_key`, `bad_signature`, `unknown_device` (not attested, or the
 author's leaf in the group carries another key than the attested one), `replay`, `invalid`, `envelope_mismatch`,
 `locked`, and `retry`: the author's devices could not be looked up (network, the author's node, a rate limit). Results
-are cached for the session (the least recently used of at most `DECRYPT_CACHE_LIMIT` go first, keyed by message id
-with a fingerprint of the ciphertext), except `missing_key` and `retry`, which are tried again on the next call;
-message nonces for the replay rule are kept for the last `NONCE_WINDOW` messages.
+are cached for the session (the least recently used of at most `DECRYPT_CACHE_LIMIT` go first, keyed by message id,
+author, device and epoch with a fingerprint of the ciphertext: an envelope that names another sender under the same id
+is decrypted and checked again), except `missing_key` and `retry`, which are tried again on the next call;
+message nonces for the replay rule are kept for the last `NONCE_WINDOW` messages. Plaintext signature results are
+cached under the SHA-256 of the signed input; an envelope object passed again is reused only while its fields and
+the top level of its content are unchanged (do not mutate nested content in place). A keys document with more than
+`KEYS_MAX_DEVICES` devices, `KEYS_MAX_RETIRED` retired devices or `KEYS_MAX_CONTINUITY` continuity statements is
+refused as a whole (`verifiedDevices` rejects with `KeysDocumentError`, kept for the lookup's lifetime).
 
 **Tabs of one browser** (`tabs.ts`, option `tabs` of `openMlsManager`) — the tabs of a browser profile share one
 IndexedDB store and so one MLS state. Without coordination every tab keeps its own copy in memory and writes it:

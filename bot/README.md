@@ -78,6 +78,7 @@ Node.js 22 and newer have a global `WebSocket`. On Node.js 20 start with `--expe
 | `rateLimit` | | `429` answers (APPLICATIONS.md §2.7): by default the runtime waits the announced `Retry-After` and repeats the request (`{ retries: 3, maxWaitMs: 30000 }`); `false` hands every `429` to your code. |
 | `requestTimeoutMs` | | Deadline of one API request (default 30000 ms, the `rateLimit` waits on top): a node that does not answer fails the call with `TavrnApiError` `network.timeout` instead of stalling the bot. File transfers have 10 minutes. |
 | `stopTimeoutMs` | | How long `stop()` waits for running handlers and background work (default 30000 ms). |
+| `maxDownloadBytes` | | Largest file the bot downloads (attachments, files channels; default 256 MiB): downloads are held in memory, a larger one fails with `TavrnApiError` `response.too_large`. A download also never reads more than the file's declared size. |
 
 These variables belong to the bot process, not to the node.
 
@@ -142,8 +143,9 @@ received message/interaction); room helpers take a room the same way (`m`, `"<no
 names the scope it needs; the room permissions decide where. Inputs are checked with the protocol's limits first
 (`RangeError`/`TypeError`, also for a malformed conversation id), refusals of the node arrive as `TavrnApiError` with its
 `code` (`network.timeout` when the node did not answer in time), and the runtime's own failures as `BotError` (for
-example `not_member`, `ghost`, or `encryption_unavailable` when the conversation's encryption could not be brought up to
-date: nothing was sent, try again). The complete list, with
+example `not_member`, `ghost`, `encryption_unavailable` when the conversation's encryption could not be brought up to
+date: nothing was sent, try again, or `encryption_downgrade` when the node reports an end-to-end encrypted conversation
+as unencrypted: nothing was sent). The complete list, with
 what the node keeps closed to bots, is [`docs/COVERAGE.md`](docs/COVERAGE.md).
 
 **Reactions** (`messages:write` to react, `messages:read` for the events). Reactions are plaintext metadata, also in
@@ -365,6 +367,12 @@ A bot is an ordinary participant of tavrn's encryption ([`ENCRYPTION.md`](https:
   Welcomes for private channels and DMs. With `joinPolicy: "eager"` it joins right after an installation; with
   `"lazy"` only when it needs a channel (a message, a command, `send`), which avoids an epoch per channel in large
   rooms. A bot can never read what was sent before it joined.
+- **Never plaintext where it must be encrypted.** DMs and group DMs are always end-to-end encrypted. The runtime never
+  writes them in plaintext, nor a channel whose encryption group it holds or that it saw encrypted in the session,
+  whatever the node reports: such a write (send, edit, poll vote, thread, files-channel upload) fails with
+  `BotError("encryption_downgrade")` and nothing is sent. Edits follow the conversation, not the edited message. A
+  channel whose encryption an operator really switched off stays closed to the bot's plaintext until the bot no
+  longer holds its encryption group (restart with a fresh state directory or remove the bot from the channel's group).
 - **Local state.** The MLS state lives in `stateDir/state.json`, encrypted with a key derived from the master secret:
   the directory alone is useless to a thief, the key file is the secret. Keep the directory on a persistent volume:
   without a history backup (the default) it is the only place the epoch keys of past messages live.
