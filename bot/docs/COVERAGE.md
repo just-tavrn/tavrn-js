@@ -17,7 +17,8 @@ against a real node.
 | Message edit (own) / delete (own; others with `manage_messages`) | PROTOCOL.md §7, ENCRYPTION.md §5.2 | `messages:write` (+ `moderation`) | missing | typed: `edit()`, `deleteMessage()` |
 | Edit and delete events | PROTOCOL.md §6 | `messages:read` | raw `event` only | typed: `messageEdit`, `messageDelete` |
 | Reactions: add / remove | PROTOCOL.md §7 | `messages:write` | missing | typed: `react()`, `unreact()`, `m.react()` |
-| Reaction events (js #18) | PROTOCOL.md §6 (`message.update`) | `messages:read` | raw `event` only; the node does not say who reacted | typed: `reaction` / `onReaction()`, `reactionsOf()`; `user` null until tavrn-protocol#43 (node #83) |
+| Reaction events (js #18) | PROTOCOL.md §6 (`message.update`) | `messages:read` | raw `event` only; the node does not say who reacted | typed: `reaction` / `onReaction()` with the reactor (`user`, `userId`; null only from older nodes), `reactionsOf()` |
+| Reactors of a message (who reacted with an emoji) | PROTOCOL.md §7 "Reactions" | `messages:read` | missing | typed: `reactors()` (paged; `api.reactions.list` in `@tavrn/sdk`) |
 | Embeds | APPLICATIONS.md §6.4 | `messages:write` | content object passed through, no validation | typed: checked before sending (`checkContent`, `EmbedsInvalidError`) |
 | Attachments: upload (plaintext and encrypted), download (decrypted) | PROTOCOL.md §7, §7a, ENCRYPTION.md §6 | `messages:write` / `messages:read` | missing ("not supported yet") | typed: `send(…, { files })`, `m.attachments`, `m.download()` |
 | Pins: pin, unpin, list | PROTOCOL.md §7 | `messages:write` / `messages:read` | missing | typed: `pin()`, `unpin()`, `pins()` |

@@ -103,6 +103,7 @@ import type {
   PollVote,
   PollVoteList,
   PollVoteRequest,
+  ReactorList,
   PurgeUserRequest,
   PurgeUserResponse,
   PermissionOverride,
@@ -1303,6 +1304,13 @@ export class TavrnApi {
   reactions = {
     add: (roomId: string, channelId: string, messageId: string, emoji: string) => this.put<Message>(`/rooms/${roomId}/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}`, {}),
     remove: (roomId: string, channelId: string, messageId: string, emoji: string) => this.del<Message>(`/rooms/${roomId}/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}`),
+    /**
+     * Who reacted with `emoji` on a message of any conversation (PROTOCOL.md §7 "Reactions"), oldest first, `limit`
+     * 1–100 (default 50); pass `next` as `after` for the next page. Needs what reading the message needs (bots:
+     * `messages:read`).
+     */
+    list: (conversationId: string, messageId: string, emoji: string, query: { after?: string | null; limit?: number } = {}) =>
+      this.get<ReactorList>(`/conversations/${conversationId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}`, query as Query),
   };
 
   pins = {

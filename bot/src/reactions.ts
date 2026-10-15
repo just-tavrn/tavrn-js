@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 /**
- * Reactions for bots (PROTOCOL.md §7, §7b). Reactions are plaintext metadata next to a message, also in encrypted
+ * Reactions for bots (PROTOCOL.md §6, §7, §7b). Reactions are plaintext metadata next to a message, also in encrypted
  * conversations. The node announces a change as `message.update` with the message's new `reactions` list
- * (`[{ emoji, count, me }]`); it does not say who reacted. The runtime therefore remembers the counts of the
- * messages it has seen ({@link MessageTracker}) and turns every change into a typed `reaction` event; where the
- * event names the reacting user (`reaction: { emoji, user, added }`, proposed in tavrn-protocol#43), that is used
- * instead and works for messages the bot has never seen.
+ * (`[{ emoji, count, me }]`, `me` always false in events) and the change itself, `reaction: { emoji, user, user_id,
+ * added }`, which works for messages the bot has never seen. For older nodes that send only the counts, the runtime
+ * remembers the counts of the messages it has seen ({@link MessageTracker}) and computes the change from them (the
+ * reacting user is then unknown).
  */
 
 /** A custom emoji name: 2–32 of `a-z 0-9 _`. */
@@ -33,8 +33,10 @@ export interface ReactionChange {
   count: number;
   /** `true`: somebody added it; `false`: somebody took it back. */
   added: boolean;
-  /** The reacting user's address where the node names it, else null. */
+  /** The reacting user's address (null only from older nodes that do not name it). */
   user: string | null;
+  /** The reacting user's id on the node hosting the conversation (null like `user`). */
+  userId: string | null;
 }
 
 interface Tracked {
@@ -53,7 +55,7 @@ interface UpdatedMessage {
   id: string;
   reactions?: { emoji: string; count: number }[] | null;
   edited_at?: string | null;
-  /** Proposed (tavrn-protocol#43): the reaction change that caused this update. */
+  /** The reaction change that caused this update (PROTOCOL.md §6), absent for edits, pins and older nodes. */
   reaction?: unknown;
 }
 
@@ -65,13 +67,13 @@ function countsOf(list: UpdatedMessage["reactions"]): Map<string, number> {
   return out;
 }
 
-/** The reaction the node names in the event (tavrn-protocol#43), or null. */
+/** The reaction the node names in the event (PROTOCOL.md §6), or null. */
 function namedReaction(m: UpdatedMessage, counts: Map<string, number>): ReactionChange | null {
   const r = m.reaction;
   if (!r || typeof r !== "object" || Array.isArray(r)) return null;
-  const { emoji, user, added } = r as Record<string, unknown>;
+  const { emoji, user, user_id: userId, added } = r as Record<string, unknown>;
   if (typeof emoji !== "string" || typeof user !== "string" || typeof added !== "boolean") return null;
-  return { emoji, user: user.toLowerCase(), added, count: counts.get(emoji) ?? 0 };
+  return { emoji, user: user.toLowerCase(), userId: typeof userId === "string" ? userId : null, added, count: counts.get(emoji) ?? 0 };
 }
 
 /**
@@ -119,9 +121,9 @@ export class MessageTracker {
     const reactions: ReactionChange[] = [];
     for (const [emoji, count] of counts) {
       const old = before.reactions.get(emoji) ?? 0;
-      if (count !== old) reactions.push({ emoji, count, added: count > old, user: null });
+      if (count !== old) reactions.push({ emoji, count, added: count > old, user: null, userId: null });
     }
-    for (const [emoji] of before.reactions) if (!counts.has(emoji)) reactions.push({ emoji, count: 0, added: false, user: null });
+    for (const [emoji] of before.reactions) if (!counts.has(emoji)) reactions.push({ emoji, count: 0, added: false, user: null, userId: null });
     return { reactions, edited };
   }
 

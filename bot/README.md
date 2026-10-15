@@ -140,8 +140,9 @@ names the scope it needs; the room permissions decide where. Inputs are checked 
 what the node keeps closed to bots, is [`docs/COVERAGE.md`](docs/COVERAGE.md).
 
 **Reactions** (`messages:write` to react, `messages:read` for the events). Reactions are plaintext metadata, also in
-encrypted channels. The node announces changes with the new counts but not (yet, tavrn-protocol#43) who reacted, so
-`user` is null and changes are computed for messages the bot has seen since it started:
+encrypted channels. Every change arrives as a `reaction` event with the new count and the reactor (`user`, `userId`),
+also on messages the bot has never seen; the bot's own reactions are not reported. `reactors()` lists who reacted
+with an emoji, page by page, for any message the bot may read (sign-ups, reaction polls, starboards):
 
 ```ts
 bot.onReaction(async (r) => {
@@ -149,7 +150,11 @@ bot.onReaction(async (r) => {
 });
 await m.react("👀");                      // or bot.react(conversation, messageId, "<:party:01J…>")
 await bot.unreact(m.conversation, m.id, "👀");
+const { items, next } = await bot.reactors(m.conversation, m.id, "👍", { limit: 100 }); // then { after: next }
 ```
+
+From an older node that sends only the counts, changes are computed for messages the bot has seen since it started
+and `user`/`userId` are null.
 
 **Embeds** (APPLICATIONS.md §6.4): `{ type: "text", body: "", embeds: [{ title, description, url, color, fields,
 footer, timestamp }] }`, at most 10 per message, no remote images; encrypted like the rest of the content.
