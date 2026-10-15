@@ -25,6 +25,8 @@ export interface OpenMlsOptions {
   /** Domain of this user's home node. */
   homeDomain: string;
   onEvent?: MlsDeps["onEvent"];
+  /** Failed background writes of the bookkeeping (see {@link MlsDeps.onError}). */
+  onError?: MlsDeps["onError"];
   backupDelayMs?: number;
   /**
    * Browsers: coordinate the MLS state with the other tabs of this browser profile that open the same account
@@ -97,7 +99,9 @@ export async function openMlsManager(store: KeyStore, opts: OpenMlsOptions): Pro
           stale = true;
         },
         event: (e) => {
-          void refresh().then(() => opts.onEvent?.(e as MlsEvent));
+          void refresh()
+            .then(() => opts.onEvent?.(e as MlsEvent))
+            .catch(() => undefined);
         },
       })
     : null;
@@ -148,6 +152,7 @@ export async function openMlsManager(store: KeyStore, opts: OpenMlsOptions): Pro
       opts.onEvent?.(e);
       if (SHARED_EVENTS.has(e.type)) tabs?.notifyEvent(e);
     },
+    onError: opts.onError,
     backupDelayMs: opts.backupDelayMs,
     tabs: link,
   });
