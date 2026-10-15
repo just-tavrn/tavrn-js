@@ -10,7 +10,7 @@ export * from "./components";
 export * from "./directory";
 export * from "./errors";
 export * from "./federation";
-export { DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_TIMEOUT_MS, DEFAULT_TRANSFER_TIMEOUT_MS } from "./http";
+export { DEFAULT_MAX_DOWNLOAD_BYTES, DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_TIMEOUT_MS, DEFAULT_TRANSFER_TIMEOUT_MS } from "./http";
 export * from "./hooks";
 export * from "./jcs";
 export * from "./permissions";

@@ -18,7 +18,7 @@ export interface ChannelInfo {
   noBots: boolean;
 }
 
-/** A DM or group DM: whether it is encrypted (always, on current nodes) and its members. */
+/** A DM or group DM: encrypted (always: the runtime never writes a DM in plaintext) and its members. */
 export interface DirectInfo {
   encrypted: boolean;
   members: string[];
@@ -56,6 +56,12 @@ export async function eachLimited<T>(items: readonly T[], limit: number, fn: (it
 export class ConversationDirectory {
   readonly channels = new Map<string, ChannelInfo>();
   readonly direct = new Map<string, DirectInfo>();
+  /**
+   * Conversations seen end-to-end encrypted in this session (a channel loaded or updated as encrypted, a DM): the
+   * runtime never writes them in plaintext afterwards, whatever a later answer of the node says. Not bounded: one
+   * entry per encrypted conversation the bot can see.
+   */
+  readonly encryptedSeen = new Set<string>();
   private readonly unknown = new Map<string, number>();
   private readonly refreshing = new Map<string, Promise<void>>();
 
@@ -68,11 +74,13 @@ export class ConversationDirectory {
   remember(node: string, c: Channel): void {
     const q = qualify(node, c.id);
     this.channels.set(q, { node, roomId: c.room_id, id: c.id, kind: c.kind, encrypted: !!c.encrypted, noBots: !!c.no_bots_effective });
+    if (c.encrypted) this.encryptedSeen.add(q);
     this.unknown.delete(q);
   }
 
   rememberDirect(q: string, info: DirectInfo): void {
     this.direct.set(q, info);
+    this.encryptedSeen.add(q);
     this.unknown.delete(q);
   }
 

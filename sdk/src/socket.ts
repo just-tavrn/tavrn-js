@@ -46,10 +46,21 @@ export interface SocketOptions {
    * A listener (`onEvent`, `on()`) threw: the other listeners still get the event. Default: `console.error`.
    */
   onListenerError?: (error: unknown, event: TavrnEvent) => void;
+  /**
+   * Largest text frame accepted, in characters (default {@link DEFAULT_MAX_FRAME_LENGTH}): a longer one is not parsed;
+   * the connection is closed (code 4000, reason `frame_too_large`, reported to {@link SocketOptions.onClose}) and
+   * replaced, and the new connection resyncs. The same value goes to the WebSocket implementation as `maxPayload`
+   * (bytes, the option of the Node.js package `ws`, which then refuses a larger frame before buffering it; browsers
+   * and the built-in WebSocket of Node.js ignore it, there the check runs after the frame arrived).
+   */
+  maxFrameLength?: number;
 }
 
 /** Two missed pings of the node (every 30 s) plus slack. */
 export const DEFAULT_LIVENESS_MS = 75_000;
+
+/** Largest text frame parsed by default: 16 Mi characters, far above any event of the protocol. */
+export const DEFAULT_MAX_FRAME_LENGTH = 16 * 1024 * 1024;
 
 const CLOSE_RESTART = 4000;
 const CLOSE_AUTH = 4001;
@@ -157,7 +168,8 @@ export class TavrnSocket {
       this.ws = null;
       previous.close(1000, "client");
     }
-    const ws = new Impl(this.opts.url);
+    // The third argument is the options of `ws` (maxPayload: refused while receiving); other implementations ignore it.
+    const ws = new (Impl as unknown as new (url: string, protocols: undefined, options: { maxPayload: number }) => WebSocket)(this.opts.url, undefined, { maxPayload: this.maxFrameLength });
     this.ws = ws;
     this.armWatchdog(ws);
     ws.onopen = () => {
@@ -170,6 +182,10 @@ export class TavrnSocket {
     };
     ws.onmessage = (m: MessageEvent) => {
       if (this.ws !== ws) return;
+      if (typeof m.data === "string" && m.data.length > this.maxFrameLength) {
+        this.replace(ws, "frame_too_large");
+        return;
+      }
       this.armWatchdog(ws);
       this.handle(String(m.data));
     };
@@ -203,6 +219,10 @@ export class TavrnSocket {
     this.watchdog = setTimeout(() => this.silent(ws), ms);
   }
 
+  private get maxFrameLength(): number {
+    return this.opts.maxFrameLength ?? DEFAULT_MAX_FRAME_LENGTH;
+  }
+
   private stopWatchdog() {
     if (this.watchdog) clearTimeout(this.watchdog);
     this.watchdog = null;
@@ -211,14 +231,20 @@ export class TavrnSocket {
   /** No frame for the liveness interval: a half-open connection (NAT timeout, sleep). Replace it. */
   private silent(ws: WebSocket) {
     this.watchdog = null;
+    this.replace(ws, "liveness");
+  }
+
+  /** Closes `ws` locally (code 4000 with `reason`) and connects again. */
+  private replace(ws: WebSocket, reason: string) {
     if (this.ws !== ws || this.closedByUser) return;
     this.ws = null;
+    this.stopWatchdog();
     try {
-      ws.close(CLOSE_RESTART, "liveness");
+      ws.close(CLOSE_RESTART, reason);
     } catch {
       /* already closing */
     }
-    this.opts.onClose?.(CLOSE_RESTART, "liveness");
+    this.opts.onClose?.(CLOSE_RESTART, reason);
     this.scheduleReconnect();
   }
 

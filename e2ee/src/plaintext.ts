@@ -4,7 +4,7 @@
  * covers, the nonce inside the `signature` value and how a verification result is shown. Signing and
  * verifying themselves run in the MLS session manager (device key, attested devices).
  */
-import { b64urlDecode, b64urlEncode, type Attachment } from "@tavrn/sdk";
+import { b64urlDecode, b64urlEncode, jcs, type Attachment } from "@tavrn/sdk";
 
 /** One attachment as covered by the signature. */
 export interface SignedAttachment {
@@ -59,6 +59,45 @@ export function envelopeFields(conversation: string, m: PlainEnvelope): SignedFi
     // Envelope order as received: the signer used the same order (sorted by id).
     attachments: (m.attachments ?? []).map((a) => ({ id: a.id, size: a.size, sha256: a.sha256 })),
   };
+}
+
+/**
+ * SHA-256 (base64url) of the signed input of a plaintext message (covered fields as JSON, canonical content) with
+ * its signature: the key of a verification result. A collision-resistant hash, so a result is only ever reused for the
+ * identical signed input.
+ */
+export async function signedInputDigest(fieldsJson: string, contentJcs: string, signature: string): Promise<string> {
+  const input = new TextEncoder().encode(`${fieldsJson}|${contentJcs}|${signature}`);
+  return b64urlEncode(new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", input)));
+}
+
+/**
+ * The values of an envelope a verification result depends on: a cheap check that an envelope object passed again was
+ * not changed in place (a store that applies an update onto the same object) before its earlier result is reused. The
+ * covered fields and the content's top level are compared by value; content with nested objects or arrays (an embed,
+ * a GIF) is compared by its canonical form, so a change anywhere inside it is noticed.
+ */
+export function envelopeSnapshot(m: PlainEnvelope): unknown[] {
+  const out: unknown[] = [m.id, m.author, m.device_id, m.reply_to_id, m.thread_id, m.mentions_everyone, m.signature, m.mentions, m.attachments, m.content];
+  for (const x of m.mentions ?? []) out.push(x);
+  for (const a of m.attachments ?? []) out.push(a, a.id, a.size, a.sha256);
+  const c = m.content;
+  if (!c || typeof c !== "object") return out;
+  const values = Object.entries(c);
+  if (values.some(([, v]) => v !== null && typeof v === "object")) {
+    try {
+      out.push(jcs(c));
+    } catch {
+      // No canonical form: never equal to an earlier snapshot.
+      out.push(Symbol("unserializable"));
+    }
+  } else for (const [k, v] of values) out.push(k, v);
+  return out;
+}
+
+/** Whether two {@link envelopeSnapshot}s are equal (element by element, `Object.is`). */
+export function sameSnapshot(a: unknown[], b: unknown[]): boolean {
+  return a.length === b.length && a.every((x, i) => Object.is(x, b[i]));
 }
 
 /** The nonce (base64url) inside a `signature` value, or null if it is not 80 bytes of base64url. */

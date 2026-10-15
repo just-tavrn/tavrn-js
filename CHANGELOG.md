@@ -29,9 +29,11 @@ package instead of a git dependency.
   groups loaded; `contentHeader` reads the 28 header characters in JavaScript; `encrypt` takes the epoch from the
   encryption.
 - **Bounded session caches**: decrypted messages and plaintext signature checks keep at most `DECRYPT_CACHE_LIMIT`
-  (5000) results, keyed by message id with a fingerprint of the ciphertext instead of the ciphertext itself; message
-  nonces of the replay rule are kept for the last `NONCE_WINDOW` (50,000) messages; a re-render with the same envelope
-  objects does not canonicalize plaintext messages again.
+  (5000) results. A decryption result is keyed by message id, author, device and epoch, with a (non-cryptographic)
+  fingerprint of the ciphertext instead of the ciphertext itself; a signature check is keyed by message id and
+  signature with the SHA-256 of the signed input. Message nonces of the replay rule are kept for the last
+  `NONCE_WINDOW` (50,000) messages; a re-render with the same, unchanged envelope objects does not canonicalize
+  plaintext messages again.
 - **A failed device lookup is no verdict**: `decrypt` answers the new reason `retry` (not cached) instead of a
   permanent `invalid` when the author's keys cannot be fetched; the bot runtime tries such a message once more.
 - **Background writes**: failed `saveMeta` writes are reported through the new `onError` option instead of unhandled
@@ -184,6 +186,28 @@ package instead of a git dependency.
 
 ### Security
 
+- `@tavrn/e2ee`: a cached decryption result is only returned for an envelope with the same author, device and epoch
+  as the one it was decrypted for (messages, thread titles, poll votes, sealed webhook messages, `peek`, and so command
+  arguments and component values of bots); any other envelope under the same id is decrypted and checked again.
+- `@tavrn/e2ee`: plaintext signature results are cached under the SHA-256 of the signed input instead of a 53-bit
+  non-cryptographic fingerprint, and the per-object fast path checks that the envelope was not changed in place (nested content by its
+  canonical form).
+- `@tavrn/bot`: DMs and group DMs are never written in plaintext, nor any conversation whose encryption group the bot
+  holds or that it saw encrypted in the session, whatever the node's `encrypted` flag says: such a send, edit, poll
+  vote, thread or files-channel write fails with `BotError("encryption_downgrade")` and nothing is sent. Edits follow
+  the conversation, not the edited message's flag.
+- `@tavrn/sdk`: binary downloads are capped (`ApiOptions.maxDownloadBytes`, default 2 GiB, and a per-call `maxBytes` on
+  `attachments.download` and `files.download`); WebSocket text frames above `SocketOptions.maxFrameLength` (default
+  16 Mi characters) are not parsed and the connection is replaced. `@tavrn/bot` downloads at most
+  `maxDownloadBytes` (default 256 MiB) and never more than a file's declared size; files-channel decryption refuses
+  bytes after the last chunk at once.
+- `@tavrn/e2ee`: keys documents with more than 100 devices, 1000 retired devices or 100 continuity statements are
+  refused before any signature in them is checked (`KeysDocumentError`, kept for the lookup's lifetime).
+- `@tavrn/sdk`: `reports.roomForApp` percent-encodes the room id like every other path parameter.
+- `@tavrn/sdk`: the dangerous-extension list of the upload categories (protocol PROTOCOL.md §7a) gains 20 types that
+  run code when opened (`chm`, `hlp`, `jnlp`, `appref-ms`, `library-ms`, `searchconnector-ms`, `diagcab`, `msu`,
+  `mst`, `ps1xml`, `vb`, `ws`, `xbap`, `ade`, `adp`, `mde`, `shb`, `shs`, `iqy`, `slk`): such files are classified as
+  executables whatever their declared type.
 - `@tavrn/sdk`: response bodies from other nodes are read with a size cap (discovery documents, hook keys, JSON
   answers) and within a deadline.
 - `@tavrn/e2ee`: key pins and verified contacts that decrypt but cannot be parsed are no longer replaced by empty

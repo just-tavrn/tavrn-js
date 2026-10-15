@@ -187,6 +187,8 @@ export function decryptFileChunks(fileKey: Uint8Array, part: FilePart, storedSiz
       parts.push(chunk);
       buffered += chunk.length;
       await drain(controller, false);
+      // Bytes after the last expected chunk are refused at once, not buffered until the stream ends.
+      if (index > stopAt && buffered > 0) throw new FileDecryptError("trailing bytes");
     },
     async flush(controller) {
       await drain(controller, true);

@@ -49,6 +49,10 @@ export const DEFAULT_STATE_DIR = ".tavrn-state";
 export const JOINABLE_KINDS = new Set(["text", "announcement", "forum", "files"]);
 const READY_TIMEOUT_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 30_000;
+/** Default of {@link BotOptions.maxDownloadBytes}. */
+const MAX_DOWNLOAD_BYTES = 256 * 1024 * 1024;
+/** The AES-GCM tag after an encrypted attachment's ciphertext (ENCRYPTION.md §6). */
+const ATTACHMENT_TAG_BYTES = 16;
 const STOP_TIMEOUT_MS = 30_000;
 /** Largest keys document read from a node the bot has no session on (FEDERATION.md §3.5). */
 const KEYS_MAX_BYTES = 1024 * 1024;
@@ -108,6 +112,12 @@ export interface BotOptions {
   requestTimeoutMs?: number;
   /** How long `stop()` waits for running handlers and background work (default 30 s); then it stops anyway. */
   stopTimeoutMs?: number;
+  /**
+   * Largest file the bot downloads, in bytes (attachments, files channels; default 256 MiB): downloads are held in
+   * memory, so a larger file fails with `TavrnApiError` `response.too_large` instead of exhausting it. A download also
+   * stops at the file's declared size.
+   */
+  maxDownloadBytes?: number;
   /** WebSocket implementation (Node.js 20 without `--experimental-websocket`: `import WebSocket from "ws"`). */
   WebSocketImpl?: typeof WebSocket;
   fetchImpl?: typeof fetch;
@@ -469,6 +479,7 @@ export class Bot {
   private allowInsecure: boolean;
   /** Deadline of API requests: the request itself plus the longest rate-limit waits. */
   private readonly requestTimeoutMs: number;
+  private readonly maxDownloadBytes: number;
   /** Files channels (FILES.md §3 "Bots"): list, download, upload, folders, delete; encrypted where the channel is. */
   readonly files: BotFiles;
 
@@ -483,6 +494,8 @@ export class Bot {
     this.fetchImpl = opts.rateLimit === false ? opts.fetchImpl : retryingFetch(opts.fetchImpl ?? ((input, init) => fetch(input, init)), { logger: this.logger, ...opts.rateLimit });
     const waits = opts.rateLimit === false ? 0 : (opts.rateLimit?.retries ?? 3) * (opts.rateLimit?.maxWaitMs ?? 30_000);
     this.requestTimeoutMs = (opts.requestTimeoutMs ?? REQUEST_TIMEOUT_MS) + waits;
+    this.maxDownloadBytes = opts.maxDownloadBytes ?? MAX_DOWNLOAD_BYTES;
+    if (!Number.isSafeInteger(this.maxDownloadBytes) || this.maxDownloadBytes < 1) throw new RangeError("maxDownloadBytes: a positive integer");
     this.files = new BotFiles({
       target: (c) => {
         const t = this.target(c);
@@ -492,12 +505,13 @@ export class Bot {
         const c = await this.channelOf(this.target(q).link, q).catch((e: unknown) => {
           throw e instanceof BotError ? new BotError("not_member", `The bot cannot view the files channel ${q}`) : e;
         });
-        return { roomId: c.roomId, kind: c.kind, encrypted: c.encrypted };
+        return { roomId: c.roomId, kind: c.kind, encrypted: this.checkedEncryption(q, c.encrypted) };
       },
       join: (q, create) => this.join(q, create),
       mls: () => this.mls!,
       seal: (q, fn) => this.seal(q, fn),
       freshEpoch: (q, fn) => this.freshEpoch(q, fn),
+      maxDownloadBytes: () => this.maxDownloadBytes,
     });
   }
 
@@ -648,6 +662,7 @@ export class Bot {
       fetchImpl: this.fetchImpl,
       WebSocketImpl: this.opts.WebSocketImpl,
       timeoutMs: this.requestTimeoutMs,
+      maxDownloadBytes: this.maxDownloadBytes,
       handlers: {
         onEvent: (link: NodeLink, event: TavrnEvent) => this.onEvent(link, event),
         onReady: (link: NodeLink, first: boolean) => {
@@ -1211,7 +1226,9 @@ export class Bot {
     const download = async (attachmentId?: string): Promise<DownloadedFile> => {
       const f = attachmentId ? files.find((a) => a.id === attachmentId) : files[0];
       if (!f) throw new BotError("not_found", attachmentId ? `Message ${m.id} has no attachment ${attachmentId}` : `Message ${m.id} has no attachments`);
-      const bytes = new Uint8Array(await (await link.api.attachments.download(f.id)).arrayBuffer());
+      // At most the declared size (plaintext plus the 16-byte tag for encrypted files): a node cannot stream more.
+      const declared = typeof f.size === "number" && Number.isSafeInteger(f.size) && f.size >= 0 ? f.size + (f.crypto ? ATTACHMENT_TAG_BYTES : 0) : undefined;
+      const bytes = new Uint8Array(await (await link.api.attachments.download(f.id, { maxBytes: declared })).arrayBuffer());
       let data: Uint8Array;
       if (f.crypto) data = await decryptAttachment(bytes, f.crypto);
       else {
@@ -1296,20 +1313,48 @@ export class Bot {
     return q;
   }
 
-  /** Whether a conversation is end-to-end encrypted: known channels, else the DM itself. */
+  /**
+   * Whether the bot writes a conversation end-to-end encrypted: known channels, else the DM itself. The node's flag
+   * can only add encryption: DMs and group DMs are always encrypted (PROTOCOL.md §8), and a conversation whose
+   * encryption group the bot holds or that it saw encrypted in this session is never written in plaintext
+   * ({@link checkedEncryption}).
+   */
   private async isEncrypted(link: NodeLink, q: string, id: string): Promise<boolean> {
-    const known = this.channels.get(q)?.encrypted ?? this.dir.direct.get(q)?.encrypted;
-    if (known !== undefined) return known;
+    const channel = this.channels.get(q);
+    if (channel) return this.checkedEncryption(q, channel.encrypted);
+    if (this.dir.direct.has(q)) return true;
     try {
       const c = await link.api.conversations.get(id);
-      this.dir.rememberDirect(q, { encrypted: !!c.encrypted, members: (c.members ?? []).map((u) => u.address) });
-      return !!c.encrypted;
+      // Only DMs and group DMs are conversations of their own: encrypted whatever the answer says.
+      this.dir.rememberDirect(q, { encrypted: true, members: (c.members ?? []).map((u) => u.address) });
+      if (!c.encrypted) throw this.downgrade(q);
+      return true;
     } catch (e) {
+      if (e instanceof BotError) throw e;
       if (code(e) !== "conversation.not_found" && !(e instanceof TavrnApiError && e.status === 404)) throw e;
     }
     const after = await this.dir.find(link, q);
     if (!after) throw new BotError("not_member", `The bot is not a member of ${q}`);
-    return after.encrypted;
+    return this.checkedEncryption(q, after.encrypted);
+  }
+
+  /**
+   * The node's `encrypted` flag of `q`, checked: true is remembered for the session; false is refused with
+   * `encryption_downgrade` for a DM, for a conversation whose encryption group the bot holds and for one it saw
+   * encrypted before. Every plaintext write asks this first.
+   */
+  private checkedEncryption(q: string, nodeSaysEncrypted: boolean): boolean {
+    if (nodeSaysEncrypted) {
+      this.dir.encryptedSeen.add(q);
+      return true;
+    }
+    if (this.dir.direct.has(q) || this.dir.encryptedSeen.has(q) || this.mls?.hasGroup(q)) throw this.downgrade(q);
+    return false;
+  }
+
+  private downgrade(q: string): BotError {
+    this.logger.warn("the node reports an end-to-end encrypted conversation as unencrypted; nothing was sent", { conversation: q });
+    return new BotError("encryption_downgrade", `The node reports ${q} as unencrypted, but it is end-to-end encrypted: nothing was sent`);
   }
 
   /**
@@ -1460,7 +1505,11 @@ export class Bot {
     const { q, id, link, poll, hash, encrypted } = await this.loadPoll(conversation, messageId);
     const mls = this.mls!;
     const content = pollVoteContent(poll, messageId, hash, selection);
-    if (!encrypted) return link.api.polls.vote(id, messageId, { content, signature: signPlainPollVote(mls, q, content) });
+    if (!encrypted) {
+      // A plaintext poll in a conversation that is encrypted for the bot: the vote would go out in plaintext.
+      if (await this.isEncrypted(link, q, id)) throw this.downgrade(q);
+      return link.api.polls.vote(id, messageId, { content, signature: signPlainPollVote(mls, q, content) });
+    }
     return this.freshEpoch(q, async () => {
       const sealed = await this.seal(q, () => encryptPollVote(mls, q, content));
       return link.api.polls.vote(id, messageId, { content: sealed.content, epoch: sealed.epoch });
@@ -1547,11 +1596,13 @@ export class Bot {
     const { q, id, link } = this.target(conversation);
     const m = await this.fetchMessage(link, id, messageId);
     if (m.author !== this.me!.address) throw new BotError("not_author", "A bot can edit only its own messages");
-    const encrypted = !!m.encrypted;
+    // The conversation decides, not the message's flag (the node serves both): an encrypted message stays encrypted,
+    // a plaintext one is edited in plaintext only where the conversation may be written in plaintext.
+    const encrypted = !!m.encrypted || (await this.isEncrypted(link, q, id));
     if (encrypted) await this.prepareEncrypted(q);
     const mls = this.mls!;
     let previous: Record<string, unknown> | null = null;
-    if (encrypted) {
+    if (m.encrypted) {
       const d = await mls.decrypt(q, m);
       previous = d.ok ? d.content : null;
     } else if (m.content && typeof m.content === "object" && !Array.isArray(m.content)) previous = m.content as Record<string, unknown>;
@@ -2025,8 +2076,10 @@ export class Bot {
     const home = this.home!;
     const c = await home.api.conversations.create({ kind: "dm", members: [user] });
     const q = qualify(home.domain, c.id);
-    this.dir.rememberDirect(q, { encrypted: !!c.encrypted, members: (c.members ?? []).map((u) => u.address) });
-    if (c.encrypted) await this.prepareEncrypted(q);
+    // DMs are always end-to-end encrypted (PROTOCOL.md §8): an answer that says otherwise is refused.
+    this.dir.rememberDirect(q, { encrypted: true, members: (c.members ?? []).map((u) => u.address) });
+    if (!c.encrypted) throw this.downgrade(q);
+    await this.prepareEncrypted(q);
     return q;
   }
 

@@ -45,7 +45,7 @@ import {
 } from "@tavrn/sdk";
 import { chainKeys, chainReaches } from "./identity";
 import { LruMap, fingerprint } from "./lru";
-import { envelopeFields, signatureNonce, type PlainEnvelope, type PlainStatus, type SignedFields } from "./plaintext";
+import { envelopeFields, envelopeSnapshot, sameSnapshot, signatureNonce, signedInputDigest, type PlainEnvelope, type PlainStatus, type SignedFields } from "./plaintext";
 import { assertEmbeds, withValidEmbeds } from "./embeds";
 import { sealedContent, webhookPayload, type SealedBy, type SealedContent } from "./sealed";
 import { TRUST_BACKUP_ULID, mergeTrust, openTrust, sealTrust, type TrustRecord } from "./trust";
@@ -448,6 +448,29 @@ export interface EncryptOptions {
 
 const ENVELOPE_MISMATCH: Decrypted = Object.freeze({ ok: false, reason: "envelope_mismatch" }) as Decrypted;
 
+/** A cached decryption result and the envelope fields it was decrypted for. */
+interface DecryptCacheEntry {
+  q: string;
+  author: string;
+  deviceId: string | null;
+  epoch: number | null;
+  fp: string;
+  result: Decrypted;
+}
+
+/**
+ * The decrypt cache key: purpose, conversation, message id and the sender fields the ciphertext is bound to (author,
+ * device, epoch), so the result of one envelope never answers for an envelope that names another sender under the
+ * same id. JSON keeps the parts apart whatever characters they contain.
+ */
+function decryptCacheKey(purpose: string, q: string, m: EncryptedEnvelope): string {
+  return JSON.stringify([purpose, q, m.id, m.author, m.device_id ?? null, m.epoch ?? null]);
+}
+
+function cacheEntry(q: string, m: EncryptedEnvelope, fp: string, result: Decrypted): DecryptCacheEntry {
+  return { q, author: m.author, deviceId: m.device_id ?? null, epoch: m.epoch ?? null, fp, result };
+}
+
 /** A result that stays: not a missing key (it may arrive) and not a failed device lookup (it may work next time). */
 function isFinal(r: Decrypted): boolean {
   return r.ok || (r.reason !== "missing_key" && r.reason !== "retry");
@@ -505,6 +528,31 @@ export const CAUGHT_UP_REUSE_MS = 3_000;
 const KEY_REFETCH_MS = 2_000;
 /** Device lists are looked up again after this (the key cache TTL of nodes, FEDERATION.md §3.5). */
 export const KEY_TTL_MS = 3600 * 1000;
+
+/**
+ * Bounds of a keys document (`GET /users/{username}/keys`) the client checks: attested devices (the node's own cap
+ * for other nodes' users), retired devices (what a node lists at most) and continuity statements (a key is rotated
+ * rarely). Only a hostile home node serves more; every entry costs signature checks, so such a document is refused as
+ * a whole ({@link KeysDocumentError}) before anything in it is checked.
+ */
+export const KEYS_MAX_DEVICES = 100;
+export const KEYS_MAX_RETIRED = 1000;
+export const KEYS_MAX_CONTINUITY = 100;
+
+/**
+ * A keys document beyond {@link KEYS_MAX_DEVICES}, {@link KEYS_MAX_RETIRED} or {@link KEYS_MAX_CONTINUITY}: none of
+ * its devices is verified. The refusal is kept like a lookup ({@link KEY_TTL_MS}), so the document is not fetched and
+ * refused again for every message.
+ */
+export class KeysDocumentError extends Error {
+  constructor(
+    readonly address: string,
+    readonly detail: string,
+  ) {
+    super(`The keys document of ${address} was refused: ${detail}`);
+    this.name = "KeysDocumentError";
+  }
+}
 /** A failed trust sync before a first-use pin is tried again after this. */
 export const TRUST_RETRY_MS = 60_000;
 /** Ephemeral events whose nonces are remembered for replay detection. */
@@ -604,10 +652,12 @@ export class MlsManager {
   /** `kind` of every user whose keys were looked up (from the user's home node, APPLICATIONS.md §3.5). */
   private readonly kinds = new Map<string, string>();
   /**
-   * Results by purpose, conversation and message id, with the fingerprint of the ciphertext they belong to (a changed
-   * ciphertext of the same message is decrypted again); bounded ({@link DECRYPT_CACHE_LIMIT}).
+   * Results by purpose, conversation, message id, author, device and epoch ({@link decryptCacheKey}), with the
+   * fingerprint of the ciphertext they belong to (a changed ciphertext of the same message is decrypted again); a hit
+   * also compares author, device and epoch, so a result is never answered for an envelope that names another sender;
+   * bounded ({@link DECRYPT_CACHE_LIMIT}).
    */
-  private readonly decrypted = new LruMap<string, { fp: string; result: Decrypted }>(DECRYPT_CACHE_LIMIT);
+  private readonly decrypted = new LruMap<string, DecryptCacheEntry>(DECRYPT_CACHE_LIMIT);
   /** The signed context of decrypted messages (stripped from their content), "malformed" when invalid. */
   private readonly contexts = new WeakMap<Decrypted, MessageContext | "malformed">();
   /** The members of the last ghost check per conversation (§4.6), used by the checks before encrypting. */
@@ -621,10 +671,16 @@ export class MlsManager {
   /** `conversation|epoch|nonce` → the message id that used it first (§5.2 replay rule). */
   private readonly nonces = new LruMap<string, string>(NONCE_WINDOW);
   private readonly backupTried = new Set<string>();
-  /** Plaintext signature checks by message id and signature, with the fingerprint of the signed input. */
-  private readonly plainChecked = new LruMap<string, { fp: string; status: PlainStatus }>(DECRYPT_CACHE_LIMIT);
-  /** The same checks by envelope object (a re-render passes the same objects): no canonicalization on a hit. */
-  private plainByEnvelope = new WeakMap<PlainEnvelope, { q: string; status: PlainStatus }>();
+  /**
+   * Plaintext signature checks by message id and signature, with the SHA-256 of the exact signed input
+   * ({@link signedInputDigest}): an envelope changed under the same id and signature is checked again.
+   */
+  private readonly plainChecked = new LruMap<string, { digest: string; status: PlainStatus }>(DECRYPT_CACHE_LIMIT);
+  /**
+   * The same checks by envelope object (a re-render passes the same objects): no canonicalization on a hit, which
+   * also requires the object's values to be unchanged since ({@link envelopeSnapshot}).
+   */
+  private plainByEnvelope = new WeakMap<PlainEnvelope, { q: string; snapshot: unknown[]; status: PlainStatus }>();
   private readonly plainNonces = new LruMap<string, string>(NONCE_WINDOW);
   /** Consecutive failed background writes of the bookkeeping ({@link MlsBackgroundError}). */
   private saveFailures = 0;
@@ -1419,10 +1475,10 @@ export class MlsManager {
     const sealed = m.webhook ? sealedContent(m.content) : null;
     if (sealed) return purpose === "message" ? this.decryptSealed(conversationId, m, sealed) : { ok: false, reason: "invalid" };
     if (typeof m.content !== "string" || !m.device_id) return { ok: false, reason: "invalid" };
-    const cacheKey = `${purpose}|${conversationId}|${m.id}`;
+    const cacheKey = decryptCacheKey(purpose, conversationId, m);
     const fp = fingerprint(m.content);
-    const cached = this.decrypted.get(cacheKey);
-    if (cached?.fp === fp) return this.matchContext(cached.result, m);
+    const cached = this.cachedResult(cacheKey, m, fp);
+    if (cached) return this.matchContext(cached, m);
     const sentAt = m.created_at ? Date.parse(m.created_at) : NaN;
     let result = await this.decryptUncached(conversationId, m.id, m.author, m.device_id, m.epoch ?? null, m.content, Number.isFinite(sentAt) ? sentAt : null);
     if (result.ok && (purpose === "title") !== (result.content.type === THREAD_TITLE_TYPE)) result = { ok: false, reason: "invalid" };
@@ -1438,8 +1494,18 @@ export class MlsManager {
     }
     // Missing keys may arrive later (catch-up, backup), a failed device lookup may work next time: only final results
     // are cached.
-    if (isFinal(result)) this.decrypted.set(cacheKey, { fp, result });
+    if (isFinal(result)) this.decrypted.set(cacheKey, cacheEntry(conversationId, m, fp, result));
     return this.matchContext(result, m);
+  }
+
+  /**
+   * The cached result of `key` when it belongs to exactly this envelope: the same author, device, epoch and
+   * ciphertext fingerprint (the key names them too; the comparison keeps that true whatever the key looks like).
+   */
+  private cachedResult(key: string, m: EncryptedEnvelope, fp: string): Decrypted | undefined {
+    const e = this.decrypted.get(key);
+    if (!e || e.fp !== fp || e.author !== m.author || e.deviceId !== (m.device_id ?? null) || e.epoch !== (m.epoch ?? null)) return undefined;
+    return e.result;
   }
 
   /** `envelope_mismatch` when the signed context differs from the envelope's (known) thread and reply (§5.2). */
@@ -1459,10 +1525,10 @@ export class MlsManager {
    * epoch's content key (current state, history backup or history share), then checked like a webhook payload.
    */
   private async decryptSealed(q: string, m: EncryptedEnvelope, s: SealedContent): Promise<Decrypted> {
-    const cacheKey = `sealed|${q}|${m.id}`;
+    const cacheKey = decryptCacheKey("sealed", q, m);
     const fp = fingerprint(s.sealed);
-    const cached = this.decrypted.get(cacheKey);
-    if (cached?.fp === fp) return cached.result;
+    const cached = this.cachedResult(cacheKey, m, fp);
+    if (cached) return cached;
     if (m.device_id || m.epoch !== s.epoch) return { ok: false, reason: "invalid" };
     let bytes: Uint8Array;
     try {
@@ -1479,7 +1545,7 @@ export class MlsManager {
         if (cryptoCode(e) === "unknown_epoch" && (await this.fetchMissingKey(q, s.epoch, round))) continue;
         result = { ok: false, reason: cryptoCode(e) === "unknown_epoch" ? "missing_key" : "invalid" };
       }
-      if (isFinal(result)) this.decrypted.set(cacheKey, { fp, result });
+      if (isFinal(result)) this.decrypted.set(cacheKey, cacheEntry(q, m, fp, result));
       return result;
     }
     return { ok: false, reason: "missing_key" };
@@ -1548,12 +1614,9 @@ export class MlsManager {
   /** Synchronous lookup of an already decrypted message (pins panel, edits). */
   peek(conversationId: string, m: EncryptedEnvelope): Decrypted | undefined {
     const sealed = m.webhook ? sealedContent(m.content) : null;
-    if (sealed) {
-      const e = this.decrypted.get(`sealed|${conversationId}|${m.id}`);
-      return e?.fp === fingerprint(sealed.sealed) ? e.result : undefined;
-    }
-    const e = this.decrypted.get(`message|${conversationId}|${m.id}`);
-    return e?.fp === fingerprint(String(m.content)) ? this.matchContext(e.result, m) : undefined;
+    if (sealed) return this.cachedResult(decryptCacheKey("sealed", conversationId, m), m, fingerprint(sealed.sealed));
+    const r = this.cachedResult(decryptCacheKey("message", conversationId, m), m, fingerprint(String(m.content)));
+    return r ? this.matchContext(r, m) : undefined;
   }
 
   /**
@@ -1688,23 +1751,29 @@ export class MlsManager {
    */
   async verifyPlaintext(conversationId: string, m: PlainEnvelope): Promise<PlainStatus> {
     if (!m.signature) return "unsigned";
-    // The same envelope object again (a re-render): its last result, without canonicalizing it again.
+    // The same, unchanged envelope object again (a re-render): its last result, without canonicalizing it again.
+    const snapshot = envelopeSnapshot(m);
     const seen = this.plainByEnvelope.get(m);
-    if (seen?.q === conversationId) return seen.status;
+    if (seen?.q === conversationId && sameSnapshot(seen.snapshot, snapshot)) return seen.status;
     const fields = envelopeFields(conversationId, m);
     const nonce = signatureNonce(m.signature);
     if (!fields || !nonce || !m.content || typeof m.content !== "object" || Array.isArray(m.content)) return "invalid";
-    // Cached by the signed input itself: an envelope changed under the same id and signature is checked again.
-    const cacheKey = `${m.id}|${m.signature}`;
-    const fp = fingerprint(`${JSON.stringify(fields)}|${jcs(m.content)}`);
+    // Cached by a SHA-256 of the signed input: an envelope changed under the same id and signature is checked again.
+    // The input is serialized once, before any await: the digest and the check below cover the same bytes.
+    const fieldsJson = JSON.stringify(fields);
+    const contentJcs = jcs(m.content);
+    const signature = m.signature;
+    const id = m.id;
+    const cacheKey = `${id}|${signature}`;
+    const digest = await signedInputDigest(fieldsJson, contentJcs, signature);
     const cached = this.plainChecked.get(cacheKey);
-    if (cached?.fp === fp) {
-      this.plainByEnvelope.set(m, { q: conversationId, status: cached.status });
+    if (cached?.digest === digest) {
+      this.plainByEnvelope.set(m, { q: conversationId, snapshot, status: cached.status });
       return cached.status;
     }
     let key: Uint8Array | undefined;
     try {
-      key = (await this.verifiedDevices(m.author))?.get(fields.device_id) ?? (await this.verifiedDevices(m.author, true))?.get(fields.device_id);
+      key = (await this.verifiedDevices(fields.author))?.get(fields.device_id) ?? (await this.verifiedDevices(fields.author, true))?.get(fields.device_id);
     } catch {
       key = undefined;
     }
@@ -1712,7 +1781,7 @@ export class MlsManager {
     if (!key) return "unverifiable";
     let status: PlainStatus;
     try {
-      status = verifyPlaintext(JSON.stringify(fields), jcs(m.content), m.signature, key) ? "valid" : "invalid";
+      status = verifyPlaintext(fieldsJson, contentJcs, signature, key) ? "valid" : "invalid";
     } catch {
       return "unverifiable";
     }
@@ -1720,11 +1789,11 @@ export class MlsManager {
       // A second message with the same nonce in a conversation is a replay (§10.3).
       const replayKey = `${conversationId}|${nonce}`;
       const seen = this.plainNonces.get(replayKey);
-      if (seen && seen !== m.id) status = "replay";
-      else this.plainNonces.set(replayKey, m.id);
+      if (seen && seen !== id) status = "replay";
+      else this.plainNonces.set(replayKey, id);
     }
-    this.plainChecked.set(cacheKey, { fp, status });
-    this.plainByEnvelope.set(m, { q: conversationId, status });
+    this.plainChecked.set(cacheKey, { digest, status });
+    this.plainByEnvelope.set(m, { q: conversationId, snapshot, status });
     return status;
   }
 
@@ -1836,7 +1905,11 @@ export class MlsManager {
         return d;
       },
       (e: unknown) => {
-        if (this.keyCache.get(address) === entry) this.keyCache.delete(address);
+        if (e instanceof KeysDocumentError) {
+          // Not transient: the refusal stands for the lookup's lifetime.
+          entry.pending = false;
+          entry.at = this.now();
+        } else if (this.keyCache.get(address) === entry) this.keyCache.delete(address);
         throw e;
       },
     );
@@ -1850,6 +1923,10 @@ export class MlsManager {
     const keys = await this.deps.api.keys(address);
     const out = new Map<string, Uint8Array>();
     if (keys.user !== address) return out;
+    const counted = (list: unknown) => (Array.isArray(list) ? list.length : 0);
+    if (counted(keys.devices) > KEYS_MAX_DEVICES) throw new KeysDocumentError(address, `${counted(keys.devices)} devices, at most ${KEYS_MAX_DEVICES} accepted`);
+    if (counted(keys.retired) > KEYS_MAX_RETIRED) throw new KeysDocumentError(address, `${counted(keys.retired)} retired devices, at most ${KEYS_MAX_RETIRED} accepted`);
+    if (counted(keys.continuity) > KEYS_MAX_CONTINUITY) throw new KeysDocumentError(address, `${counted(keys.continuity)} continuity statements, at most ${KEYS_MAX_CONTINUITY} accepted`);
     // Older nodes do not send `kind`: their accounts count as users.
     this.kinds.set(address, typeof keys.kind === "string" ? keys.kind : "user");
     if (!keys.identity_public_key) return out;
@@ -2511,8 +2588,7 @@ export class MlsManager {
       if (n === 0) return 0;
       await this.persist();
       // Messages that failed with a missing key are decrypted again.
-      const prefixes = [`sealed|${q}|`, `message|${q}|`, `title|${q}|`];
-      this.decrypted.deleteWhere((v, k) => !v.result.ok && prefixes.some((p) => k.startsWith(p)));
+      this.decrypted.deleteWhere((v) => !v.result.ok && v.q === q);
       this.markDirty(q);
       this.deps.onEvent?.({ type: "epoch", conversationId: q });
       return n;
