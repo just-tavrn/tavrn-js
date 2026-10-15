@@ -102,14 +102,29 @@ describe("create_polls (bit 39)", () => {
   });
 });
 
+describe("use_components (bit 40)", () => {
+  it("is channel-scoped, grantable to @everyone, in DMs, covered by no scope and allowed in system channels", () => {
+    expect(Permission.USE_COMPONENTS).toBe(1n << 40n);
+    expect(isChannelScoped("USE_COMPONENTS")).toBe(true);
+    expect(CHANNEL_SCOPED).toBe(2027195138559n);
+    expect(isEveryoneRestricted("USE_COMPONENTS")).toBe(false);
+    expect(hasPermission(scopeMask(SCOPE_NAMES), Permission.USE_COMPONENTS)).toBe(false);
+    expect(hasPermission(DIRECT_PERMISSIONS, Permission.USE_COMPONENTS)).toBe(true);
+    expect(hasPermission(SYSTEM_CHANNEL_DENIED, Permission.USE_COMPONENTS)).toBe(false);
+    expect(CHANNEL_SCOPED_GROUPS.find((g) => g.group === "text")!.permissions).toContain("USE_COMPONENTS");
+    expect(PERMISSION_LABELS.find((p) => p.name === "USE_COMPONENTS")?.group).toBe("Text");
+  });
+});
+
 describe("bot inputs (APPLICATIONS.md §2.4)", () => {
-  it("scope masks never contain administrator or restore_history and cover every other bit", () => {
+  it("scope masks never contain administrator, restore_history or use_components and cover every other bit", () => {
     expect(scopeMask([])).toBe(BOT_ALWAYS);
     expect(scopeMask(["nonsense"])).toBe(BOT_ALWAYS);
     const all = scopeMask(SCOPE_NAMES);
     expect(hasPermission(all, Permission.ADMINISTRATOR)).toBe(false);
     expect(hasPermission(all, Permission.RESTORE_HISTORY)).toBe(false);
-    expect(all | Permission.ADMINISTRATOR | Permission.RESTORE_HISTORY).toBe(ALL_PERMISSIONS);
+    expect(hasPermission(all, Permission.USE_COMPONENTS)).toBe(false);
+    expect(all | Permission.ADMINISTRATOR | Permission.RESTORE_HISTORY | Permission.USE_COMPONENTS).toBe(ALL_PERMISSIONS);
   });
 
   it("caps bots only and fails closed for unknown kinds", () => {
@@ -143,7 +158,7 @@ describe("CHANNEL_SCOPED (layered overrides)", () => {
     const bits = [...section.matchAll(/^\| (\d+) \| `/gm)].map((m) => BigInt(m[1]!));
     expect(bits.reduce((acc, b) => acc | (1n << b), 0n)).toBe(CHANNEL_SCOPED);
     // Same value as permissions::CHANNEL_SCOPED of the node.
-    expect(CHANNEL_SCOPED.toString()).toBe("927683510783");
+    expect(CHANNEL_SCOPED.toString()).toBe("2027195138559");
     expect(isChannelScoped("VIEW_CHANNEL")).toBe(true);
     expect(isChannelScoped("MANAGE_ROLES")).toBe(true);
     for (const room of ["ADMINISTRATOR", "MANAGE_ROOM", "KICK_MEMBERS", "PURGE", "CHANGE_NICKNAME", "MANAGE_APPLICATIONS"] as const) expect(isChannelScoped(room)).toBe(false);

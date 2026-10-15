@@ -198,12 +198,20 @@ import type { PeerResolution } from "./generated/types.gen";
 import type { PushRegistration, PushSubscriptionRequest, VapidInfo } from "./generated/types.gen";
 import type { AdminRoom, AutomodRule, AutomodSettings, CreateReportRequest, ModerationReport, ReportActionRequest, ReportActionResult, ReportCreated, ReportList, UpdateReportRequest } from "./generated/types.gen";
 import type { AcceptTermsRequest, AccountDeletion, CounterDecision, CounterNoticeRequest, DataSummary, DeleteAccountRequest, DeletionStarted, LegalContact, LegalDocument, LegalTemplate, Notice, NoticeAction, NoticeActionResult, NoticeCreated, NoticeDetail, NoticeRequest, NoticeStatus, TermsStatus, UploaderNotice } from "./generated/types.gen";
+import type { ComponentInvokeRequest, Modal, ModalSubmitRequest } from "./components";
 import type { Callback, CommandApproval, CommandApprovalRequest, CommandApprovalSettings, CommandDefinition, CommandSet, FollowUp, FollowUpResponse, InvokeRequest, InvokeResponse, PaletteCommand, PutCommandSettings, RoomCommand, RoomCommands } from "./generated/types.gen";
 
 /**
  * The conversation index of the home node (FEDERATION.md §4) with its version (`ETag`). Entries may carry
  * fields this SDK does not know; they are kept unchanged.
  */
+/** The answer to a component interaction or a modal submit (§5.10): `InvokeResponse` with the typed `modal`. */
+export type ComponentInvokeResponse = Omit<InvokeResponse, "outcome" | "modal"> & {
+  /** `reply`, `defer`, `error`, `update` or `modal`. */
+  outcome: "reply" | "defer" | "error" | "update" | "modal";
+  modal?: Modal | null;
+};
+
 export interface ConversationIndexState {
   version: number;
   items: IndexEntry[];
@@ -1134,6 +1142,20 @@ export class TavrnApi {
     reject: (req: CommandApprovalRequest) => this.post<void>("/admin/applications/commands/reject", req),
     /** Node admins: whether this node requires the approval (`TAVRN_APP_COMMANDS_REQUIRE_APPROVAL`). */
     approvalSettings: () => this.get<CommandApprovalSettings>("/admin/applications/commands/approval"),
+  };
+
+  /**
+   * Message components (protocol/APPLICATIONS.md §5.10): clicking a button or choosing in a select menu of an
+   * application's message. Resolves with the application's first response (at most 3 s), which may be a `modal`.
+   */
+  components = {
+    invoke: (conversationId: string, messageId: string, req: ComponentInvokeRequest) =>
+      this.post<ComponentInvokeResponse>(`/conversations/${conversationId}/messages/${encodeURIComponent(messageId)}/interactions`, req),
+  };
+
+  /** Interactions of the signed-in user (§5.10.4): submitting the modal an application opened. */
+  interactions = {
+    submit: (interactionId: string, req: ModalSubmitRequest) => this.post<ComponentInvokeResponse>(`/interactions/${encodeURIComponent(interactionId)}/submit`, req),
   };
 
   /**

@@ -50,6 +50,11 @@ export const Permission = {
    * message with a close time; clients enforce it for encrypted polls. Channel-scoped, default of `@everyone`.
    */
   CREATE_POLLS: 1n << 39n,
+  /**
+   * Use the buttons, select menus and modals of applications' messages (APPLICATIONS.md §5.10). Channel-scoped,
+   * default of `@everyone`, independent of SEND_MESSAGES; no app-token scope covers it (bots never click).
+   */
+  USE_COMPONENTS: 1n << 40n,
   ADMINISTRATOR: 1n << 62n,
 } as const;
 
@@ -119,6 +124,7 @@ export const CHANNEL_SCOPED: bigint = [
   Permission.MANAGE_THREADS,
   Permission.VOICE_STATUS,
   Permission.CREATE_POLLS,
+  Permission.USE_COMPONENTS,
 ].reduce((a, b) => a | b, 0n);
 
 /** Is this permission (a bit or its name) one that overrides may carry? */
@@ -130,7 +136,7 @@ export function isChannelScoped(permission: bigint | PermissionName): boolean {
 /** The channel-scoped bits in the groups and order of the override editors (clients localize `group`). */
 export const CHANNEL_SCOPED_GROUPS: readonly { group: "general" | "text" | "voice" | "files" | "management"; permissions: readonly PermissionName[] }[] = [
   { group: "general", permissions: ["VIEW_CHANNEL", "READ_HISTORY", "ADD_REACTIONS", "USE_EXTERNAL_EMOJIS", "MENTION_EVERYONE"] },
-  { group: "text", permissions: ["SEND_MESSAGES", "CREATE_THREADS", "CREATE_POLLS", "PIN_MESSAGES", "MANAGE_MESSAGES", "MANAGE_THREADS"] },
+  { group: "text", permissions: ["SEND_MESSAGES", "CREATE_THREADS", "CREATE_POLLS", "USE_COMPONENTS", "PIN_MESSAGES", "MANAGE_MESSAGES", "MANAGE_THREADS"] },
   { group: "voice", permissions: ["CONNECT", "SPEAK", "STREAM", "USE_CAMERA", "USE_SOUNDBOARD", "USE_EXTERNAL_SOUNDS", "PRIORITY_SPEAKER", "VOICE_STATUS", "MUTE_MEMBERS", "MOVE_MEMBERS", "USE_WHITEBOARD", "MANAGE_WHITEBOARD"] },
   { group: "files", permissions: ["ATTACH_FILES", "MANAGE_FILES"] },
   { group: "management", permissions: ["MANAGE_CHANNELS", "MANAGE_ROLES", "MANAGE_WEBHOOKS"] },
@@ -151,7 +157,7 @@ export const SYSTEM_CHANNEL_FORCED: bigint = Permission.VIEW_CHANNEL | Permissio
 
 /** Permissions of every member in a DM or group DM (the node's `DIRECT_PERMS`). */
 export const DIRECT_PERMISSIONS: bigint =
-  Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES | Permission.ATTACH_FILES | Permission.ADD_REACTIONS | Permission.PIN_MESSAGES | Permission.USE_WHITEBOARD | Permission.CREATE_POLLS;
+  Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES | Permission.ATTACH_FILES | Permission.ADD_REACTIONS | Permission.PIN_MESSAGES | Permission.USE_WHITEBOARD | Permission.CREATE_POLLS | Permission.USE_COMPONENTS;
 
 /** Is this permission (a bit or its name) one that `@everyone` can never hold? */
 export function isEveryoneRestricted(permission: bigint | PermissionName): boolean {
@@ -168,6 +174,7 @@ export const PERMISSION_LABELS: { name: PermissionName; label: string; group: st
   { name: "MENTION_EVERYONE", label: "Mention @everyone", group: "Text" },
   { name: "CREATE_THREADS", label: "Create threads", group: "Text" },
   { name: "CREATE_POLLS", label: "Create polls", group: "Text" },
+  { name: "USE_COMPONENTS", label: "Use buttons and menus of apps", group: "Text" },
   { name: "PIN_MESSAGES", label: "Pin messages", group: "Text" },
   { name: "MANAGE_MESSAGES", label: "Manage messages", group: "Moderation" },
   { name: "MANAGE_THREADS", label: "Manage threads", group: "Moderation" },

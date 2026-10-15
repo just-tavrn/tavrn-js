@@ -6,6 +6,7 @@
 export const SDK_VERSION = "0.2.1";
 export * from "./age";
 export * from "./api";
+export * from "./components";
 export * from "./directory";
 export * from "./errors";
 export * from "./federation";
