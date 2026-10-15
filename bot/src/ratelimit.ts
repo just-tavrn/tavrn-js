@@ -35,9 +35,30 @@ function replayable(body: BodyInit | null | undefined): boolean {
   return body === undefined || body === null || typeof body === "string" || body instanceof Uint8Array || body instanceof ArrayBuffer || (typeof Blob !== "undefined" && body instanceof Blob) || body instanceof URLSearchParams;
 }
 
+/** Waits `ms`, or rejects with the signal's reason as soon as it aborts. */
+function abortableSleep(sleep: (ms: number) => Promise<void>, ms: number, signal: AbortSignal | null | undefined): Promise<void> {
+  if (!signal) return sleep(ms);
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    sleep(ms).then(
+      () => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      },
+      (e: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(e);
+      },
+    );
+  });
+}
+
 /**
  * `fetch` that honours `429 Retry-After`: waits and repeats the request up to `retries` times while each wait is at
- * most `maxWaitMs`, then returns the last response unchanged. Other responses and network errors pass through.
+ * most `maxWaitMs`, then returns the last response unchanged. Other responses and network errors pass through. A
+ * wait ends early when the request's signal aborts (its deadline passed or the caller gave up).
  */
 export function retryingFetch(fetchImpl: typeof fetch = fetch, opts: RetryOptions = {}): typeof fetch {
   const retries = opts.retries ?? 3;
@@ -53,7 +74,7 @@ export function retryingFetch(fetchImpl: typeof fetch = fetch, opts: RetryOption
       if (wait > maxWait) return resp;
       opts.logger?.warn("rate limited, retrying", { wait_ms: wait, attempt: attempt + 1 });
       await resp.body?.cancel().catch(() => undefined);
-      await sleep(wait);
+      await abortableSleep(sleep, wait, init?.signal);
     }
   };
   return wrapped as typeof fetch;

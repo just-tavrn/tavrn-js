@@ -47,6 +47,8 @@ export interface LinkOptions {
   clientHeader: string;
   fetchImpl?: typeof fetch;
   WebSocketImpl?: typeof WebSocket;
+  /** Deadline of an API request including the rate-limit waits (TavrnApi `timeoutMs`). */
+  timeoutMs?: number;
   now?: () => number;
 }
 
@@ -72,11 +74,12 @@ export class NodeLink {
   private constructor(private readonly opts: LinkOptions) {
     this.domain = opts.domain;
     this.endpoints = opts.endpoints;
-    this.publicApi = new TavrnApi({ baseUrl: opts.endpoints.base, clientHeader: opts.clientHeader, fetchImpl: opts.fetchImpl });
+    this.publicApi = new TavrnApi({ baseUrl: opts.endpoints.base, clientHeader: opts.clientHeader, fetchImpl: opts.fetchImpl, timeoutMs: opts.timeoutMs });
     this.api = new TavrnApi({
       baseUrl: opts.endpoints.base,
       clientHeader: opts.clientHeader,
       fetchImpl: opts.fetchImpl,
+      timeoutMs: opts.timeoutMs,
       getToken: () => this.token(),
       refreshToken: () => this.refresh(),
     });

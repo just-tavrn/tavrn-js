@@ -46,4 +46,14 @@ describe("Retry-After (APPLICATIONS.md §2.7)", () => {
     expect((await retryingFetch(fake, { sleep: async () => undefined })("http://h.test/x", { method: "POST", body, duplex: "half" } as RequestInit)).status).toBe(429);
     expect(n).toBe(1);
   });
+
+  it("ends a wait when the request's signal aborts (a timeout or stop)", async () => {
+    const always = (async () => new Response(null, { status: 429, headers: { "Retry-After": "20" } })) as typeof fetch;
+    const ctrl = new AbortController();
+    const started = Date.now();
+    const pending = retryingFetch(always)("http://h.test/x", { signal: ctrl.signal });
+    setTimeout(() => ctrl.abort(new DOMException("timed out", "TimeoutError")), 20);
+    await expect(pending).rejects.toMatchObject({ name: "TimeoutError" });
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
 });

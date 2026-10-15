@@ -40,6 +40,10 @@ export const DEFAULT_STATE_DIR = ".tavrn-state";
 /** Channel kinds whose MLS groups the bot joins (voice groups only carry frame keys). */
 export const JOINABLE_KINDS = new Set(["text", "announcement", "forum"]);
 const READY_TIMEOUT_MS = 30_000;
+const REQUEST_TIMEOUT_MS = 30_000;
+const STOP_TIMEOUT_MS = 30_000;
+/** Largest keys document read from a node the bot has no session on (FEDERATION.md §3.5). */
+const KEYS_MAX_BYTES = 1024 * 1024;
 const MAINTENANCE_MS = 10 * 60 * 1000;
 
 export interface BotOptions {
@@ -88,6 +92,14 @@ export interface BotOptions {
    * hands every `429` to the caller at once.
    */
   rateLimit?: RetryOptions | false;
+  /**
+   * Deadline of one API request in milliseconds (default 30 s): a node that does not answer in time fails the call
+   * with `TavrnApiError` `network.timeout` instead of stalling the bot (also inside the encryption queue). The waits of
+   * {@link BotOptions.rateLimit} come on top. File transfers have their own, longer deadline (10 minutes).
+   */
+  requestTimeoutMs?: number;
+  /** How long `stop()` waits for running handlers and background work (default 30 s); then it stops anyway. */
+  stopTimeoutMs?: number;
   /** WebSocket implementation (Node.js 20 without `--experimental-websocket`: `import WebSocket from "ws"`). */
   WebSocketImpl?: typeof WebSocket;
   fetchImpl?: typeof fetch;
@@ -426,6 +438,8 @@ export class Bot {
   private starting: Promise<void> | null = null;
   private state: "new" | "starting" | "running" | "stopping" | "stopped" = "new";
   private allowInsecure: boolean;
+  /** Deadline of API requests: the request itself plus the longest rate-limit waits. */
+  private readonly requestTimeoutMs: number;
 
   constructor(private readonly opts: BotOptions) {
     this.logger = opts.logger ?? consoleLogger();
@@ -434,6 +448,8 @@ export class Bot {
     this.components = new ComponentRouter({ logger: this.logger, autoDeferMs: opts.autoDeferMs });
     this.allowInsecure = opts.allowInsecure ?? /^http:\/\//i.test(opts.node.trim());
     this.fetchImpl = opts.rateLimit === false ? opts.fetchImpl : retryingFetch(opts.fetchImpl ?? ((input, init) => fetch(input, init)), { logger: this.logger, ...opts.rateLimit });
+    const waits = opts.rateLimit === false ? 0 : (opts.rateLimit?.retries ?? 3) * (opts.rateLimit?.maxWaitMs ?? 30_000);
+    this.requestTimeoutMs = (opts.requestTimeoutMs ?? REQUEST_TIMEOUT_MS) + waits;
   }
 
   // ---- Events and commands --------------------------------------------------------------------
@@ -581,6 +597,7 @@ export class Bot {
       clientHeader: `tavrn-bot/${BOT_VERSION}`,
       fetchImpl: this.fetchImpl,
       WebSocketImpl: this.opts.WebSocketImpl,
+      timeoutMs: this.requestTimeoutMs,
       handlers: {
         onEvent: (link: NodeLink, event: TavrnEvent) => this.onEvent(link, event),
         onReady: (link: NodeLink, first: boolean) => {
@@ -601,7 +618,7 @@ export class Bot {
     if (/^https?:\/\//i.test(node)) {
       let doc: WellKnown;
       try {
-        doc = await new TavrnApi({ baseUrl: node, fetchImpl: this.fetchImpl }).node.wellKnown();
+        doc = await new TavrnApi({ baseUrl: node, fetchImpl: this.fetchImpl, timeoutMs: this.requestTimeoutMs }).node.wellKnown();
       } catch (e) {
         throw new BotError("node_invalid", `${node} is not reachable or not a tavrn node`, { cause: e });
       }
@@ -754,7 +771,8 @@ export class Bot {
     let client = this.publicClients.get(domain);
     if (!client) {
       const endpoints = await this.resolve(domain);
-      client = new TavrnApi({ baseUrl: endpoints.base, clientHeader: `tavrn-bot/${BOT_VERSION}`, fetchImpl: this.fetchImpl });
+      // Only public keys documents come from here (any author's node): a small answer cap is plenty.
+      client = new TavrnApi({ baseUrl: endpoints.base, clientHeader: `tavrn-bot/${BOT_VERSION}`, fetchImpl: this.fetchImpl, timeoutMs: this.requestTimeoutMs, maxResponseBytes: KEYS_MAX_BYTES });
       this.publicClients.set(domain, client);
     }
     return client.keys.get(username);
@@ -1916,8 +1934,16 @@ export class Bot {
     this.state = "stopping";
     if (this.maintenance) clearInterval(this.maintenance);
     for (const link of this.links.values()) link.close();
-    // Handlers may still send; give them their time (they fail fast once the bot is stopped).
-    for (let i = 0; i < 5 && this.inflight.size; i++) await Promise.allSettled([...this.inflight]);
+    // Handlers may still send; give them their time (they fail fast once the bot is stopped), but not forever.
+    const until = Date.now() + (this.opts.stopTimeoutMs ?? STOP_TIMEOUT_MS);
+    for (let i = 0; i < 5 && this.inflight.size; i++) {
+      const left = until - Date.now();
+      if (left <= 0) break;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([Promise.allSettled([...this.inflight]), new Promise((r) => (timer = setTimeout(r, left)))]);
+      clearTimeout(timer);
+    }
+    if (this.inflight.size) this.logger.warn("stopping while handlers are still running", { running: this.inflight.size });
     const mls = this.mls;
     if (mls) {
       await mls.flushBackups().catch((e: unknown) => this.logger.warn("history backups could not be flushed", { error: e }));
