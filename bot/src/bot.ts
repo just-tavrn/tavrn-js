@@ -30,7 +30,7 @@ import { sealUnderPolicy, type GhostPolicy } from "./ghosts";
 import { NodeLink } from "./node-link";
 import { retryingFetch, type RetryOptions } from "./ratelimit";
 import { MessageTracker, validReaction } from "./reactions";
-import { MAX_ATTACHMENTS, asFile, uploadCategory, type BotFile, type DownloadedFile } from "./uploads";
+import { MAX_ATTACHMENTS, asFile, type BotFile, type DownloadedFile } from "./uploads";
 import { activityRequest, banSubject, checkContent, presenceRequest, reason as checkReason, timeoutMinutes, ulid, voiceStatus, type ActivityInput, type PresenceInput } from "./validate";
 import { appTokenClaims, type AppTokenClaims } from "./token";
 
@@ -1231,14 +1231,14 @@ export class Bot {
     const stored: Attachment[] = [];
     const keys: ContentAttachment[] = [];
     for (const f of files) {
-      const file = await asFile(f);
+      const { file, category } = await asFile(f);
       if (!encrypted) {
         stored.push({ ...(await link.api.attachments.uploadToConversation(id, file, file.name)), spoiler: f.spoiler === true });
         continue;
       }
       // ENCRYPTION.md §6: only ciphertext leaves the bot; the category is declared (PROTOCOL.md §7a).
       const { blob, meta } = await encryptAttachment(file);
-      const up = await link.api.attachments.uploadToConversation(id, blob, "", undefined, uploadCategory(file.name, file.type));
+      const up = await link.api.attachments.uploadToConversation(id, blob, "", undefined, category);
       if (up.sha256 !== meta.sha256) throw new BotError("node_invalid", "The node stored another ciphertext than the bot uploaded");
       stored.push(up);
       keys.push({ id: up.id, ...meta, ...(f.spoiler ? { spoiler: true } : {}) });
