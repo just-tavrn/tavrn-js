@@ -18,6 +18,8 @@ export type BotErrorCode =
   | "key_invalid"
   /** The state directory holds the data of another account (one bot account and device per directory). */
   | "state_dir_in_use"
+  /** The state directory cannot be written any more (several writes in a row failed): the bot stopped. */
+  | "state_unwritable"
   /** The node of `node` cannot be used (unreachable, not a tavrn node, domain differs from the token issuer). */
   | "node_invalid"
   /** The conversation is not known to the bot or the bot is not a member of its encryption group. */
