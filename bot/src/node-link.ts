@@ -236,6 +236,15 @@ export class NodeLink {
     return this.socket?.status === "ready";
   }
 
+  /**
+   * Sends the `typing` operation (PROTOCOL.md §6): `{ room_id, channel_id }` for a room channel, `{ conversation_id }`
+   * for a DM; false while the socket is not open.
+   */
+  typing(conversationId: string, roomId: string | null): boolean {
+    if (!this.socket) return false;
+    return roomId ? this.socket.typing(roomId, conversationId) : this.socket.typingIn(conversationId);
+  }
+
   /** Closes the WebSocket for good. */
   close(): void {
     this.closed = true;

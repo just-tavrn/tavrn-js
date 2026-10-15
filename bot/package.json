@@ -23,6 +23,7 @@
   },
   "files": [
     "src",
+    "docs",
     "NOTICE"
   ],
   "engines": {
@@ -31,7 +32,8 @@
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "example": "vite-node examples/echo-weather/index.ts"
+    "example": "vite-node examples/echo-weather/index.ts",
+    "example:proposals": "vite-node examples/proposals/index.ts"
   },
   "dependencies": {
     "@tavrn/crypto": "github:just-tavrn/tavrn-crypto#19ac87b4b42b13ec07e0eec5f8c17a2b47f70f37&path:pkg",
