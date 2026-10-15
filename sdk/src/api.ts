@@ -1299,7 +1299,7 @@ export class TavrnApi {
      * Moderation bots (app token scope `moderation`, `moderate_members` in the room, MODERATION.md §1.4a): the room's
      * reports in the reduced shape, metadata only, the reporter as a pseudonym. App tokens always get this shape.
      */
-    roomForApp: (roomId: string, query?: { status?: string; limit?: number; before?: string }) => this.get<AppReportList>(`/rooms/${roomId}/reports`, query),
+    roomForApp: (roomId: string, query?: { status?: string; limit?: number; before?: string }) => this.get<AppReportList>(`/rooms/${encodeURIComponent(roomId)}/reports`, query),
     /** Moderation bots: one report of a room they moderate in the reduced shape (MODERATION.md §1.4a). */
     getForApp: (reportId: string) => this.get<AppReport>(`/reports/${encodeURIComponent(reportId)}`),
   };
