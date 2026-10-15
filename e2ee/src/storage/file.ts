@@ -20,7 +20,7 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
-import { b64urlDecode, b64urlEncode } from "@tavrn/sdk";
+import { b64urlDecode } from "@tavrn/sdk";
 import { LocalKeyMismatchError, localAad, localStorageKey, type CryptoStatus, type KeyStore } from "../keystore";
 
 /** Name of the state file inside the directory. */
@@ -209,23 +209,44 @@ export class FileKeyStore implements KeyStore {
     this.current = next;
   }
 
-  /** Seals the open state now and queues the atomic write (writes happen in call order). */
+  /**
+   * Seals the open state now and queues the atomic write (writes happen in call order). While a write runs, the
+   * changes that arrive are coalesced: the queued write takes the newest sealed state, and every caller waiting for it
+   * resolves when the file holds its change (one file rewrite with two fsyncs per burst, not per secret).
+   */
   private flush(): Promise<void> {
     const cur = this.require();
-    const body = JSON.stringify({ master: b64urlEncode(cur.master), secrets: Object.fromEntries([...cur.secrets].map(([k, v]) => [k, b64urlEncode(v)])) });
+    const b64 = (v: Uint8Array) => Buffer.from(v.buffer, v.byteOffset, v.byteLength).toString("base64url");
+    const body = JSON.stringify({ master: b64(cur.master), secrets: Object.fromEntries([...cur.secrets].map(([k, v]) => [k, b64(v)])) });
     const plain = Buffer.from(body, "utf8");
     const iv = randomBytes(12);
     const c = createCipheriv("aes-256-gcm", cur.key, iv);
     c.setAAD(localAad(cur.account, ENTRY));
     const sealed = Buffer.concat([c.update(plain), c.final(), c.getAuthTag()]);
     plain.fill(0);
-    const header: Header = { v: 1, account: cur.account, device_id: cur.deviceId, iv: b64urlEncode(iv), data: b64urlEncode(sealed) };
-    const write = this.writing.then(() => this.writeAtomic(`${JSON.stringify(header)}\n`));
-    this.writing = write.catch(() => undefined);
-    return write;
+    const header: Header = { v: 1, account: cur.account, device_id: cur.deviceId, iv: b64(iv), data: b64(sealed) };
+    const content = `${JSON.stringify(header)}\n`;
+    if (this.queued) {
+      this.queued.content = content;
+      return this.queued.done;
+    }
+    const slot: { content: string; done: Promise<void> } = { content, done: Promise.resolve() };
+    slot.done = this.writing.then(() => {
+      if (this.queued === slot) this.queued = null;
+      return this.writeAtomic(slot.content);
+    });
+    this.queued = slot;
+    this.writing = slot.done.catch(() => undefined);
+    return slot.done;
   }
 
+  /** The write that has not started yet (it takes the state of every later change until it starts). */
+  private queued: { content: string; done: Promise<void> } | null = null;
+  /** Atomic file writes so far (the tests check that bursts are coalesced). */
+  private filesWritten = 0;
+
   private async writeAtomic(content: string): Promise<void> {
+    this.filesWritten++;
     await mkdir(this.dir, { recursive: true, mode: 0o700 });
     const tmp = join(this.dir, `.${STATE_FILE}.${randomBytes(8).toString("hex")}.tmp`);
     // "wx": never follow or reuse an existing file; 0600 before any byte is written.
