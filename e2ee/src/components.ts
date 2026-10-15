@@ -10,6 +10,7 @@
  */
 import { b64urlEncode } from "@tavrn/sdk";
 import { ARGS_MAX_AGE_MS, ARGS_MAX_SKEW_MS, ARGS_NONCE_KEEP_MS, type ContentEncryptor } from "./commands";
+import { NonceWindow } from "./lru";
 
 export const COMPONENT_VALUES_TYPE = "component.values";
 export const MODAL_VALUES_TYPE = "modal.values";
@@ -97,16 +98,15 @@ const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 
  * application's own check (it knows the message it sent; `validateComponentValues` of `@tavrn/sdk`).
  */
 export class ComponentValuesVerifier {
-  private readonly seen = new Map<string, number>();
+  private readonly seen: NonceWindow;
   private readonly now: () => number;
   private readonly maxAgeMs: number;
-  private readonly keepMs: number;
   private readonly maxSkewMs: number;
 
   constructor(opts: { now?: () => number; maxAgeMs?: number; keepMs?: number; maxSkewMs?: number } = {}) {
     this.now = opts.now ?? (() => Date.now());
     this.maxAgeMs = opts.maxAgeMs ?? ARGS_MAX_AGE_MS;
-    this.keepMs = opts.keepMs ?? ARGS_NONCE_KEEP_MS;
+    this.seen = new NonceWindow(opts.keepMs ?? ARGS_NONCE_KEEP_MS);
     this.maxSkewMs = opts.maxSkewMs ?? ARGS_MAX_SKEW_MS;
   }
 
@@ -144,15 +144,12 @@ export class ComponentValuesVerifier {
   /** Age, skew and replay; the nonce is remembered only when everything else passed. */
   private fresh(c: Record<string, unknown>): "stale" | "future" | "replay" | null {
     const now = this.now();
-    for (const [n, at] of this.seen) {
-      if (now - at > this.keepMs) this.seen.delete(n);
-    }
     const issued = Date.parse(c.issued_at as string);
     if (now - issued > this.maxAgeMs) return "stale";
     if (issued - now > this.maxSkewMs) return "future";
     const key = c.nonce as string;
-    if (this.seen.has(key)) return "replay";
-    this.seen.set(key, now);
+    if (this.seen.has(key, now)) return "replay";
+    this.seen.remember(key, now);
     return null;
   }
 }

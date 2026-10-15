@@ -8,6 +8,7 @@
  * replay arguments nor move them to another command.
  */
 import { b64urlEncode } from "@tavrn/sdk";
+import { NonceWindow } from "./lru";
 
 export const COMMAND_ARGS_TYPE = "command.args";
 /** Arguments older than this are refused. */
@@ -63,24 +64,20 @@ const NONCE = /^[A-Za-z0-9_-]{22}$/;
  * minutes (and not from the future), a nonce not seen in the last 15 minutes.
  */
 export class CommandArgsVerifier {
-  private readonly seen = new Map<string, number>();
+  private readonly seen: NonceWindow;
   private readonly now: () => number;
   private readonly maxAgeMs: number;
-  private readonly keepMs: number;
   private readonly maxSkewMs: number;
 
   constructor(opts: { now?: () => number; maxAgeMs?: number; keepMs?: number; maxSkewMs?: number } = {}) {
     this.now = opts.now ?? (() => Date.now());
     this.maxAgeMs = opts.maxAgeMs ?? ARGS_MAX_AGE_MS;
-    this.keepMs = opts.keepMs ?? ARGS_NONCE_KEEP_MS;
+    this.seen = new NonceWindow(opts.keepMs ?? ARGS_NONCE_KEEP_MS);
     this.maxSkewMs = opts.maxSkewMs ?? ARGS_MAX_SKEW_MS;
   }
 
   check(content: unknown, invokedRef: string): ArgsCheck {
     const now = this.now();
-    for (const [nonce, at] of this.seen) {
-      if (now - at > this.keepMs) this.seen.delete(nonce);
-    }
     if (!content || typeof content !== "object" || Array.isArray(content)) return { ok: false, reason: "invalid" };
     const c = content as Record<string, unknown>;
     if (c.type !== COMMAND_ARGS_TYPE || typeof c.nonce !== "string" || !NONCE.test(c.nonce) || typeof c.issued_at !== "string") return { ok: false, reason: "invalid" };
@@ -91,8 +88,8 @@ export class CommandArgsVerifier {
     if (!Number.isFinite(issued)) return { ok: false, reason: "invalid" };
     if (now - issued > this.maxAgeMs) return { ok: false, reason: "stale" };
     if (issued - now > this.maxSkewMs) return { ok: false, reason: "future" };
-    if (this.seen.has(c.nonce)) return { ok: false, reason: "replay" };
-    this.seen.set(c.nonce, now);
+    if (this.seen.has(c.nonce, now)) return { ok: false, reason: "replay" };
+    this.seen.remember(c.nonce, now);
     return { ok: true, args: args as Record<string, unknown> };
   }
 }
