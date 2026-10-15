@@ -59,9 +59,11 @@ export class LruMap<K, V> {
 }
 
 /**
- * A 53-bit hash of a string (cyrb53, public domain), as a fingerprint of a ciphertext in a cache entry: the cache keys
- * name the message, the fingerprint tells a changed ciphertext of the same message apart without keeping it. Not a
- * cryptographic hash; a collision can only make the cache answer with the earlier result of the same message.
+ * A 53-bit hash of a string (cyrb53, public domain), as a fingerprint of a ciphertext in a decrypt cache entry: the
+ * cache key names the message and the sender fields its ciphertext is bound to (author, device, epoch), the
+ * fingerprint tells a changed ciphertext of that message apart without keeping it. NOT a cryptographic hash: second
+ * preimages are cheap to compute, so it is only used where a collision can at most answer with the earlier, verified
+ * result of the same message from the same sender, and never to decide whether a signature or a plaintext is valid.
  */
 export function fingerprint(s: string, seed = 0): string {
   let h1 = 0xdeadbeef ^ seed;

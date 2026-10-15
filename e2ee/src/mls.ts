@@ -448,6 +448,29 @@ export interface EncryptOptions {
 
 const ENVELOPE_MISMATCH: Decrypted = Object.freeze({ ok: false, reason: "envelope_mismatch" }) as Decrypted;
 
+/** A cached decryption result and the envelope fields it was decrypted for. */
+interface DecryptCacheEntry {
+  q: string;
+  author: string;
+  deviceId: string | null;
+  epoch: number | null;
+  fp: string;
+  result: Decrypted;
+}
+
+/**
+ * The decrypt cache key: purpose, conversation, message id and the sender fields the ciphertext is bound to (author,
+ * device, epoch), so the result of one envelope never answers for an envelope that names another sender under the
+ * same id. JSON keeps the parts apart whatever characters they contain.
+ */
+function decryptCacheKey(purpose: string, q: string, m: EncryptedEnvelope): string {
+  return JSON.stringify([purpose, q, m.id, m.author, m.device_id ?? null, m.epoch ?? null]);
+}
+
+function cacheEntry(q: string, m: EncryptedEnvelope, fp: string, result: Decrypted): DecryptCacheEntry {
+  return { q, author: m.author, deviceId: m.device_id ?? null, epoch: m.epoch ?? null, fp, result };
+}
+
 /** A result that stays: not a missing key (it may arrive) and not a failed device lookup (it may work next time). */
 function isFinal(r: Decrypted): boolean {
   return r.ok || (r.reason !== "missing_key" && r.reason !== "retry");
@@ -604,10 +627,12 @@ export class MlsManager {
   /** `kind` of every user whose keys were looked up (from the user's home node, APPLICATIONS.md §3.5). */
   private readonly kinds = new Map<string, string>();
   /**
-   * Results by purpose, conversation and message id, with the fingerprint of the ciphertext they belong to (a changed
-   * ciphertext of the same message is decrypted again); bounded ({@link DECRYPT_CACHE_LIMIT}).
+   * Results by purpose, conversation, message id, author, device and epoch ({@link decryptCacheKey}), with the
+   * fingerprint of the ciphertext they belong to (a changed ciphertext of the same message is decrypted again); a hit
+   * also compares author, device and epoch, so a result is never answered for an envelope that names another sender;
+   * bounded ({@link DECRYPT_CACHE_LIMIT}).
    */
-  private readonly decrypted = new LruMap<string, { fp: string; result: Decrypted }>(DECRYPT_CACHE_LIMIT);
+  private readonly decrypted = new LruMap<string, DecryptCacheEntry>(DECRYPT_CACHE_LIMIT);
   /** The signed context of decrypted messages (stripped from their content), "malformed" when invalid. */
   private readonly contexts = new WeakMap<Decrypted, MessageContext | "malformed">();
   /** The members of the last ghost check per conversation (§4.6), used by the checks before encrypting. */
@@ -1419,10 +1444,10 @@ export class MlsManager {
     const sealed = m.webhook ? sealedContent(m.content) : null;
     if (sealed) return purpose === "message" ? this.decryptSealed(conversationId, m, sealed) : { ok: false, reason: "invalid" };
     if (typeof m.content !== "string" || !m.device_id) return { ok: false, reason: "invalid" };
-    const cacheKey = `${purpose}|${conversationId}|${m.id}`;
+    const cacheKey = decryptCacheKey(purpose, conversationId, m);
     const fp = fingerprint(m.content);
-    const cached = this.decrypted.get(cacheKey);
-    if (cached?.fp === fp) return this.matchContext(cached.result, m);
+    const cached = this.cachedResult(cacheKey, m, fp);
+    if (cached) return this.matchContext(cached, m);
     const sentAt = m.created_at ? Date.parse(m.created_at) : NaN;
     let result = await this.decryptUncached(conversationId, m.id, m.author, m.device_id, m.epoch ?? null, m.content, Number.isFinite(sentAt) ? sentAt : null);
     if (result.ok && (purpose === "title") !== (result.content.type === THREAD_TITLE_TYPE)) result = { ok: false, reason: "invalid" };
@@ -1438,8 +1463,18 @@ export class MlsManager {
     }
     // Missing keys may arrive later (catch-up, backup), a failed device lookup may work next time: only final results
     // are cached.
-    if (isFinal(result)) this.decrypted.set(cacheKey, { fp, result });
+    if (isFinal(result)) this.decrypted.set(cacheKey, cacheEntry(conversationId, m, fp, result));
     return this.matchContext(result, m);
+  }
+
+  /**
+   * The cached result of `key` when it belongs to exactly this envelope: the same author, device, epoch and
+   * ciphertext fingerprint (the key names them too; the comparison keeps that true whatever the key looks like).
+   */
+  private cachedResult(key: string, m: EncryptedEnvelope, fp: string): Decrypted | undefined {
+    const e = this.decrypted.get(key);
+    if (!e || e.fp !== fp || e.author !== m.author || e.deviceId !== (m.device_id ?? null) || e.epoch !== (m.epoch ?? null)) return undefined;
+    return e.result;
   }
 
   /** `envelope_mismatch` when the signed context differs from the envelope's (known) thread and reply (§5.2). */
@@ -1459,10 +1494,10 @@ export class MlsManager {
    * epoch's content key (current state, history backup or history share), then checked like a webhook payload.
    */
   private async decryptSealed(q: string, m: EncryptedEnvelope, s: SealedContent): Promise<Decrypted> {
-    const cacheKey = `sealed|${q}|${m.id}`;
+    const cacheKey = decryptCacheKey("sealed", q, m);
     const fp = fingerprint(s.sealed);
-    const cached = this.decrypted.get(cacheKey);
-    if (cached?.fp === fp) return cached.result;
+    const cached = this.cachedResult(cacheKey, m, fp);
+    if (cached) return cached;
     if (m.device_id || m.epoch !== s.epoch) return { ok: false, reason: "invalid" };
     let bytes: Uint8Array;
     try {
@@ -1479,7 +1514,7 @@ export class MlsManager {
         if (cryptoCode(e) === "unknown_epoch" && (await this.fetchMissingKey(q, s.epoch, round))) continue;
         result = { ok: false, reason: cryptoCode(e) === "unknown_epoch" ? "missing_key" : "invalid" };
       }
-      if (isFinal(result)) this.decrypted.set(cacheKey, { fp, result });
+      if (isFinal(result)) this.decrypted.set(cacheKey, cacheEntry(q, m, fp, result));
       return result;
     }
     return { ok: false, reason: "missing_key" };
@@ -1548,12 +1583,9 @@ export class MlsManager {
   /** Synchronous lookup of an already decrypted message (pins panel, edits). */
   peek(conversationId: string, m: EncryptedEnvelope): Decrypted | undefined {
     const sealed = m.webhook ? sealedContent(m.content) : null;
-    if (sealed) {
-      const e = this.decrypted.get(`sealed|${conversationId}|${m.id}`);
-      return e?.fp === fingerprint(sealed.sealed) ? e.result : undefined;
-    }
-    const e = this.decrypted.get(`message|${conversationId}|${m.id}`);
-    return e?.fp === fingerprint(String(m.content)) ? this.matchContext(e.result, m) : undefined;
+    if (sealed) return this.cachedResult(decryptCacheKey("sealed", conversationId, m), m, fingerprint(sealed.sealed));
+    const r = this.cachedResult(decryptCacheKey("message", conversationId, m), m, fingerprint(String(m.content)));
+    return r ? this.matchContext(r, m) : undefined;
   }
 
   /**
@@ -2511,8 +2543,7 @@ export class MlsManager {
       if (n === 0) return 0;
       await this.persist();
       // Messages that failed with a missing key are decrypted again.
-      const prefixes = [`sealed|${q}|`, `message|${q}|`, `title|${q}|`];
-      this.decrypted.deleteWhere((v, k) => !v.result.ok && prefixes.some((p) => k.startsWith(p)));
+      this.decrypted.deleteWhere((v) => !v.result.ok && v.q === q);
       this.markDirty(q);
       this.deps.onEvent?.({ type: "epoch", conversationId: q });
       return n;
