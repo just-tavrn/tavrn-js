@@ -23,6 +23,7 @@ import { TavrnApi, TavrnApiError, b64urlEncode, newUlid, resolveNode, type Attac
 import { threadTitle } from "./threads";
 import { CommandRouter, type CommandCrypto, type CommandHandler, type InvokeContext, type ReplyContent } from "./commands";
 import { ComponentRouter, type ComponentHandler, type Matcher } from "./components";
+import { ClaimGuard } from "./claims";
 import { ConversationDirectory, type ChannelInfo, type DirectoryLink } from "./directory";
 import { BotError } from "./errors";
 import { createKeyFile, defaultKeyFile, identityKeyOf, readKey } from "./keyfile";
@@ -413,6 +414,8 @@ export class Bot {
   /** Room channels and DMs the bot knows, per node. */
   private readonly dir: ConversationDirectory;
   private readonly channels: Map<string, ChannelInfo>;
+  /** KeyPackage claims for DM members' devices: no repeated claims while a device has none (ENCRYPTION.md §3.2). */
+  private readonly claimGuard = new ClaimGuard();
   /** Running resyncs per node; a request during one runs it once more afterwards. */
   private readonly syncs = new Map<string, { again: boolean; done: Promise<void> }>();
   private readonly tracker = new MessageTracker();
@@ -949,6 +952,7 @@ export class Bot {
         break;
       case "devices.changed":
         if (mls && typeof data.user === "string") mls.forgetDevices(data.user);
+        if (typeof data.user === "string") this.claimGuard.forget(data.user);
         break;
       case "application.install":
         void this.track(this.onInstall(link, data));
@@ -1232,7 +1236,10 @@ export class Bot {
   private async prepareEncrypted(q: string): Promise<void> {
     if (!(await this.join(q, true))) throw new BotError("not_member", `The bot could not join the encryption group of ${q}`);
     const dm = this.dir.direct.get(q);
-    if (dm?.members.length) await this.mls!.addMissingDevices(q, dm.members).catch((e: unknown) => this.logger.warn("devices of the DM could not be added", { conversation: q, error: e }));
+    if (dm?.members.length) {
+      const own = `${this.me!.address}/${this.claims!.dev}`;
+      await this.claimGuard.addMissing(this.mls!, q, dm.members, own).catch((e: unknown) => this.logger.warn("devices of the DM could not be added", { conversation: q, error: e }));
+    }
   }
 
   /** Runs an encrypted write once more after catching up when the node says the epoch is stale (ENCRYPTION.md §5.3). */
