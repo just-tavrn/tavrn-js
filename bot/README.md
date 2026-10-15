@@ -247,6 +247,60 @@ chooses the thread id); clients accept them as titles of older clients.
 "Ephemeral" is a delivery property there, not a cryptographic one: any member of the epoch could decrypt an
 ephemeral reply if the node handed it over.
 
+## Buttons, select menus and forms
+
+Messages of the bot can carry components (APPLICATIONS.md §5.10): up to five rows of up to five buttons or one select
+menu. The client draws them from its own palette; the bot chooses only the texts, the style (`primary`, `secondary`,
+`success`, `danger`, `link`) and an emoji. `bot.component(customId | RegExp, handler)` handles clicks and choices,
+`bot.modal(customId | RegExp, handler)` the forms the bot opened. The handler gets the command `Interaction` with
+`messageId`, `customId`, `values` (a select's choices) or `fields` (a form's input), and two more answers:
+`update(content)` edits the message that carries the component, `modal(form)` opens a form on the invoker's device.
+A raid planner:
+
+```ts
+import { button, modal, row, select, textInput, withComponents } from "@tavrn/bot";
+
+const signups = new Map<string, string>(); // user → class
+
+const card = () =>
+  withComponents(
+    `Raid on Friday 20:00 · ${signups.size} signed up`,
+    row(
+      button({ label: "Sign up", customId: "raid:signup", style: "success", emoji: "✅" }),
+      button({ label: "Decline", customId: "raid:decline", style: "danger" }),
+      button({ label: "Note for the lead", customId: "raid:note" }),
+    ),
+    row(select("raid:class", [{ label: "Tank", value: "tank" }, { label: "Healer", value: "healer" }, { label: "Damage", value: "dps" }], { placeholder: "Your class" })),
+  );
+
+bot
+  .command("raid", (i) => i.reply(card()))
+  .component("raid:signup", (i) => {
+    signups.set(i.user, signups.get(i.user) ?? "?");
+    return i.update(card());
+  })
+  .component("raid:decline", (i) => {
+    signups.delete(i.user);
+    return i.update(card());
+  })
+  .component("raid:class", (i) => {
+    signups.set(i.user, i.values?.[0] ?? "?");
+    return i.ephemeral(`You go as ${i.values?.[0]}.`);
+  })
+  .component("raid:note", (i) => i.modal(modal("raid:note-form", "A note for the raid lead", textInput("note", "Note", { style: "paragraph", maxLength: 500 }))))
+  .modal("raid:note-form", (i) => i.ephemeral(`Noted: ${i.fields.note ?? ""}`));
+```
+
+The runnable version is [`examples/raid-planner`](examples/raid-planner/README.md).
+
+The builders check what they build with the node's rules and throw a `TypeError` naming the offending field. Only
+the bot that wrote a message receives its interactions; `custom_id` comes back from the user's client, so treat it as
+untrusted input. In encrypted channels the values arrive encrypted: the runtime decrypts them, checks the invoker's
+device signature and refuses values made for another message, component or form, older than five minutes or
+replayed; whether a choice is one of the select's options is the handler's check there (`validateComponentValues`
+of `@tavrn/sdk` does it with the components the bot sent), because the node cannot see them. `update` encrypts the new
+content with the message's thread as its signed context (pass `{ replyTo }` when the message was a reply).
+
 ## How end-to-end encryption works for bots
 
 A bot is an ordinary participant of tavrn's encryption ([`ENCRYPTION.md`](https://github.com/just-tavrn/tavrn-protocol/blob/main/ENCRYPTION.md)):

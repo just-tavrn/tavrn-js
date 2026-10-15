@@ -53,6 +53,7 @@ export * from "./content";
 export * from "./embeds";
 export * from "./sealed";
 export * from "./commands";
+export * from "./components";
 export * from "./plaintext";
 export * from "./history";
 export * from "./files";

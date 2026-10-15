@@ -36,6 +36,16 @@ package instead of a git dependency.
   protocol's limits (embeds, body length, presence, timeouts, reasons) before anything is sent; `429` answers are
   repeated after `Retry-After` (option `rateLimit`). New example bot `examples/proposals` (embed, thread, 👍 tally,
   edit, presence); unit tests run against a fake node (`bot/test/fake-node.ts`).
+- Message components (protocol APPLICATIONS.md §5.10, capability `components.v1`): `@tavrn/sdk` `components.ts`
+  (the types `Row`, `Button`, `Select`, `Modal`, `ModalInput`, `ComponentInvokeData`, `ModalSubmitData`;
+  `validateComponents` and `validateModal` with the node's codes and `meta.path`, run against the protocol's
+  `components.json`; `validateComponentValues`, `validateModalValues`, `readComponents` for bots' messages only),
+  `api.components.invoke`, `api.interactions.submit`, and the permission `USE_COMPONENTS` (bit 40: channel-scoped,
+  in the text group, in DMs, covered by no scope; `CHANNEL_SCOPED` is now `2027195138559`); `@tavrn/e2ee`
+  `components.ts` (`component.values` and `modal.values` content, `encryptComponentValues`, `encryptModalValues`,
+  `ComponentValuesVerifier`); `@tavrn/bot` `bot.component()`, `bot.modal()`, `ComponentInteraction`,
+  `Interaction.update()` and `Interaction.modal()`, and the builders `row`, `button`, `select`, `textInput`, `modal`,
+  `withComponents`.
 - Polls and date polls (protocol PROTOCOL.md §7g, capability `polls.v1`): `@tavrn/sdk` `api.polls` (`vote`,
   `retract`, `votes`, `close`), `poll_closes_at` on messages, sends and edits, the `PollVote` types and the
   permission `CREATE_POLLS` (bit 39: channel-scoped, in the text group, in DMs, covered by `messages:write`, denied
