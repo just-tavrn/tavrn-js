@@ -190,7 +190,8 @@ package instead of a git dependency.
   as the one it was decrypted for (messages, thread titles, poll votes, sealed webhook messages, `peek`, and so command
   arguments and component values of bots); any other envelope under the same id is decrypted and checked again.
 - `@tavrn/e2ee`: plaintext signature results are cached under the SHA-256 of the signed input instead of a 53-bit
-  non-cryptographic fingerprint, and the per-object fast path checks that the envelope was not changed in place.
+  non-cryptographic fingerprint, and the per-object fast path checks that the envelope was not changed in place (nested content by its
+  canonical form).
 - `@tavrn/bot`: DMs and group DMs are never written in plaintext, nor any conversation whose encryption group the bot
   holds or that it saw encrypted in the session, whatever the node's `encrypted` flag says: such a send, edit, poll
   vote, thread or files-channel write fails with `BotError("encryption_downgrade")` and nothing is sent. Edits follow

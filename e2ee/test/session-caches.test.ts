@@ -197,4 +197,22 @@ describe("plaintext signature cache is keyed by the exact signed input", () => {
     envelope.mentions_everyone = true;
     expect(await bob.mls.verifyPlaintext(CONV, envelope)).toBe("invalid");
   });
+
+  it("nested content changed in place (a GIF, an embed field) is checked again", async () => {
+    const { device } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    const content = { type: "text", body: "look", gif: { url: "https://media.example/a.gif", width: 200 }, embeds: [{ title: "Report", fields: [{ name: "IBAN", value: "DE11" }] }] };
+    const fields = { reply_to: null, thread_id: null, mentions_everyone: false, mentions: [], attachments: [] };
+    const signature = alice.mls.signPlaintext(CONV, fields, content)!;
+    const envelope = { id: "p1", author: alice.address, device_id: DEV.a, reply_to_id: null, thread_id: null, mentions: [], mentions_everyone: false, attachments: [], content, signature };
+    expect(await bob.mls.verifyPlaintext(CONV, envelope)).toBe("valid");
+    expect(await bob.mls.verifyPlaintext(CONV, envelope)).toBe("valid");
+    content.gif.url = "https://evil.example/b.gif";
+    expect(await bob.mls.verifyPlaintext(CONV, envelope)).toBe("invalid");
+    content.gif.url = "https://media.example/a.gif";
+    expect(await bob.mls.verifyPlaintext(CONV, envelope)).toBe("valid");
+    content.embeds[0]!.fields[0]!.value = "DE99";
+    expect(await bob.mls.verifyPlaintext(CONV, envelope)).toBe("invalid");
+  });
 });

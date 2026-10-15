@@ -113,7 +113,7 @@ author, device and epoch with a fingerprint of the ciphertext: an envelope that 
 is decrypted and checked again), except `missing_key` and `retry`, which are tried again on the next call;
 message nonces for the replay rule are kept for the last `NONCE_WINDOW` messages. Plaintext signature results are
 cached under the SHA-256 of the signed input; an envelope object passed again is reused only while its fields and
-the top level of its content are unchanged (do not mutate nested content in place). A keys document with more than
+its content are unchanged (content with nested objects is compared in its canonical form). A keys document with more than
 `KEYS_MAX_DEVICES` devices, `KEYS_MAX_RETIRED` retired devices or `KEYS_MAX_CONTINUITY` continuity statements is
 refused as a whole (`verifiedDevices` rejects with `KeysDocumentError`, kept for the lookup's lifetime).
 
