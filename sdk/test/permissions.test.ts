@@ -22,7 +22,9 @@ import {
   noBotsEffective,
   parsePermissions,
   scopeMask,
+  type InheritedInput,
   type NoBotsInput,
+  type OverrideInput,
   type PermissionInput,
 } from "../src/permissions";
 
@@ -185,9 +187,9 @@ describe("inheritedOverrideValue (what a neutral override shows in the editors)"
   const base = { everyone_role_id: "r0", everyone_permissions: Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES, roles: [["r1", Permission.ATTACH_FILES]] as [string, bigint][] };
 
   it("in the category editor the role base decides", () => {
-    expect(inheritedOverrideValue({ ...base, subject: { type: "role", id: "r0" }, category_overrides: null }, Permission.SEND_MESSAGES)).toEqual({ allowed: true, source: "role" });
-    expect(inheritedOverrideValue({ ...base, subject: { type: "role", id: "r1" }, category_overrides: null }, Permission.ATTACH_FILES)).toEqual({ allowed: true, source: "role" });
-    expect(inheritedOverrideValue({ ...base, subject: { type: "role", id: "r0" }, category_overrides: null }, Permission.ATTACH_FILES)).toEqual({ allowed: false, source: "role" });
+    expect(inheritedOverrideValue({ ...base, subject: { type: "role", id: "r0" }, category_overrides: null, layer_overrides: [] }, Permission.SEND_MESSAGES)).toEqual({ allowed: true, source: "role" });
+    expect(inheritedOverrideValue({ ...base, subject: { type: "role", id: "r1" }, category_overrides: null, layer_overrides: [] }, Permission.ATTACH_FILES)).toEqual({ allowed: true, source: "role" });
+    expect(inheritedOverrideValue({ ...base, subject: { type: "role", id: "r0" }, category_overrides: null, layer_overrides: [] }, Permission.ATTACH_FILES)).toEqual({ allowed: false, source: "role" });
   });
 
   it("in the channel editor a category override that touches the bit decides", () => {
@@ -195,21 +197,98 @@ describe("inheritedOverrideValue (what a neutral override shows in the editors)"
       { subject_type: "role" as const, subject_id: "r0", allow: 0n, deny: Permission.SEND_MESSAGES },
       { subject_type: "role" as const, subject_id: "r1", allow: Permission.SEND_MESSAGES, deny: 0n },
     ];
-    expect(inheritedOverrideValue({ ...base, subject: { type: "role", id: "r0" }, category_overrides }, Permission.SEND_MESSAGES)).toEqual({ allowed: false, source: "category" });
+    expect(inheritedOverrideValue({ ...base, subject: { type: "role", id: "r0" }, category_overrides, layer_overrides: [] }, Permission.SEND_MESSAGES)).toEqual({ allowed: false, source: "category" });
     // A role sees @everyone's category override underneath its own.
-    expect(inheritedOverrideValue({ ...base, subject: { type: "role", id: "r1" }, category_overrides }, Permission.SEND_MESSAGES)).toEqual({ allowed: true, source: "category" });
-    expect(inheritedOverrideValue({ ...base, subject: { type: "role", id: "r0" }, category_overrides }, Permission.VIEW_CHANNEL)).toEqual({ allowed: true, source: "role" });
+    expect(inheritedOverrideValue({ ...base, subject: { type: "role", id: "r1" }, category_overrides, layer_overrides: [] }, Permission.SEND_MESSAGES)).toEqual({ allowed: true, source: "category" });
+    expect(inheritedOverrideValue({ ...base, subject: { type: "role", id: "r0" }, category_overrides, layer_overrides: [] }, Permission.VIEW_CHANNEL)).toEqual({ allowed: true, source: "role" });
   });
 
   it("a member subject inherits from @everyone and the member's roles", () => {
     const category_overrides = [{ subject_type: "member" as const, subject_id: "u1", allow: 0n, deny: Permission.VIEW_CHANNEL }];
-    expect(inheritedOverrideValue({ ...base, subject: { type: "member", id: "u1", roles: ["r1"] }, category_overrides }, Permission.VIEW_CHANNEL)).toEqual({ allowed: false, source: "category" });
-    expect(inheritedOverrideValue({ ...base, subject: { type: "member", id: "u1", roles: ["r1"] }, category_overrides: [] }, Permission.ATTACH_FILES)).toEqual({ allowed: true, source: "role" });
+    expect(inheritedOverrideValue({ ...base, subject: { type: "member", id: "u1", roles: ["r1"] }, category_overrides, layer_overrides: [] }, Permission.VIEW_CHANNEL)).toEqual({ allowed: false, source: "category" });
+    expect(inheritedOverrideValue({ ...base, subject: { type: "member", id: "u1", roles: ["r1"] }, category_overrides: [], layer_overrides: [] }, Permission.ATTACH_FILES)).toEqual({ allowed: true, source: "role" });
   });
 
   it("administrator on the role base means allowed", () => {
     const admin = { ...base, roles: [["r1", Permission.ADMINISTRATOR]] as [string, bigint][] };
-    expect(inheritedOverrideValue({ ...admin, subject: { type: "role", id: "r1" }, category_overrides: [{ subject_type: "role", subject_id: "r1", allow: 0n, deny: Permission.SEND_MESSAGES }] }, Permission.SEND_MESSAGES)).toEqual({ allowed: true, source: "role" });
+    expect(inheritedOverrideValue({ ...admin, subject: { type: "role", id: "r1" }, category_overrides: [{ subject_type: "role", subject_id: "r1", allow: 0n, deny: Permission.SEND_MESSAGES }], layer_overrides: [] }, Permission.SEND_MESSAGES)).toEqual({ allowed: true, source: "role" });
+  });
+
+  const role = (subject_id: string, allow: bigint, deny: bigint): OverrideInput => ({ subject_type: "role", subject_id, allow, deny });
+  const member = (subject_id: string, allow: bigint, deny: bigint): OverrideInput => ({ subject_type: "member", subject_id, allow, deny });
+
+  it("the edited layer's @everyone override decides for a neutral role (category editor)", () => {
+    // Owner's case: the category denies view_channel to @everyone, the Moderator's override is neutral.
+    const mods = { ...base, roles: [["mod", 0n]] as [string, bigint][] };
+    const layer_overrides = [role("r0", 0n, Permission.VIEW_CHANNEL), role("mod", 0n, 0n)];
+    const input: InheritedInput = { ...mods, subject: { type: "role", id: "mod" }, category_overrides: null, layer_overrides };
+    expect(inheritedOverrideValue(input, Permission.VIEW_CHANNEL)).toEqual({ allowed: false, source: "everyone" });
+    // The hint agrees with the evaluation of a member who has only that role.
+    const evaluated = computePermissions({ user_id: "u1", is_owner: false, everyone_role_id: "r0", everyone_permissions: mods.everyone_permissions, member_roles: [["mod", 0n]], category_overrides: layer_overrides, channel_overrides: [] });
+    expect(hasPermission(evaluated, Permission.VIEW_CHANNEL)).toBe(false);
+    // A bit the @everyone override leaves alone still comes from the role base.
+    expect(inheritedOverrideValue(input, Permission.SEND_MESSAGES)).toEqual({ allowed: true, source: "role" });
+  });
+
+  it("the edited layer's @everyone override decides in the channel editor too, on top of the category", () => {
+    const category_overrides = [role("r0", 0n, Permission.SEND_MESSAGES)];
+    const layer_overrides = [role("r0", Permission.SEND_MESSAGES, Permission.VIEW_CHANNEL)];
+    const input: InheritedInput = { ...base, subject: { type: "role", id: "r1" }, category_overrides, layer_overrides };
+    expect(inheritedOverrideValue(input, Permission.VIEW_CHANNEL)).toEqual({ allowed: false, source: "everyone" });
+    // The channel's @everyone allow overrules the category's deny: the last layer that touches the bit names it.
+    expect(inheritedOverrideValue(input, Permission.SEND_MESSAGES)).toEqual({ allowed: true, source: "everyone" });
+    // Without a channel override the category still decides.
+    expect(inheritedOverrideValue({ ...input, layer_overrides: [] }, Permission.SEND_MESSAGES)).toEqual({ allowed: false, source: "category" });
+  });
+
+  it("@everyone as the subject skips its own override of the edited layer", () => {
+    const layer_overrides = [role("r0", 0n, Permission.VIEW_CHANNEL), role("r1", Permission.ATTACH_FILES, 0n)];
+    const input: InheritedInput = { ...base, subject: { type: "role", id: "r0" }, category_overrides: null, layer_overrides };
+    expect(inheritedOverrideValue(input, Permission.VIEW_CHANNEL)).toEqual({ allowed: true, source: "role" });
+    // Another role's override does not apply to @everyone.
+    expect(inheritedOverrideValue(input, Permission.ATTACH_FILES)).toEqual({ allowed: false, source: "role" });
+  });
+
+  it("the subject's own override is ignored (the hint is what a neutral bit gives)", () => {
+    const layer_overrides = [role("r1", Permission.VIEW_CHANNEL, Permission.SEND_MESSAGES), member("u1", 0n, Permission.ATTACH_FILES)];
+    const asRole: InheritedInput = { ...base, subject: { type: "role", id: "r1" }, category_overrides: null, layer_overrides };
+    expect(inheritedOverrideValue(asRole, Permission.SEND_MESSAGES)).toEqual({ allowed: true, source: "role" });
+    const asMember: InheritedInput = { ...base, subject: { type: "member", id: "u1", roles: ["r1"] }, category_overrides: null, layer_overrides: [member("u1", 0n, Permission.ATTACH_FILES)] };
+    expect(inheritedOverrideValue(asMember, Permission.ATTACH_FILES)).toEqual({ allowed: true, source: "role" });
+    // Another member's override in the layer does not apply either.
+    expect(inheritedOverrideValue({ ...asMember, layer_overrides: [member("u2", 0n, Permission.ATTACH_FILES)] }, Permission.ATTACH_FILES)).toEqual({ allowed: true, source: "role" });
+  });
+
+  it("a member subject gets the role base of their roles, then @everyone and their roles' overrides of the layer", () => {
+    const roles = [["r1", Permission.ATTACH_FILES], ["r2", Permission.CREATE_POLLS], ["r3", 0n]] as [string, bigint][];
+    const subject = { type: "member" as const, id: "u1", roles: ["r1", "r2"] };
+    const plain: InheritedInput = { ...base, roles, subject, category_overrides: null, layer_overrides: [] };
+    expect(inheritedOverrideValue(plain, Permission.ATTACH_FILES)).toEqual({ allowed: true, source: "role" });
+    expect(inheritedOverrideValue(plain, Permission.CREATE_POLLS)).toEqual({ allowed: true, source: "role" });
+    const layer_overrides = [
+      role("r0", 0n, Permission.VIEW_CHANNEL | Permission.SEND_MESSAGES),
+      role("r1", Permission.VIEW_CHANNEL, 0n),
+      role("r2", 0n, Permission.ATTACH_FILES),
+      role("r3", Permission.SEND_MESSAGES, 0n),
+    ];
+    const layered: InheritedInput = { ...plain, layer_overrides };
+    // @everyone denies view_channel, the member's role r1 allows it again.
+    expect(inheritedOverrideValue(layered, Permission.VIEW_CHANNEL)).toEqual({ allowed: true, source: "roles" });
+    // A role override of the member flips a bit of the role base.
+    expect(inheritedOverrideValue(layered, Permission.ATTACH_FILES)).toEqual({ allowed: false, source: "roles" });
+    // r3 is not one of the member's roles: @everyone's deny stays.
+    expect(inheritedOverrideValue(layered, Permission.SEND_MESSAGES)).toEqual({ allowed: false, source: "everyone" });
+    // The same as the evaluation of that member.
+    const evaluated = computePermissions({ user_id: "u1", is_owner: false, everyone_role_id: "r0", everyone_permissions: base.everyone_permissions, member_roles: [["r1", Permission.ATTACH_FILES], ["r2", Permission.CREATE_POLLS]], category_overrides: layer_overrides, channel_overrides: [] });
+    expect(hasPermission(evaluated, Permission.ATTACH_FILES)).toBe(false);
+    expect(hasPermission(evaluated, Permission.SEND_MESSAGES)).toBe(false);
+  });
+
+  it("administrator on the role base stays allowed whatever the edited layer says", () => {
+    const admin = { ...base, roles: [["r1", Permission.ADMINISTRATOR]] as [string, bigint][] };
+    const layer_overrides = [role("r0", 0n, Permission.VIEW_CHANNEL)];
+    expect(inheritedOverrideValue({ ...admin, subject: { type: "role", id: "r1" }, category_overrides: null, layer_overrides }, Permission.VIEW_CHANNEL)).toEqual({ allowed: true, source: "role" });
+    expect(inheritedOverrideValue({ ...admin, subject: { type: "member", id: "u1", roles: ["r1"] }, category_overrides: null, layer_overrides }, Permission.VIEW_CHANNEL)).toEqual({ allowed: true, source: "role" });
   });
 });
 
