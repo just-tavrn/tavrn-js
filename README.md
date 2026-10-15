@@ -33,9 +33,10 @@ newest release tag):
 pnpm add "github:just-tavrn/tavrn-js#v0.2.1&path:sdk"
 ```
 
-`@tavrn/e2ee` and `@tavrn/bot` depend on their siblings (`workspace:*` inside this repository) and on the git
-dependency `@tavrn/crypto`. A project that installs them from git tells pnpm where the siblings come from and allows
-git dependencies below the top level (pnpm blocks them by default) in its `pnpm-workspace.yaml`:
+`@tavrn/e2ee` and `@tavrn/bot` depend on their siblings (`workspace:*` inside this repository) and on the published
+package [`@tavrn/crypto`](https://www.npmjs.com/package/@tavrn/crypto) (`^0.1.0`). A project that installs them from
+git tells pnpm where the siblings come from and allows git dependencies below the top level (pnpm blocks them by
+default) in its `pnpm-workspace.yaml`:
 
 ```yaml
 # Private phase: the @tavrn packages are git dependencies of each other.

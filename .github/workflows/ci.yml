@@ -65,7 +65,7 @@ jobs:
       build: |
         for p in sdk e2ee bot; do (cd "$p" && pnpm pack --dry-run); done
     secrets:
-      # The protocol submodule and the @tavrn/crypto git dependency are private until the repositories go public.
+      # Kept for private-phase checkouts of the protocol submodule; the repositories are public and @tavrn/crypto comes from npm.
       READ_TOKEN: ${{ secrets.TAVRN_READ_PAT }}
 
   publish-check:

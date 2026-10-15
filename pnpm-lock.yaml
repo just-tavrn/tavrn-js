@@ -172,8 +172,8 @@ importers:
   bot:
     dependencies:
       '@tavrn/crypto':
-        specifier: github:just-tavrn/tavrn-crypto#6db3f27100ff49c646c4f0327aaf9c534605586f&path:pkg
-        version: https://codeload.github.com/just-tavrn/tavrn-crypto/tar.gz/6db3f27100ff49c646c4f0327aaf9c534605586f#path:pkg
+        specifier: ^0.1.0
+        version: 0.1.0
       '@tavrn/e2ee':
         specifier: workspace:*
         version: link:../e2ee
@@ -197,8 +197,8 @@ importers:
   e2ee:
     dependencies:
       '@tavrn/crypto':
-        specifier: github:just-tavrn/tavrn-crypto#6db3f27100ff49c646c4f0327aaf9c534605586f&path:pkg
-        version: https://codeload.github.com/just-tavrn/tavrn-crypto/tar.gz/6db3f27100ff49c646c4f0327aaf9c534605586f#path:pkg
+        specifier: ^0.1.0
+        version: 0.1.0
       '@tavrn/sdk':
         specifier: workspace:*
         version: link:../sdk
@@ -371,9 +371,8 @@ packages:
   '@rolldown/pluginutils@1.0.1':
     resolution: {integrity: sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==}
 
-  '@tavrn/crypto@https://codeload.github.com/just-tavrn/tavrn-crypto/tar.gz/6db3f27100ff49c646c4f0327aaf9c534605586f#path:pkg':
-    resolution: {gitHosted: true, integrity: sha512-HFHlzIfme2ersmDgvacqpeEZMWCdaNJFSpyhlI5lsjd83hwriyNtgpCLfOs9rQFxz2t2Z+aERHRjfuzxgxj2NQ==, path: pkg, tarball: https://codeload.github.com/just-tavrn/tavrn-crypto/tar.gz/6db3f27100ff49c646c4f0327aaf9c534605586f}
-    version: 0.1.0
+  '@tavrn/crypto@0.1.0':
+    resolution: {integrity: sha512-ECu5Scr4HREZif6N2HnKIvZhwOAgl8yAnEU8+TO/4AAtAPBbuw2luWRaY5R174Bz8EuUaVrw0U/yfBTbMkdhVA==}
 
   '@types/chai@5.2.3':
     resolution: {integrity: sha512-Mw558oeA9fFbv65/y4mHtXDs9bPnFMZAL/jxdPFUpOHHIXX91mcgEHbS5Lahr+pwZFR8A7GQleRWeI6cGFC2UA==}
@@ -943,7 +942,7 @@ snapshots:
 
   '@rolldown/pluginutils@1.0.1': {}
 
-  '@tavrn/crypto@https://codeload.github.com/just-tavrn/tavrn-crypto/tar.gz/6db3f27100ff49c646c4f0327aaf9c534605586f#path:pkg': {}
+  '@tavrn/crypto@0.1.0': {}
 
   '@types/chai@5.2.3':
     dependencies:
