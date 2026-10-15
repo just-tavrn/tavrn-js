@@ -53,6 +53,7 @@ describe("upload categories (PROTOCOL.md §7a)", () => {
     expect(extensionsOf("archives")).toContain("lzma");
     expect(extensionsOf("other")).toEqual([]);
     expect(DANGEROUS_EXTENSIONS.has("settingcontent-ms")).toBe(true);
-    expect(DANGEROUS_EXTENSIONS.size).toBe(85);
+    expect(DANGEROUS_EXTENSIONS.has("chm")).toBe(true);
+    expect(DANGEROUS_EXTENSIONS.size).toBe(105);
   });
 });

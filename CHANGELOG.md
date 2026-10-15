@@ -203,6 +203,10 @@ package instead of a git dependency.
 - `@tavrn/e2ee`: keys documents with more than 100 devices, 1000 retired devices or 100 continuity statements are
   refused before any signature in them is checked (`KeysDocumentError`, kept for the lookup's lifetime).
 - `@tavrn/sdk`: `reports.roomForApp` percent-encodes the room id like every other path parameter.
+- `@tavrn/sdk`: the dangerous-extension list of the upload categories (protocol PROTOCOL.md §7a) gains 20 types that
+  run code when opened (`chm`, `hlp`, `jnlp`, `appref-ms`, `library-ms`, `searchconnector-ms`, `diagcab`, `msu`,
+  `mst`, `ps1xml`, `vb`, `ws`, `xbap`, `ade`, `adp`, `mde`, `shb`, `shs`, `iqy`, `slk`): such files are classified as
+  executables whatever their declared type.
 - `@tavrn/sdk`: response bodies from other nodes are read with a size cap (discovery documents, hook keys, JSON
   answers) and within a deadline.
 - `@tavrn/e2ee`: key pins and verified contacts that decrypt but cannot be parsed are no longer replaced by empty

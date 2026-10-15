@@ -24,14 +24,14 @@ export const UPLOAD_HEAD_BYTES = 0x9001 + 5;
 const KIND_OF_EXTENSION: Record<string, ExecutableKind> = Object.fromEntries(
   (
     [
-      ["windows", "exe com pif scr cpl msc gadget application xll"],
-      ["installer", "msi msix msp appx appxbundle deb rpm snap flatpakref appimage pkg mpkg"],
-      ["script", "bat cmd ps1 psm1 psd1 vbs vbe js jse mjs wsf wsh wsc sct hta reg inf scf sh bash zsh csh ksh fish command py pyw pl rb php workflow action"],
-      ["shortcut", "lnk url website settingcontent-ms desktop"],
-      ["java", "jar class"],
+      ["windows", "exe com pif scr cpl msc gadget application xll chm hlp diagcab xbap shs shb"],
+      ["installer", "msi msix msp msu mst appx appxbundle deb rpm snap flatpakref appimage pkg mpkg"],
+      ["script", "bat cmd ps1 psm1 psd1 vbs vbe js jse mjs wsf wsh wsc sct hta reg inf scf sh bash zsh csh ksh fish command py pyw pl rb php workflow action ps1xml vb ws"],
+      ["shortcut", "lnk url website settingcontent-ms desktop appref-ms library-ms searchconnector-ms"],
+      ["java", "jar class jnlp"],
       ["mobile_app", "apk aab xapk ipa"],
       ["disk_image", "dmg iso img vhd vhdx"],
-      ["macro_document", "docm xlsm pptm dotm xltm potm ppam xlam"],
+      ["macro_document", "docm xlsm pptm dotm xltm potm ppam xlam ade adp mde iqy slk"],
       ["library", "dll sys drv ocx"],
       ["macos", "app"],
       ["program", "run bin elf"],

@@ -9865,9 +9865,25 @@ export type DownloadResponses = {
 export type List2Data = {
     body?: never;
     path?: never;
-    query?: never;
+    query?: {
+        /**
+         * 1–200; without it, every conversation.
+         */
+        limit?: number | null;
+        /**
+         * Only conversations whose sort key is lower: for `GET /conversations` the `last_message_id` (else the id) of
+         * the last item of the previous page, for the requests its conversation id.
+         */
+        before?: string | null;
+    };
     url: '/api/v1/conversations';
 };
+
+export type List2Errors = {
+    400: ProblemDetails;
+};
+
+export type List2Error = List2Errors[keyof List2Errors];
 
 export type List2Responses = {
     200: Array<Conversation>;
@@ -9901,9 +9917,25 @@ export type Create2Response = Create2Responses[keyof Create2Responses];
 export type RequestsData = {
     body?: never;
     path?: never;
-    query?: never;
+    query?: {
+        /**
+         * 1–200; without it, every conversation.
+         */
+        limit?: number | null;
+        /**
+         * Only conversations whose sort key is lower: for `GET /conversations` the `last_message_id` (else the id) of
+         * the last item of the previous page, for the requests its conversation id.
+         */
+        before?: string | null;
+    };
     url: '/api/v1/conversations/requests';
 };
+
+export type RequestsErrors = {
+    400: ProblemDetails;
+};
+
+export type RequestsError = RequestsErrors[keyof RequestsErrors];
 
 export type RequestsResponses = {
     200: Array<ConversationRequest>;
@@ -11839,6 +11871,12 @@ export type DiscoverRoomsData = {
     query?: never;
     url: '/api/v1/rooms/discover';
 };
+
+export type DiscoverRoomsErrors = {
+    429: ProblemDetails;
+};
+
+export type DiscoverRoomsError = DiscoverRoomsErrors[keyof DiscoverRoomsErrors];
 
 export type DiscoverRoomsResponses = {
     200: Array<PublicRoom>;
