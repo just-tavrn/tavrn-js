@@ -2,10 +2,12 @@
 /**
  * Encrypted attachments (ENCRYPTION.md §6) and validation of decrypted content objects. The node only
  * sees the ciphertext of a file; name, type, size and the file key travel inside the encrypted message.
+ *
+ * Attachments are one-shot AES-256-GCM under a random file key with the AAD `"tavrn file v1"`, done with WebCrypto
+ * (native AES, no copy of the file through the WebAssembly memory, which never shrinks); the bytes are those of the
+ * crypto core's `encryptFile` (the `file` test vector).
  */
-import { decryptFile, encryptFile } from "@tavrn/crypto";
 import { b64urlDecode, b64urlEncode, type Attachment } from "@tavrn/sdk";
-import { ensureCrypto } from "./wasm";
 
 /** One entry of `content.attachments` in an encrypted message. */
 export interface ContentAttachment {
@@ -70,19 +72,44 @@ export function contentAttachments(content: Record<string, unknown>, envelope: A
   return out;
 }
 
+/** AAD of every attachment ciphertext (ENCRYPTION.md §6). */
+const FILE_AAD = new TextEncoder().encode("tavrn file v1");
+
+function cryptoError(name: "invalid_input" | "decryption_failed", message: string): Error {
+  const e = new Error(message);
+  e.name = name;
+  return e;
+}
+
+async function fileKey(key: Uint8Array, use: KeyUsage): Promise<CryptoKey> {
+  if (key.length !== 32) throw cryptoError("invalid_input", "file key");
+  return crypto.subtle.importKey("raw", key as Uint8Array<ArrayBuffer>, "AES-GCM", false, [use]);
+}
+
+/**
+ * Encrypts attachment bytes under `key` and `nonce` (ENCRYPTION.md §6): the ciphertext with its tag and the SHA-256 of
+ * the ciphertext. {@link encryptAttachment} draws both at random; a nonce must never repeat under a key.
+ */
+export async function encryptAttachmentBytes(plain: Uint8Array, key: Uint8Array, nonce: Uint8Array): Promise<{ ciphertext: Uint8Array; sha256: Uint8Array }> {
+  if (nonce.length !== 12) throw cryptoError("invalid_input", "nonce");
+  const k = await fileKey(key, "encrypt");
+  const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce as Uint8Array<ArrayBuffer>, additionalData: FILE_AAD, tagLength: 128 }, k, plain as Uint8Array<ArrayBuffer>));
+  const sha256 = new Uint8Array(await crypto.subtle.digest("SHA-256", ciphertext));
+  return { ciphertext, sha256 };
+}
+
 /** Encrypts a file for upload: the ciphertext blob and the metadata for the content (without the blob id). */
 export async function encryptAttachment(file: File): Promise<{ blob: Blob; meta: Omit<ContentAttachment, "id"> }> {
-  await ensureCrypto();
   const plain = new Uint8Array(await file.arrayBuffer());
-  const f = encryptFile(plain);
-  plain.fill(0);
+  const key = crypto.getRandomValues(new Uint8Array(32));
+  const nonce = crypto.getRandomValues(new Uint8Array(12));
   try {
-    const key = f.key;
-    const meta = { name: safeFileName(file.name), mime: file.type || "application/octet-stream", size: file.size, key: b64urlEncode(key), nonce: b64urlEncode(f.nonce), sha256: b64urlEncode(f.sha256) };
-    key.fill(0);
-    return { blob: new Blob([f.ciphertext as Uint8Array<ArrayBuffer>], { type: "application/octet-stream" }), meta };
+    const { ciphertext, sha256 } = await encryptAttachmentBytes(plain, key, nonce);
+    const meta = { name: safeFileName(file.name), mime: file.type || "application/octet-stream", size: file.size, key: b64urlEncode(key), nonce: b64urlEncode(nonce), sha256: b64urlEncode(sha256) };
+    return { blob: new Blob([ciphertext as Uint8Array<ArrayBuffer>], { type: "application/octet-stream" }), meta };
   } finally {
-    f.free();
+    plain.fill(0);
+    key.fill(0);
   }
 }
 
@@ -102,14 +129,23 @@ export async function verifyPlainAttachment(bytes: Uint8Array, sha256: string): 
   if (b64urlEncode(digest) !== sha256) throw new AttachmentIntegrityError();
 }
 
-/** Checks the SHA-256 of the downloaded ciphertext (§6 step 4), then decrypts it. */
+/**
+ * Checks the SHA-256 of the downloaded ciphertext (§6 step 4), then decrypts it. Throws
+ * {@link AttachmentIntegrityError} for other bytes, an `Error` named `decryption_failed` for a wrong key or nonce.
+ */
 export async function decryptAttachment(ciphertext: Uint8Array, a: Pick<ContentAttachment, "key" | "nonce" | "sha256">): Promise<Uint8Array> {
-  await ensureCrypto();
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", ciphertext as Uint8Array<ArrayBuffer>));
   if (b64urlEncode(digest) !== a.sha256) throw new AttachmentIntegrityError();
   const key = b64urlDecode(a.key);
+  const nonce = b64urlDecode(a.nonce);
   try {
-    return decryptFile(ciphertext, key, b64urlDecode(a.nonce), digest);
+    if (nonce.length !== 12) throw cryptoError("invalid_input", "nonce");
+    const k = await fileKey(key, "decrypt");
+    try {
+      return new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: nonce as Uint8Array<ArrayBuffer>, additionalData: FILE_AAD, tagLength: 128 }, k, ciphertext as Uint8Array<ArrayBuffer>));
+    } catch {
+      throw cryptoError("decryption_failed", "attachment does not decrypt");
+    }
   } finally {
     key.fill(0);
   }

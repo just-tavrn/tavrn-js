@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MPL-2.0
+import { readFileSync } from "node:fs";
 import { beforeAll, describe, expect, it } from "vitest";
+import { decryptFile, encryptFile, initSync as wasm } from "@tavrn/crypto";
 import { b64urlDecode, b64urlEncode } from "@tavrn/sdk";
 import { ensureCrypto } from "../src/wasm";
-import { AttachmentIntegrityError, contentAttachments, decryptAttachment, encryptAttachment, safeFileName, verifyPlainAttachment } from "../src/content";
+import { AttachmentIntegrityError, contentAttachments, decryptAttachment, encryptAttachment, encryptAttachmentBytes, safeFileName, verifyPlainAttachment } from "../src/content";
 
 beforeAll(() => ensureCrypto());
 
@@ -33,6 +35,36 @@ describe("encrypted attachments", () => {
     await expect(decryptAttachment(tampered, meta)).rejects.toBeInstanceOf(AttachmentIntegrityError);
     const otherKey = { ...meta, key: b64urlEncode(new Uint8Array(32)) };
     await expect(decryptAttachment(cipher, otherKey)).rejects.toMatchObject({ name: "decryption_failed" });
+  });
+
+  it("encrypts exactly like the crypto core (the file vector) and reads what the core encrypted", async () => {
+    const v = JSON.parse(readFileSync(new URL("../../protocol/testvectors/encryption.json", import.meta.url), "utf8")).file as Record<string, string>;
+    const { ciphertext, sha256 } = await encryptAttachmentBytes(b64urlDecode(v.plaintext!), b64urlDecode(v.key!), b64urlDecode(v.nonce!));
+    expect(b64urlEncode(ciphertext)).toBe(v.ciphertext);
+    expect(b64urlEncode(sha256)).toBe(v.sha256);
+    expect(b64urlEncode(await decryptAttachment(b64urlDecode(v.ciphertext!), { key: v.key!, nonce: v.nonce!, sha256: v.sha256! }))).toBe(v.plaintext);
+    // Both ways against the WebAssembly implementation, with a random key.
+    const plain = crypto.getRandomValues(new Uint8Array(60_000));
+    const f = encryptFile(plain);
+    try {
+      expect(await decryptAttachment(f.ciphertext, { key: b64urlEncode(f.key), nonce: b64urlEncode(f.nonce), sha256: b64urlEncode(f.sha256) })).toEqual(plain);
+    } finally {
+      f.free();
+    }
+    const key = crypto.getRandomValues(new Uint8Array(32));
+    const nonce = crypto.getRandomValues(new Uint8Array(12));
+    const ours = await encryptAttachmentBytes(plain, key, nonce);
+    expect(decryptFile(ours.ciphertext, key, nonce, ours.sha256)).toEqual(plain);
+    await expect(encryptAttachmentBytes(plain, key.subarray(1), nonce)).rejects.toMatchObject({ name: "invalid_input" });
+  });
+
+  it("does not grow the WebAssembly memory for attachments", async () => {
+    // initSync returns the instance's exports once the module is initialized.
+    const memory = () => (wasm as unknown as () => { memory: WebAssembly.Memory })().memory.buffer.byteLength;
+    const before = memory();
+    const { blob, meta } = await encryptAttachment(new File([new Uint8Array(8 << 20)], "big.bin"));
+    expect(await decryptAttachment(new Uint8Array(await blob.arrayBuffer()), meta)).toHaveLength(8 << 20);
+    expect(memory()).toBe(before);
   });
 
   it("accepts only content attachments that match the envelope", () => {
