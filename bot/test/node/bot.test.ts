@@ -90,8 +90,9 @@ describe("bot key file and state (APPLICATIONS.md §3.1–§3.2)", () => {
     const wrong = bot(app.secret, "wrong", { keyFile: join(dir, "other", "key.txt") });
     await expect(wrong.start()).rejects.toMatchObject({ code: "key_mismatch" });
 
-    // The key text itself (TAVRN_BOT_KEY) works in place of the file.
-    const byKey = bot(app.secret, "bykey", { key: keyText.split("\n").find((l) => l.startsWith("key:"))!.slice(4).trim() });
+    // The key text itself (TAVRN_BOT_KEY) works in place of the file (with the device's own state directory: a fresh
+    // directory for the same token would be a device whose key is lost, ENCRYPTION.md §3.1).
+    const byKey = bot(app.secret, "bykey", { key: keyText.split("\n").find((l) => l.startsWith("key:"))!.slice(4).trim(), stateDir: join(dir, "boot", "state") });
     await byKey.start();
     await byKey.stop();
   });
