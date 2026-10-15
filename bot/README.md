@@ -258,7 +258,7 @@ menu. The client draws them from its own palette; the bot chooses only the texts
 A raid planner:
 
 ```ts
-import { button, createBot, modal, row, select, textInput, withComponents } from "@tavrn/bot";
+import { button, modal, row, select, textInput, withComponents } from "@tavrn/bot";
 
 const signups = new Map<string, string>(); // user → class
 
@@ -270,16 +270,28 @@ const card = () =>
       button({ label: "Decline", customId: "raid:decline", style: "danger" }),
       button({ label: "Note for the lead", customId: "raid:note" }),
     ),
-    row(select("raid:class", [{ label: "Tank", value: "tank", emoji: "🛡️" }, { label: "Healer", value: "healer" }, { label: "Damage", value: "dps" }], { placeholder: "Your class" })),
+    row(select("raid:class", [{ label: "Tank", value: "tank" }, { label: "Healer", value: "healer" }, { label: "Damage", value: "dps" }], { placeholder: "Your class" })),
   );
 
-bot.command("raid", (i) => i.reply(card()));
-bot.component("raid:signup", (i) => (signups.set(i.user, signups.get(i.user) ?? "?"), i.update(card())));
-bot.component("raid:decline", (i) => (signups.delete(i.user), i.update(card())));
-bot.component("raid:class", (i) => (signups.set(i.user, i.values?.[0] ?? "?"), i.ephemeral(`You go as ${i.values?.[0]}.`)));
-bot.component("raid:note", (i) => i.modal(modal("raid:note-form", "A note for the raid lead", textInput("note", "Note", { style: "paragraph", maxLength: 500 }))));
-bot.modal("raid:note-form", (i) => i.ephemeral(`Noted: ${i.fields.note}`));
+bot
+  .command("raid", (i) => i.reply(card()))
+  .component("raid:signup", (i) => {
+    signups.set(i.user, signups.get(i.user) ?? "?");
+    return i.update(card());
+  })
+  .component("raid:decline", (i) => {
+    signups.delete(i.user);
+    return i.update(card());
+  })
+  .component("raid:class", (i) => {
+    signups.set(i.user, i.values?.[0] ?? "?");
+    return i.ephemeral(`You go as ${i.values?.[0]}.`);
+  })
+  .component("raid:note", (i) => i.modal(modal("raid:note-form", "A note for the raid lead", textInput("note", "Note", { style: "paragraph", maxLength: 500 }))))
+  .modal("raid:note-form", (i) => i.ephemeral(`Noted: ${i.fields.note ?? ""}`));
 ```
+
+The runnable version is [`examples/raid-planner`](examples/raid-planner/README.md).
 
 The builders check what they build with the node's rules and throw a `TypeError` naming the offending field. Only
 the bot that wrote a message receives its interactions; `custom_id` comes back from the user's client, so treat it as

@@ -390,7 +390,8 @@ export function validateModalValues(modal: Modal, values: unknown): ComponentIss
       const value = (v[input.custom_id] as string | undefined) ?? "";
       const n = chars(value);
       const required = input.required ?? true;
-      if (n === 0) {
+      // Whitespace only counts as empty: a required input needs real text (the node checks the same).
+      if (value.trim() === "") {
         check(!required, `values.${input.custom_id}`, "This input is required");
         continue;
       }

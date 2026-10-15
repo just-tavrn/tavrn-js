@@ -73,7 +73,8 @@ export class ComponentInteraction extends Interaction {
   }
 }
 
-export type ComponentHandler = (interaction: ComponentInteraction) => void | Promise<void>;
+/** A handler; what it returns is ignored (so `(i) => i.reply(…)` is fine). */
+export type ComponentHandler = (interaction: ComponentInteraction) => unknown;
 export type Matcher = string | RegExp;
 
 const MSG = {

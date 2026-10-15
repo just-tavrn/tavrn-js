@@ -76,8 +76,8 @@ export interface InvokeContext {
   crypto: CommandCrypto | null;
 }
 
-/** A handler of one command. */
-export type CommandHandler = (interaction: Interaction) => void | Promise<void>;
+/** A handler of one command; what it returns is ignored (so `(i) => i.reply(…)` is fine). */
+export type CommandHandler = (interaction: Interaction) => unknown;
 
 /** What a callback or follow-up returned (the node's answer, passed through). */
 export type InteractionResult = Record<string, unknown> | undefined;

@@ -158,3 +158,14 @@ describe("builders", () => {
     expect(modal("m", "Title", textInput("a", "Label", { minLength: 1, maxLength: 10, value: "pre" })).inputs[0]).toEqual({ custom_id: "a", label: "Label", style: "short", min_length: 1, max_length: 10, value: "pre" });
   });
 });
+
+describe("the raid planner example", () => {
+  it("builds a valid card and registers its handlers", async () => {
+    const { card, register } = await import("../examples/raid-planner/index");
+    const { createBot } = await import("../src");
+    const signups = new Map([["alice@t.test", "tank"]]);
+    expect(card(signups)).toMatchObject({ body: "Raid on Friday 20:00 · 1 signed up" });
+    const bot = createBot({ node: "http://127.0.0.1:1", token: "t" });
+    expect(register(bot, signups)).toBe(bot);
+  });
+});

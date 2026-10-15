@@ -80,6 +80,8 @@ describe("validateModalValues", () => {
     expect(path(null)).toBe("values");
     expect(path({})).toBe("values.name");
     expect(path({ name: "A" })).toBe("values.name");
+    expect(path({ name: "   " })).toBe("values.name");
+    expect(path({ name: "Al", note: "  " })).toBeNull();
     expect(path({ name: "Al", note: "x".repeat(11) })).toBe("values.note");
     expect(path({ name: "Al", extra: "x" })).toBe("values.extra");
     expect(path({ name: 5 })).toBe("values.name");
