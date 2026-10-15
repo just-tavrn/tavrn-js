@@ -17,5 +17,6 @@ export * from "./permissions";
 export * from "./session";
 export * from "./socket";
 export * from "./ulid";
+export * from "./uploads";
 export * from "./webauthn";
 export type * from "./generated/types.gen";
