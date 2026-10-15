@@ -44,7 +44,13 @@ export type BotErrorCode =
    * The conversation's encryption could not be brought up to date before sending (the handshake log could not be
    * processed, a concurrent change won, the state is busy): nothing was sent; try again. `cause` has the details.
    */
-  | "encryption_unavailable";
+  | "encryption_unavailable"
+  /**
+   * Not sent: the node reports the conversation as unencrypted, but it is end-to-end encrypted for the bot (a DM or
+   * group DM, which is always encrypted; a conversation whose encryption group the bot holds or that it saw encrypted
+   * in this session). The bot never writes plaintext there, whatever the node says.
+   */
+  | "encryption_downgrade";
 
 export class BotError extends Error {
   constructor(

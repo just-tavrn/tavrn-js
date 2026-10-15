@@ -492,7 +492,7 @@ export class Bot {
         const c = await this.channelOf(this.target(q).link, q).catch((e: unknown) => {
           throw e instanceof BotError ? new BotError("not_member", `The bot cannot view the files channel ${q}`) : e;
         });
-        return { roomId: c.roomId, kind: c.kind, encrypted: c.encrypted };
+        return { roomId: c.roomId, kind: c.kind, encrypted: this.checkedEncryption(q, c.encrypted) };
       },
       join: (q, create) => this.join(q, create),
       mls: () => this.mls!,
@@ -1296,20 +1296,48 @@ export class Bot {
     return q;
   }
 
-  /** Whether a conversation is end-to-end encrypted: known channels, else the DM itself. */
+  /**
+   * Whether the bot writes a conversation end-to-end encrypted: known channels, else the DM itself. The node's flag
+   * can only add encryption: DMs and group DMs are always encrypted (PROTOCOL.md §8), and a conversation whose
+   * encryption group the bot holds or that it saw encrypted in this session is never written in plaintext
+   * ({@link checkedEncryption}).
+   */
   private async isEncrypted(link: NodeLink, q: string, id: string): Promise<boolean> {
-    const known = this.channels.get(q)?.encrypted ?? this.dir.direct.get(q)?.encrypted;
-    if (known !== undefined) return known;
+    const channel = this.channels.get(q);
+    if (channel) return this.checkedEncryption(q, channel.encrypted);
+    if (this.dir.direct.has(q)) return true;
     try {
       const c = await link.api.conversations.get(id);
-      this.dir.rememberDirect(q, { encrypted: !!c.encrypted, members: (c.members ?? []).map((u) => u.address) });
-      return !!c.encrypted;
+      // Only DMs and group DMs are conversations of their own: encrypted whatever the answer says.
+      this.dir.rememberDirect(q, { encrypted: true, members: (c.members ?? []).map((u) => u.address) });
+      if (!c.encrypted) throw this.downgrade(q);
+      return true;
     } catch (e) {
+      if (e instanceof BotError) throw e;
       if (code(e) !== "conversation.not_found" && !(e instanceof TavrnApiError && e.status === 404)) throw e;
     }
     const after = await this.dir.find(link, q);
     if (!after) throw new BotError("not_member", `The bot is not a member of ${q}`);
-    return after.encrypted;
+    return this.checkedEncryption(q, after.encrypted);
+  }
+
+  /**
+   * The node's `encrypted` flag of `q`, checked: true is remembered for the session; false is refused with
+   * `encryption_downgrade` for a DM, for a conversation whose encryption group the bot holds and for one it saw
+   * encrypted before. Every plaintext write asks this first.
+   */
+  private checkedEncryption(q: string, nodeSaysEncrypted: boolean): boolean {
+    if (nodeSaysEncrypted) {
+      this.dir.encryptedSeen.add(q);
+      return true;
+    }
+    if (this.dir.direct.has(q) || this.dir.encryptedSeen.has(q) || this.mls?.hasGroup(q)) throw this.downgrade(q);
+    return false;
+  }
+
+  private downgrade(q: string): BotError {
+    this.logger.warn("the node reports an end-to-end encrypted conversation as unencrypted; nothing was sent", { conversation: q });
+    return new BotError("encryption_downgrade", `The node reports ${q} as unencrypted, but it is end-to-end encrypted: nothing was sent`);
   }
 
   /**
@@ -1460,7 +1488,11 @@ export class Bot {
     const { q, id, link, poll, hash, encrypted } = await this.loadPoll(conversation, messageId);
     const mls = this.mls!;
     const content = pollVoteContent(poll, messageId, hash, selection);
-    if (!encrypted) return link.api.polls.vote(id, messageId, { content, signature: signPlainPollVote(mls, q, content) });
+    if (!encrypted) {
+      // A plaintext poll in a conversation that is encrypted for the bot: the vote would go out in plaintext.
+      if (await this.isEncrypted(link, q, id)) throw this.downgrade(q);
+      return link.api.polls.vote(id, messageId, { content, signature: signPlainPollVote(mls, q, content) });
+    }
     return this.freshEpoch(q, async () => {
       const sealed = await this.seal(q, () => encryptPollVote(mls, q, content));
       return link.api.polls.vote(id, messageId, { content: sealed.content, epoch: sealed.epoch });
@@ -1547,11 +1579,13 @@ export class Bot {
     const { q, id, link } = this.target(conversation);
     const m = await this.fetchMessage(link, id, messageId);
     if (m.author !== this.me!.address) throw new BotError("not_author", "A bot can edit only its own messages");
-    const encrypted = !!m.encrypted;
+    // The conversation decides, not the message's flag (the node serves both): an encrypted message stays encrypted,
+    // a plaintext one is edited in plaintext only where the conversation may be written in plaintext.
+    const encrypted = !!m.encrypted || (await this.isEncrypted(link, q, id));
     if (encrypted) await this.prepareEncrypted(q);
     const mls = this.mls!;
     let previous: Record<string, unknown> | null = null;
-    if (encrypted) {
+    if (m.encrypted) {
       const d = await mls.decrypt(q, m);
       previous = d.ok ? d.content : null;
     } else if (m.content && typeof m.content === "object" && !Array.isArray(m.content)) previous = m.content as Record<string, unknown>;
@@ -2025,8 +2059,10 @@ export class Bot {
     const home = this.home!;
     const c = await home.api.conversations.create({ kind: "dm", members: [user] });
     const q = qualify(home.domain, c.id);
-    this.dir.rememberDirect(q, { encrypted: !!c.encrypted, members: (c.members ?? []).map((u) => u.address) });
-    if (c.encrypted) await this.prepareEncrypted(q);
+    // DMs are always end-to-end encrypted (PROTOCOL.md §8): an answer that says otherwise is refused.
+    this.dir.rememberDirect(q, { encrypted: true, members: (c.members ?? []).map((u) => u.address) });
+    if (!c.encrypted) throw this.downgrade(q);
+    await this.prepareEncrypted(q);
     return q;
   }
 
