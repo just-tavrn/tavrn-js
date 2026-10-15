@@ -200,6 +200,9 @@ const tally = tallyPoll(poll, checked, { closesAt: message.poll_closes_at });
   `decrypt`.
 - `commands.ts`: encrypted command arguments (`encryptCommandArgs`, `CommandArgsVerifier`, which refuses payloads for
   another command, stale or future ones and replays; APPLICATIONS.md §5.8).
+- `components.ts`: encrypted component values and modal input (`encryptComponentValues`, `encryptModalValues`,
+  `ComponentValuesVerifier`, which refuses values made for another message, component or modal, stale or future ones
+  and replays; APPLICATIONS.md §5.10.2, §5.10.4).
 - `embeds.ts`: the embed rules of `text` content (`assertEmbeds` before encrypting, `withValidEmbeds` after
   decrypting, `readEmbeds` for renderers; APPLICATIONS.md §6.4).
 - `cleanup.ts`: `LeafCleaner` removes ghost leaves the node allows and the client verified (ENCRYPTION.md §4.7), with an
