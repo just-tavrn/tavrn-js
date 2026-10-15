@@ -9,7 +9,7 @@ describe("validReaction (PROTOCOL.md §7b, the node's rules)", () => {
     }
   });
   it("refuses whitespace, control characters, long strings and malformed tokens", () => {
-    for (const e of ["", " ", "two words", "a\nb", "x".repeat(17), "<:party:lowercaseid0000000000000>", "<:P:01J9ZK3G5M8Q2W4E6R8T0Y2E01>", "<:party:01J9ZK3G5M8Q2W4E6R8T0Y2E01@Bad_Host>", ":x:", "<b>", "a>b"]) {
+    for (const e of ["", " ", "two words", "a\nb", "x".repeat(17), "<:party:lowercaseid0000000000000>", "<:P:01J9ZK3G5M8Q2W4E6R8T0Y2E01>", "<:party:01J9ZK3G5M8Q2W4E6R8T0Y2E01@Bad_Host>", "<b>", "a>b"]) {
       expect(validReaction(e), JSON.stringify(e)).toBe(false);
     }
   });

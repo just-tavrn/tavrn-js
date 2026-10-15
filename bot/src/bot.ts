@@ -1495,8 +1495,8 @@ export class Bot {
 
   /** Shows "… is typing" for a few seconds (scope `messages:write`); false while the connection is down. */
   typing(conversation: string | { conversation: string }): boolean {
-    const { id, link } = this.target(conversation);
-    return link.typing(id);
+    const { q, id, link } = this.target(conversation);
+    return link.typing(id, this.channels.get(q)?.roomId ?? null);
   }
 
   /** Moves the bot's read marker (scope `messages:write`); only needed by bots that show unread state somewhere. */

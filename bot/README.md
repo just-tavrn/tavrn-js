@@ -6,7 +6,9 @@
 - is a full **end-to-end encryption** member: it reads and writes encrypted channels like any device,
 - delivers **messages** (decrypted) to your code and sends replies (encrypted where needed),
 - answers **commands** (`/weather berlin`) with replies, "thinking…" plus follow-ups, or replies only the invoker sees,
-- follows its **installations** to other nodes (federation) on its own.
+- reacts, edits, pins, attaches files, starts threads, runs polls, moderates, opens DMs and shows its presence through
+  typed helpers (["What a bot can do"](#what-a-bot-can-do), the full table in [`docs/COVERAGE.md`](docs/COVERAGE.md)),
+- follows its **installations** to other nodes (federation) on its own and waits out rate limits.
 
 The protocol behind it is [`APPLICATIONS.md`](https://github.com/just-tavrn/tavrn-protocol/blob/main/APPLICATIONS.md) (§2 tokens, §3 bot devices and encryption, §4 installation, §5
 commands, §6.3 hook requests). The package builds on `@tavrn/sdk` (API client, WebSocket) and `@tavrn/e2ee` (MLS
@@ -51,7 +53,9 @@ process.on("SIGTERM", () => void bot.stop().then(() => process.exit(0)));
 ```
 
 The example in [`examples/echo-weather/`](examples/echo-weather/README.md) does exactly this and runs against a
-development node with `just bot-example`.
+development node with `just bot-example`. [`examples/proposals/`](examples/proposals/README.md) is a community bot:
+`/propose` posts an embed, opens a thread, counts 👍 reactions, edits the proposal when it is accepted and shows its
+presence (`pnpm --filter @tavrn/bot example:proposals`).
 
 Node.js 22 and newer have a global `WebSocket`. On Node.js 20 start with `--experimental-websocket` or pass
 `WebSocketImpl` (e.g. `import WebSocket from "ws"`).
@@ -70,6 +74,7 @@ Node.js 22 and newer have a global `WebSocket`. On Node.js 20 start with `--expe
 | `autoDeferMs` | | Commands are deferred automatically when the handler has not answered after this long (default 2000 ms; the node waits 3 s). |
 | `ghostPolicy` | | `strict` (default) or `accept`: what the bot does about unknown devices in an encryption group, see "Unknown devices" below. |
 | `historyBackup` | | `false` (default): no history backup on the node. `true`: back up the epoch keys (encrypted) and restore them into a fresh state directory. See "History backups" below. |
+| `rateLimit` | | `429` answers (APPLICATIONS.md §2.7): by default the runtime waits the announced `Retry-After` and repeats the request (`{ retries: 3, maxWaitMs: 30000 }`); `false` hands every `429` to your code. |
 
 These variables belong to the bot process, not to the node.
 
@@ -78,12 +83,18 @@ These variables belong to the bot process, not to the node.
 | Event | Payload |
 |---|---|
 | `ready` | `BotInfo` (address, application, device, home domain) |
-| `message` | `BotMessage`: `text`, `content`, `author`, `authorKind`, `mentionsMe`, `encrypted`, `conversation`, `roomId`, `threadId`, `signature` (plaintext: the author device's signature check), `reply()`, `replyInThread()` |
+| `message` | `BotMessage`: `text`, `content`, `author`, `authorId`, `authorKind`, `mentionsMe`, `encrypted`, `conversation`, `roomId`, `threadId`, `attachments`, `editedAt`, `signature` (plaintext: the author device's signature check), `reply()`, `replyInThread()`, `react()`, `download()` |
 | `undecryptable` | an encrypted message the bot could not read (sent before it joined, unknown device, …) |
 | `install` / `uninstall` | the bot was added to or removed from a room (`node`, `roomId`) |
 | `tokenExpiring` | the token expires in 7 or 1 days |
 | `tokenRotated` | `rotateToken()` produced a new secret |
 | `pollVote` | a member voted, changed or retracted a vote (`conversation`, `messageId`, `user`, `record`, `retracted`; also `bot.onPollVote(fn)`) |
+| `reaction` | a reaction was added or removed: `node`, `conversation`, `messageId`, `emoji`, `count` (after the change), `added`, `user` (null while the node does not name it), `encrypted`; also `bot.onReaction(fn)` |
+| `messageEdit` | somebody edited a message: the new version as a `BotMessage`, decrypted |
+| `messageDelete` | a message was deleted (`conversation`, `messageId`) |
+| `memberJoin` / `memberLeave` | somebody joined or left a room (`roomId`, `userId`, `user`; scope `members:read`) |
+| `thread` | a thread was created, updated (title, archive, lock, counters) or deleted (`action`, `threadId`, `conversation`, `thread`) |
+| `dmRequest` | somebody who is not the owner opened a DM with the bot (`conversation`, `from`); answer with `acceptDm` / `declineDm` |
 | `event` | every WebSocket event of every node, unchanged |
 | `error` | connection ended (`token_refused`, `replaced`), a listener failed |
 
@@ -93,7 +104,8 @@ embeds }`) to a conversation: `conversation` is the qualified id `<node>/<id>` o
 encrypted for the conversation's group (the bot joins first if needed) together with its signed context (the thread
 and the reply the envelope carries, ENCRYPTION.md §5.2), so the node cannot move it into another thread or point it at
 another message; in unencrypted ones it is sent in plaintext, signed by the bot device. The bot's own messages are not
-delivered back to it. **Attachments are not supported yet.**
+delivered back to it. Text content is checked before anything is sent or encrypted: a body of at most 4000 characters
+and valid embeds (`EmbedsInvalidError`, code `message.embeds_invalid`). `{ files }` attaches files (below).
 
 **Threads** (PROTOCOL.md §7e): `m.threadId` names the thread a message belongs to (null in the channel itself);
 `m.reply()` answers in the same thread, `bot.send(conversation, content, { threadId })` writes into a thread, and
@@ -118,6 +130,94 @@ await bot.vote(m.conversation, poll.id, { choices: ["o1"] }); // date polls: { a
 encrypted polls and votes are sealed for the conversation's group like messages, plaintext ones are signed by the
 bot device. `votes()` verifies every record against the voter's device and the poll's hash and leaves out stale and
 late votes; `retractVote()` takes the bot's vote back. Voting needs `messages:write`, reading votes `messages:read`.
+
+## What a bot can do
+
+Every helper takes the conversation as `bot.send` does (a qualified id `<node>/<id>`, a bare id of the home node, or a
+received message/interaction); room helpers take a room the same way (`m`, `"<node>/<room id>"` or a bare id). Each
+names the scope it needs; the room permissions decide where. Inputs are checked with the protocol's limits first
+(`RangeError`/`TypeError`), refusals of the node arrive as `TavrnApiError` with its `code`. The complete list, with
+what the node keeps closed to bots, is [`docs/COVERAGE.md`](docs/COVERAGE.md).
+
+**Reactions** (`messages:write` to react, `messages:read` for the events). Reactions are plaintext metadata, also in
+encrypted channels. The node announces changes with the new counts but not (yet, tavrn-protocol#43) who reacted, so
+`user` is null and changes are computed for messages the bot has seen since it started:
+
+```ts
+bot.onReaction(async (r) => {
+  if (r.emoji === "👍" && r.added && r.count >= 3) await bot.send(r.conversation, "Three 👍: accepted!", { replyTo: r.messageId });
+});
+await m.react("👀");                      // or bot.react(conversation, messageId, "<:party:01J…>")
+await bot.unreact(m.conversation, m.id, "👀");
+```
+
+**Embeds** (APPLICATIONS.md §6.4): `{ type: "text", body: "", embeds: [{ title, description, url, color, fields,
+footer, timestamp }] }`, at most 10 per message, no remote images; encrypted like the rest of the content.
+
+**Files** (`messages:write`, `attach_files`): `send(conversation, "Report", { files: [{ name: "report.pdf", data,
+mime }] })` uploads up to 10 files. In encrypted conversations each file is encrypted with its own key and only
+ciphertext reaches the node (its upload category is declared from the name and type, PROTOCOL.md §7a).
+`m.attachments` lists received files, `await m.download(id?)` returns `{ name, mime, size, data }`, decrypted and
+checked against its hash. Files channels are not open to bots (tavrn-protocol#44).
+
+**History, edits, deletions, pins** (`messages:read` / `messages:write`): `bot.messages(conversation, { limit, before,
+after, around, threadId })` returns readable messages decrypted; `bot.edit(conversation, id, "new text")` edits the
+bot's own message (encrypted again with the same signed context, or signed again); `bot.deleteMessage(...)` deletes
+its own, or anybody's with `moderation` (`manage_messages`); `pin`, `unpin`, `pins`; `typing(conversation)` shows
+"… is typing"; `markRead`.
+
+**Threads** (`messages:*`; others' threads need `moderation`): besides `m.replyInThread()`,
+
+```ts
+const t = await bot.createThread(m.conversation, { title: "Release 0.4", rootMessageId: m.id }); // or a forum post: { title, content, tags }
+await bot.send(t.conversation, "Checklist: …", { threadId: t.id });
+const { items } = await bot.threads(m.conversation, { archived: "false" });   // titles decrypted
+await bot.archiveThread(t.conversation, t.id);
+await bot.updateThread(t.conversation, t.id, { title: "Release 0.4.0", locked: true });
+```
+
+Titles in encrypted channels are encrypted and bound to their thread; the runtime picks the thread id where the node
+keeps client ids (`threads.client_ids`). Events: `thread`.
+
+**Polls**: see above; `bot.closePoll(conversation, id, at?)` closes one early (author or `manage_messages`).
+
+**Rooms and members**: `bot.rooms(node?)`, `bot.room(room)` (always allowed), `bot.members(room, { limit, after })`
+(`members:read`), `bot.profile(address)`, `bot.search(room, { q })` (plaintext channels only: the node indexes no
+encrypted content), events `memberJoin` / `memberLeave`.
+
+**Moderation** (`moderation`; the room permissions still decide): `bot.timeout(room, userId, minutes, { reason })` (0
+lifts it, at most 28 days), `bot.kick(room, userId)`, `bot.ban(room, "user@node" | "domain")`, `bot.unban`,
+`bot.bans`, `bot.auditLog`. `userId` is the member's id on the room's node: `m.authorId`, `interaction.userId`.
+Reports stay closed to bots (tavrn-protocol#45).
+
+```ts
+bot.on("message", async (m) => {
+  if (/https?:\/\/scam\.example\//i.test(m.text)) {
+    await bot.deleteMessage(m.conversation, m.id);
+    await bot.timeout(m, m.authorId, 60, { reason: "spam link" });
+  }
+});
+```
+
+**Presence** (`presence`): `bot.setPresence({ status: "dnd", customStatus: { text: "Deploying", emoji: "🚀" } })`,
+`bot.setActivity({ type: "watching", name: "3 servers" })`, `bot.clearActivity()`; applied on every node the bot is
+connected to (presence is kept per node).
+
+**DMs** (`dms` to open, `messages:*` to read and write): `await bot.dm("alice@node.example", "Your report is
+ready")` opens (or reuses) the 1:1 DM on the home node, creates its encryption group and adds the user's devices. The
+owner always gets a normal conversation, everybody else a message request under their own `dm_policy`. Requests to the
+bot arrive as `dmRequest`: `acceptDm(e.conversation)` / `declineDm(e.conversation, { block })`.
+
+**Voice channel status** (`rooms:manage`, which unlocks `voice_status`): `bot.setVoiceStatus(room, channelId, "Raid
+night")`. Bots do not join voice (the runtime has no media stack).
+
+**Everything else** the route table opens (room management, webhooks, voice moderation, invites, emojis):
+`bot.api(node?)` is the `@tavrn/sdk` client with the bot's credentials on that node, e.g.
+`await bot.api().webhooks.list(roomId)`. Content you write through it in encrypted channels is yours to encrypt.
+
+**Rate limits and connections.** Requests that answer `429` are repeated after `Retry-After` (option `rateLimit`);
+the WebSocket reconnects with backoff, a `resync` reloads rooms and channels, a token refused at runtime ends the bot
+with `token_refused`, a replaced connection with `replaced`.
 
 ## Commands
 
@@ -245,7 +345,7 @@ Bots that receive requests from the node (interactions URL, event subscriptions,
 ## Development
 
 ```sh
-pnpm --filter @tavrn/bot test          # unit tests (the integration tests are skipped without a node binary)
+pnpm --filter @tavrn/bot test          # unit tests against a fake node (test/fake-node.ts); integration tests skipped without a node binary
 pnpm --filter @tavrn/bot typecheck
 TAVRN_NODE_BIN=/path/to/tavrn-node pnpm --filter @tavrn/bot test   # also the tests against real nodes
 ```

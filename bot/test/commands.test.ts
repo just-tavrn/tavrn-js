@@ -141,6 +141,19 @@ describe("commands of the bot runtime (APPLICATIONS.md §5)", () => {
     ]);
   });
 
+  it("refuses invalid embeds before answering (APPLICATIONS.md §6.4); the invoker gets the generic error", async () => {
+    const router = new CommandRouter({ logger: silentLogger });
+    let refused: unknown = null;
+    router.register("weather", async (i) => {
+      refused = await i.reply({ type: "text", body: "", embeds: [{ title: "Build", url: "http://insecure.example" }] }).catch((e: unknown) => e);
+      await i.reply({ type: "text", body: "", embeds: [{ title: "Build", url: "https://ci.example/b/1" }] });
+    });
+    const { ctx, calls } = context();
+    await router.handle(frame().data, ctx);
+    expect(refused).toMatchObject({ code: "message.embeds_invalid" });
+    expect(calls.map((c) => c.body)).toEqual([{ type: "reply", content: { type: "text", body: "", embeds: [{ title: "Build", url: "https://ci.example/b/1" }] }, ephemeral: false, mentions: [] }]);
+  });
+
   it("commands invoked in a thread know it; replies there go into it (the node's default), replyInThread too", async () => {
     const router = new CommandRouter({ logger: silentLogger });
     const THREAD = "01J9ZK3G5M8Q2W4E6R8T0Y2TH1";

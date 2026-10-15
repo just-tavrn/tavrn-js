@@ -147,7 +147,7 @@ describe("edits, deletions, history", () => {
     expect(node.requests(new RegExp(`/conversations/${CHANNEL}/messages$`), "GET").at(-1)!.query.toString()).toBe(`limit=20&thread=${THREAD}`);
     await bot.markRead(CHANNEL, MSG);
     expect(bot.typing(CHANNEL)).toBe(true);
-    expect(node.operations()).toContainEqual({ op: "typing", conversation_id: CHANNEL });
+    expect(node.operations()).toContainEqual({ op: "typing", room_id: ROOM, channel_id: CHANNEL });
     await expect(bot.messages(CHANNEL, { limit: 500 })).rejects.toThrow(RangeError);
     expect(node.requests(/\/messages\//, "DELETE").map((c) => c.path)).toEqual([`/api/v1/conversations/${CHANNEL}/messages/${MSG}`]);
   });

@@ -24,6 +24,18 @@ package instead of a git dependency.
 
 ### Added
 
+- **Bot coverage** (`@tavrn/bot`, `bot/docs/COVERAGE.md` maps every feature a bot may use to the runtime): the typed
+  `reaction` event (`bot.onReaction`, fixes #18; the reacting user once the node names it, tavrn-protocol#43) and
+  `messageEdit`, `messageDelete`, `memberJoin`, `memberLeave`, `thread` and `dmRequest` events; helpers `messages`
+  (history, decrypted), `edit` (re-encrypted with the signed context), `deleteMessage`, `react`/`unreact`,
+  `pin`/`unpin`/`pins`, `typing`, `markRead`, files on `send` and `m.download()` (encrypted in encrypted
+  conversations), `createThread`/`threads`/`thread`/`updateThread`/`archiveThread`/`deleteThread`/`followThread`
+  (encrypted titles, client thread ids), `closePoll`, `rooms`/`room`/`members`/`profile`/`search`,
+  `timeout`/`kick`/`ban`/`unban`/`bans`/`auditLog`, `setVoiceStatus`, `setPresence`/`setActivity`/`clearActivity`,
+  `openDm`/`dm`/`acceptDm`/`declineDm` and `bot.api(node)` for the remaining routes. Inputs are checked with the
+  protocol's limits (embeds, body length, presence, timeouts, reasons) before anything is sent; `429` answers are
+  repeated after `Retry-After` (option `rateLimit`). New example bot `examples/proposals` (embed, thread, 👍 tally,
+  edit, presence); unit tests run against a fake node (`bot/test/fake-node.ts`).
 - Polls and date polls (protocol PROTOCOL.md §7g, capability `polls.v1`): `@tavrn/sdk` `api.polls` (`vote`,
   `retract`, `votes`, `close`), `poll_closes_at` on messages, sends and edits, the `PollVote` types and the
   permission `CREATE_POLLS` (bit 39: channel-scoped, in the text group, in DMs, covered by `messages:write`, denied

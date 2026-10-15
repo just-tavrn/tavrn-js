@@ -13,6 +13,7 @@ import { CommandArgsVerifier, qualify, type ArgsCheck, type Decrypted, type Encr
 import { BotError } from "./errors";
 import type { BotLogger } from "./logger";
 import { threadTitle } from "./threads";
+import { checkContent } from "./validate";
 
 /** `data` of the `command.invoke` event (§5.6). */
 export interface CommandInvokeData {
@@ -254,6 +255,8 @@ export class Interaction {
    */
   private async seal(content: ReplyContent, opts: ReplyOptions): Promise<{ content: unknown; epoch?: number; device_id?: string }> {
     const object = normalize(content);
+    // Body length and embeds (APPLICATIONS.md §6.4) before anything is encrypted or sent.
+    checkContent(object);
     if (!this.encrypted) return { content: object };
     if (!this.ctx.crypto) throw new BotError("not_member", "This bot has no encryption state for this conversation");
     const threadId = opts.threadId ?? this.startedThread ?? this.threadId;
