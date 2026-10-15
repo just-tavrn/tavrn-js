@@ -10,6 +10,7 @@
  * it does not know sockets, so it is tested with recorded event frames.
  */
 import { CommandArgsVerifier, qualify, type ArgsCheck, type Decrypted, type EncryptOptions, type EncryptedEnvelope } from "@tavrn/e2ee";
+import { validateModal, type Modal } from "@tavrn/sdk";
 import { BotError } from "./errors";
 import type { BotLogger } from "./logger";
 import { threadTitle } from "./threads";
@@ -192,6 +193,40 @@ export class Interaction {
   private thread(opts: ReplyOptions): { thread_id?: string } {
     const id = opts.threadId ?? this.startedThread;
     return id ? { thread_id: id } : {};
+  }
+
+  /**
+   * Edits the message that carries the component (APPLICATIONS.md §5.10.3) as the first answer: component
+   * interactions and modal submits that came from a component only. In encrypted conversations the new content is
+   * encrypted with the message's signed context (its thread; `replyTo` when the message was a reply).
+   */
+  update(content: ReplyContent, opts: { mentions?: string[]; replyTo?: string | null } = {}): Promise<InteractionResult> {
+    return this.serial(async () => {
+      this.requirePending();
+      const object = normalize(content);
+      let sealed: { content: unknown; epoch?: number; device_id?: string } = { content: object };
+      if (this.encrypted) {
+        if (!this.ctx.crypto) throw new BotError("not_member", "This bot has no encryption state for this conversation");
+        const c = await this.ctx.crypto.encrypt(this.conversation, object, { ctx: { thread_id: this.threadId, reply_to: opts.replyTo ?? null } });
+        sealed = { content: c.content, epoch: c.epoch, device_id: this.ctx.deviceId };
+      }
+      this.state = "replied";
+      return this.callback({ type: "update", ...sealed, mentions: mentionList(opts.mentions) });
+    });
+  }
+
+  /**
+   * Opens a modal (a form) on the invoker's device as the first answer (§5.10.3); its submit arrives as a
+   * `modal.submit` interaction (`bot.modal(customId, handler)`). Not as the answer to a modal submit.
+   */
+  modal(modal: Modal): Promise<InteractionResult> {
+    return this.serial(async () => {
+      this.requirePending();
+      const issue = validateModal(modal);
+      if (issue) throw new TypeError(`invalid modal at ${issue.path || "the modal"}: ${issue.message}`);
+      this.state = "replied";
+      return this.callback({ type: "modal", modal });
+    });
   }
 
   /** Shorthand for `reply(content, { ephemeral: true })`. */

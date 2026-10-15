@@ -22,6 +22,7 @@ import { FileKeyStore, StateDirInUseError } from "@tavrn/e2ee/node";
 import { TavrnApi, TavrnApiError, b64urlEncode, newUlid, resolveNode, type Attachment, type AuditEntry, type Ban, type Channel, type CommandDefinition, type CommandSet, type ConversationRequest, type CreateMessageRequest, type Member, type Message, type MyPresence, type NodeEndpoints, type PollVote, type Profile, type Room, type RoomDetail, type SearchQuery, type SearchResponse, type TavrnEvent, type Thread, type ThreadListQuery, type User, type UserKeys, type UserPrivate, type WellKnown } from "@tavrn/sdk";
 import { threadTitle } from "./threads";
 import { CommandRouter, type CommandCrypto, type CommandHandler, type InvokeContext, type ReplyContent } from "./commands";
+import { ComponentRouter, type ComponentHandler, type Matcher } from "./components";
 import { BotError } from "./errors";
 import { createKeyFile, defaultKeyFile, identityKeyOf, readKey } from "./keyfile";
 import { consoleLogger, type BotLogger } from "./logger";
@@ -407,6 +408,7 @@ export class Bot {
   private token: string;
   private readonly listeners = new Map<keyof BotEvents, Set<(...args: unknown[]) => unknown>>();
   private readonly commands: CommandRouter;
+  private readonly components: ComponentRouter;
   private readonly links = new Map<string, NodeLink>();
   private readonly connecting = new Map<string, Promise<NodeLink | null>>();
   private readonly channels = new Map<string, ChannelInfo>();
@@ -434,6 +436,7 @@ export class Bot {
     this.logger = opts.logger ?? consoleLogger();
     this.token = opts.token.trim();
     this.commands = new CommandRouter({ logger: this.logger, autoDeferMs: opts.autoDeferMs });
+    this.components = new ComponentRouter({ logger: this.logger, autoDeferMs: opts.autoDeferMs });
     this.allowInsecure = opts.allowInsecure ?? /^http:\/\//i.test(opts.node.trim());
     this.fetchImpl = opts.rateLimit === false ? opts.fetchImpl : retryingFetch(opts.fetchImpl ?? ((input, init) => fetch(input, init)), { logger: this.logger, ...opts.rateLimit });
   }
@@ -476,6 +479,21 @@ export class Bot {
   /** Registers the handler of an application command (APPLICATIONS.md §5); the definitions are announced separately. */
   command(name: string, handler: CommandHandler): this {
     this.commands.register(name, handler);
+    return this;
+  }
+
+  /**
+   * Registers the handler of a button or select menu of the bot's messages (APPLICATIONS.md §5.10) by its `custom_id`
+   * or a pattern (`/^raid:/`); the first registered match runs.
+   */
+  component(customId: Matcher, handler: ComponentHandler): this {
+    this.components.component(customId, handler);
+    return this;
+  }
+
+  /** Registers the handler of the submits of a modal the bot opened (§5.10.4) by the modal's `custom_id` or a pattern. */
+  modal(customId: Matcher, handler: ComponentHandler): this {
+    this.components.modal(customId, handler);
     return this;
   }
 
@@ -917,6 +935,10 @@ export class Bot {
         break;
       case "command.invoke":
         void this.track(this.commands.handle(data, this.invokeContext(link)));
+        break;
+      case "component.invoke":
+      case "modal.submit":
+        void this.track(this.components.handle(event.type, data, this.invokeContext(link)));
         break;
       case "poll.vote":
       case "poll.vote.delete": {
