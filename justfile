@@ -8,7 +8,7 @@ default:
 # Every check of the CI: licenses (SPDX headers, dependency licenses), generated types up to date, typecheck, tests
 check: license-check generate-check typecheck test
 
-# SPDX headers per package (scripts/check-spdx.sh, map in sync with LICENSE.md) and the licenses of the production
+# SPDX headers per package (scripts/check-spdx.sh, map in scripts/spdx-map.sh in sync with LICENSE.md) and the licenses of the production
 # dependencies of every package (scripts/check-js-licenses.mjs)
 license-check: install
     scripts/check-spdx.sh
