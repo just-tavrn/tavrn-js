@@ -156,6 +156,30 @@ describe("binary routes share the request layer", () => {
   });
 });
 
+describe("path segments", () => {
+  it("percent-encodes ids so that they stay one path segment", async () => {
+    const { impl, calls } = scripted(() => new Response("{}", { status: 200 }));
+    const api = new TavrnApi({ baseUrl: "https://n.example", fetchImpl: impl });
+    await api.conversations.get("a/b?c#d");
+    await api.messages.list("R 1", "C%1");
+    expect(calls[0]!.url).toBe("https://n.example/api/v1/conversations/a%2Fb%3Fc%23d");
+    expect(calls[1]!.url).toBe("https://n.example/api/v1/rooms/R%201/channels/C%251/messages");
+  });
+
+  it("refuses dot segments and empty ids instead of reaching another route", async () => {
+    const { impl, calls } = scripted(() => new Response("{}", { status: 200 }));
+    const api = new TavrnApi({ baseUrl: "https://n.example", fetchImpl: impl });
+    for (const id of ["..", ".", ""]) {
+      await expect(api.conversations.get(id)).rejects.toMatchObject({ code: "request.invalid_path" });
+      await expect(api.attachments.download(id)).rejects.toMatchObject({ code: "request.invalid_path" });
+    }
+    expect(calls).toHaveLength(0);
+    // A traversal through an encoded id stays inside its segment.
+    await api.conversations.get("../users/me");
+    expect(calls[0]!.url).toBe("https://n.example/api/v1/conversations/..%2Fusers%2Fme");
+  });
+});
+
 describe("response size", () => {
   it("refuses a JSON answer whose Content-Length is above the cap without reading it", async () => {
     let pulled = 0;
