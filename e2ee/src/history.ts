@@ -216,6 +216,18 @@ function concat(...parts: Uint8Array[]): Uint8Array<ArrayBuffer> {
   return out;
 }
 
+/** History keys checked at once while a share is received (each check fetches the samples of its epoch). */
+export const KEY_CHECK_CONCURRENCY = 6;
+
+/** Runs `fn` for every item, at most `limit` at a time. */
+async function eachLimited<T>(items: readonly T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) await fn(items[next++]!);
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+}
+
 /** A stored message used to check a key: author, device, epoch and the `content` value (§5.2). */
 export interface KeySample {
   author: string;
@@ -648,11 +660,17 @@ export class HistorySync {
       const accepted: [number, Uint8Array][] = [];
       let dropped = 0;
       try {
-        for (const [epoch, key] of keys) {
-          if (known.has(epoch)) continue;
-          if (await this.keyProven(q, key, epoch, pickSamples(await api.messages(id, { epoch, limit: 10 }).catch(() => []), epoch, share.from_user))) accepted.push([epoch, key]);
-          else dropped++;
-        }
+        // One request per epoch (§7b step 4), a few at a time.
+        await eachLimited(
+          keys.filter(([epoch]) => !known.has(epoch)),
+          KEY_CHECK_CONCURRENCY,
+          async ([epoch, key]) => {
+            const samples = pickSamples(await api.messages(id, { epoch, limit: 10 }).catch(() => []), epoch, share.from_user);
+            if (await this.keyProven(q, key, epoch, samples)) accepted.push([epoch, key]);
+            else dropped++;
+          },
+        );
+        accepted.sort((a, b) => a[0] - b[0]);
         total += await mls.importHistoryKeys(q, accepted);
       } finally {
         for (const [, k] of keys) k.fill(0);
@@ -671,9 +689,10 @@ export class HistorySync {
    */
   private async keyProven(q: string, key: Uint8Array, epoch: number, samples: KeySample[]): Promise<boolean> {
     for (const sample of samples) {
-      if (!(await epochKeyOpens(key, q, sample))) return false;
+      // Tag and signature in one decryption; the tag alone only decides for a sample of an unverifiable device.
       const check = await this.deps.mls.checkSample(q, epoch, key, sample);
       if (check !== "unknown_device") return check === "proven";
+      if (!(await epochKeyOpens(key, q, sample))) return false;
     }
     return false;
   }

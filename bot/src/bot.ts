@@ -36,6 +36,11 @@ import { MAX_ATTACHMENTS, asFile, type BotFile, type DownloadedFile } from "./up
 import { activityRequest, banSubject, checkContent, mentionList, normalizeContent, presenceRequest, reason as checkReason, timeoutMinutes, ulid, voiceStatus, type ActivityInput, type PresenceInput } from "./validate";
 import { appTokenClaims, type AppTokenClaims } from "./token";
 
+/** Failed background writes of the encryption bookkeeping in a row after which the bot stops (`state_unwritable`). */
+const MLS_SAVE_FAILURES_FATAL = 3;
+/** Wait before the second try of a message whose author's devices could not be looked up (reason `retry`). */
+const DECRYPT_RETRY_MS = 1000;
+
 export const BOT_VERSION = "0.2.1";
 /** Default state directory (`TAVRN_BOT_STATE_DIR`, APPLICATIONS.md §3.3). */
 export const DEFAULT_STATE_DIR = ".tavrn-state";
@@ -704,6 +709,15 @@ export class Bot {
       homeDomain: claims.iss,
       backupDelayMs: this.opts.backupDelayMs,
       onEvent: (e) => log.debug("mls", { ...e }),
+      onError: (e) => {
+        log.error("the encryption bookkeeping could not be saved", { operation: e.operation, consecutive: e.consecutive, error: e.error });
+        // A state directory that stays unwritable (full disk, removed, permissions): stop instead of running on with
+        // encryption state that is not kept. A single failure is written again with the next change.
+        if (e.consecutive >= MLS_SAVE_FAILURES_FATAL && (this.state === "running" || this.state === "starting")) {
+          this.emit("error", new BotError("state_unwritable", "The bot's state directory cannot be written; the bot stops", { cause: e.error }));
+          void this.stop();
+        }
+      },
     });
     if (!mls) throw new Error("the MLS client state is missing after the device setup");
     this.mls = mls;
@@ -1104,7 +1118,12 @@ export class Bot {
     let files: (BotAttachment & { crypto: ContentAttachment | null; sha256: string })[];
     if (m.encrypted) {
       if (!mls.hasGroup(q) && !(await this.join(q, false))) return { reason: "not_member" };
-      const d = await mls.decrypt(q, m);
+      let d = await mls.decrypt(q, m);
+      // The author's devices could not be looked up (their node, the network): one more try a moment later.
+      if (!d.ok && d.reason === "retry") {
+        await new Promise((r) => setTimeout(r, DECRYPT_RETRY_MS));
+        d = await mls.decrypt(q, m);
+      }
       if (!d.ok) {
         this.logger.debug("message not decrypted", { conversation: q, message: m.id, reason: d.reason });
         return { reason: d.reason };

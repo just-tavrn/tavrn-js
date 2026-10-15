@@ -22,6 +22,32 @@ package instead of a git dependency.
   replies in threads, signed answers to interactions, token rotation, installations on other nodes) and the example
   bots.
 
+### Changed
+
+- **`@tavrn/e2ee` costs per message**: `decrypt` makes one call into the crypto core (the core compares the attested
+  key with the author's leaf, §3.3) instead of `hasGroup`, `roster` and `decryptContent`, and the core keeps its
+  groups loaded; `contentHeader` reads the 28 header characters in JavaScript; `encrypt` takes the epoch from the
+  encryption.
+- **Bounded session caches**: decrypted messages and plaintext signature checks keep at most `DECRYPT_CACHE_LIMIT`
+  (5000) results, keyed by message id with a fingerprint of the ciphertext instead of the ciphertext itself; message
+  nonces of the replay rule are kept for the last `NONCE_WINDOW` (50,000) messages; a re-render with the same envelope
+  objects does not canonicalize plaintext messages again.
+- **A failed device lookup is no verdict**: `decrypt` answers the new reason `retry` (not cached) instead of a
+  permanent `invalid` when the author's keys cannot be fetched; the bot runtime tries such a message once more.
+- **Background writes**: failed `saveMeta` writes are reported through the new `onError` option instead of unhandled
+  rejections (which ended a Node.js process); the bot runtime logs them and stops with `BotError("state_unwritable")`
+  after three in a row.
+- **Attachments** are encrypted and decrypted with WebCrypto AES-GCM (same format, checked against the `file` vector):
+  no copy of the file through the WebAssembly memory, which never shrinks.
+- **History keys**: each key is checked with one decryption (`decryptContentWithKey`, no throwaway MLS client and
+  device key per epoch), and up to six epochs are checked at once.
+- **Identity chains**: `chainKeys` verifies each continuity statement once in the crypto core (`continuityKeys`)
+  instead of one chain walk per statement; chains longer than 10,000 statements are not followed.
+- **`FileKeyStore`** coalesces bursts of writes: a write that has not started yet takes the newest state, so a burst
+  of changes rewrites the state file once or twice instead of once per secret (two fsyncs each).
+- **Replay windows** of signed command arguments and component values are swept from the oldest end instead of
+  scanning the whole window on every check.
+
 ### Added
 
 - `@tavrn/sdk`: request deadlines and abort signals. `ApiOptions.timeoutMs` (default 30 s), `transferTimeoutMs` (file

@@ -4,10 +4,10 @@
 // live on different nodes (FEDERATION.md §3.5, §6): conversations are hosted by one node, keys come
 // from each user's home node, KeyPackages of other nodes' users are claimed through the hosting node.
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { Client, IdentityKey, MasterSecret, sealToInbox, signContinuity } from "@tavrn/crypto";
+import { Client, IdentityKey, MasterSecret, contentEpoch, sealToInbox, signContinuity } from "@tavrn/crypto";
 import { b64urlDecode, b64urlEncode } from "@tavrn/sdk";
 import { ensureCrypto } from "../src/wasm";
-import { MlsError, MlsManager, contentHeader, normalizeMeta, qualify, splitQualified, type MlsApi, type MlsEvent, type MlsMeta, type Pin } from "../src/mls";
+import { DECRYPT_CACHE_LIMIT, MlsError, MlsManager, contentHeader, normalizeMeta, qualify, splitQualified, type MlsApi, type MlsBackgroundError, type MlsDeps, type MlsEvent, type MlsMeta, type Pin } from "../src/mls";
 import { Network, domainOf, problem } from "./fake-node";
 import { LeafCleaner } from "../src/cleanup";
 import { CommandArgsVerifier, encryptCommandArgs } from "../src/commands";
@@ -45,7 +45,7 @@ function setup() {
   const node = net.node(DOMAIN);
   const masters = new Map<string, MasterSecret>();
   /** A device of `user` (`name` on t.local, or `name@domain`). */
-  const device = (user: string, deviceId: string, opts: { kps?: number; forgedAttestation?: boolean; meta?: MlsMeta; kind?: string } = {}): Device => {
+  const device = (user: string, deviceId: string, opts: { kps?: number; forgedAttestation?: boolean; meta?: MlsMeta; kind?: string; saveMeta?: MlsDeps["saveMeta"]; onError?: MlsDeps["onError"] } = {}): Device => {
     const address = user.includes("@") ? user : `${user}@${DOMAIN}`;
     const username = address.slice(0, address.lastIndexOf("@"));
     const home = net.node(domainOf(address));
@@ -81,8 +81,9 @@ function setup() {
       pins,
       savePins: async () => undefined,
       meta,
-      saveMeta: async () => undefined,
+      saveMeta: opts.saveMeta ?? (async () => undefined),
       onEvent: (e) => events.push(e),
+      ...(opts.onError ? { onError: opts.onError } : {}),
       backupDelayMs: 60_000,
     });
     return { mls, client: () => client, events, pins, meta, address };
@@ -1361,5 +1362,142 @@ describe("write-only webhooks (APPLICATIONS.md §6.1a, ENCRYPTION.md §5b)", () 
     const laptop = device("alice", DEV.a2);
     await laptop.mls.ensureJoined(CONV, { canCreate: true });
     expect(await laptop.mls.decrypt(CONV, m)).toEqual({ ok: true, content: { type: "text", body: "old" }, sealedBy: "sender" });
+  });
+});
+
+describe("session costs and transient failures", () => {
+  it("decrypts with one call into the crypto core: no roster export per message (§3.3 leaf check inside)", async () => {
+    const { device } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    await bob.mls.ensureJoined(CONV, { canCreate: true });
+    await alice.mls.catchUp(CONV);
+    const messages = [];
+    for (let i = 0; i < 5; i++) messages.push(await send(alice, CONV, `m${i}`, `id${i}`));
+    const roster = vi.spyOn(Client.prototype, "roster");
+    const hasGroup = vi.spyOn(Client.prototype, "hasGroup");
+    for (const m of messages) expect(await bob.mls.decrypt(CONV, m)).toMatchObject({ ok: true });
+    expect(roster).not.toHaveBeenCalled();
+    expect(hasGroup).not.toHaveBeenCalled();
+    roster.mockRestore();
+    hasGroup.mockRestore();
+  });
+
+  it("refuses a message whose author leaf carries another key than the attested one (unknown device)", async () => {
+    const { node, device } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    await bob.mls.ensureJoined(CONV, { canCreate: true });
+    await alice.mls.catchUp(CONV);
+    const m = await send(alice, CONV, "hi", "x1");
+    // The home node now attests another key for Alice's device: her leaf in Bob's group no longer matches it.
+    const other = Client.create(alice.address, DEV.a);
+    const master = MasterSecret.generate();
+    node.users.get("alice")!.devices.set(DEV.a, { pk: b64urlEncode(other.devicePublicKey), sig: b64urlEncode(master.attestDevice(alice.address, DEV.a, other.devicePublicKey)) });
+    node.users.get("alice")!.identity = b64urlEncode(master.identityPublicKey());
+    bob.pins[alice.address] = { key: b64urlEncode(master.identityPublicKey()) };
+    bob.mls.forgetDevices(alice.address);
+    expect(await bob.mls.decrypt(CONV, m)).toEqual({ ok: false, reason: "unknown_device" });
+    other.free();
+    master.free();
+  });
+
+  it("a failed device lookup is no verdict: reason retry, not cached, the next decrypt succeeds", async () => {
+    const { node, device } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    await bob.mls.ensureJoined(CONV, { canCreate: true });
+    await alice.mls.catchUp(CONV);
+    const m = await send(alice, CONV, "später", "r1");
+    const lookup = vi.spyOn(node, "keysOf").mockImplementation(() => {
+      throw problem(0, "network");
+    });
+    expect(await bob.mls.decrypt(CONV, m)).toEqual({ ok: false, reason: "retry" });
+    expect(bob.mls.peek(CONV, m)).toBeUndefined();
+    lookup.mockRestore();
+    expect(await bob.mls.decrypt(CONV, m)).toMatchObject({ ok: true, content: { body: "später" } });
+  });
+
+  it("keeps at most DECRYPT_CACHE_LIMIT results, and a changed ciphertext under the same id is decrypted again", async () => {
+    const { device } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    await bob.mls.ensureJoined(CONV, { canCreate: true });
+    await alice.mls.catchUp(CONV);
+    const m = await send(alice, CONV, "eins", "c1");
+    expect(await bob.mls.decrypt(CONV, m)).toMatchObject({ ok: true, content: { body: "eins" } });
+    const edited = await send(alice, CONV, "zwei", "c1");
+    expect(await bob.mls.decrypt(CONV, edited)).toMatchObject({ ok: true, content: { body: "zwei" } });
+    expect(bob.mls.peek(CONV, edited)).toMatchObject({ ok: true, content: { body: "zwei" } });
+    expect(bob.mls.peek(CONV, m)).toBeUndefined();
+    // Invalid envelopes are cached too (final results): far more of them than the limit.
+    const cache = (bob.mls as unknown as { decrypted: { size: number } }).decrypted;
+    for (let i = 0; i < DECRYPT_CACHE_LIMIT + 200; i++) await bob.mls.decrypt(CONV, { ...m, id: `b${i}`, content: "not content" });
+    expect(cache.size).toBe(DECRYPT_CACHE_LIMIT);
+    // The newest results stay; the least recently used went first.
+    expect(bob.mls.peek(CONV, { ...m, id: `b${DECRYPT_CACHE_LIMIT + 199}`, content: "not content" })).toEqual({ ok: false, reason: "invalid" });
+    expect(bob.mls.peek(CONV, { ...m, id: "b0", content: "not content" })).toBeUndefined();
+  });
+
+  it("reports failed background writes of the bookkeeping instead of leaving unhandled rejections", async () => {
+    const { device } = setup();
+    const errors: MlsBackgroundError[] = [];
+    let fail = true;
+    const alice = device("alice", DEV.a, {
+      saveMeta: async () => {
+        if (fail) throw new Error("ENOSPC");
+      },
+      onError: (e) => errors.push(e),
+    });
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    try {
+      await alice.mls.ensureJoined(CONV, { canCreate: true });
+      await alice.mls.selfUpdate(CONV);
+      await new Promise((r) => setTimeout(r, 10));
+      expect(errors.length).toBeGreaterThanOrEqual(2);
+      expect(errors.every((e) => e.operation === "save_meta" && e.error instanceof Error)).toBe(true);
+      expect(errors.map((e) => e.consecutive)).toEqual(errors.map((_, i) => i + 1));
+      fail = false;
+      await alice.mls.selfUpdate(CONV);
+      await new Promise((r) => setTimeout(r, 10));
+      const before = errors.length;
+      fail = true;
+      await alice.mls.selfUpdate(CONV);
+      await new Promise((r) => setTimeout(r, 10));
+      expect(errors[before]!.consecutive).toBe(1);
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off("unhandledRejection", unhandled);
+    }
+  });
+
+  it("reads the content header without the crypto core, exactly as the core does", async () => {
+    const { device } = setup();
+    const alice = device("alice", DEV.a);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    const { content, epoch } = await send(alice, CONV, "x", "h1");
+    expect(contentHeader(content)).toEqual({ epoch, nonce: b64urlEncode(b64urlDecode(content).slice(9, 21)) });
+    const bytes = b64urlDecode(content);
+    const variants: string[] = [content, `${content}=`, `${content.slice(0, -1)}+`, ""];
+    for (let n = 130; n <= 140; n++) variants.push(content.slice(0, n));
+    for (const [i, v] of [[0, 2], [1, 0xff], [1, 0x00], [2, 0x20]] as const) {
+      const b = bytes.slice();
+      b[i] = v;
+      variants.push(b64urlEncode(b));
+    }
+    for (const v of variants) {
+      let core: number | null;
+      try {
+        core = contentEpoch(v);
+      } catch {
+        core = null;
+      }
+      expect(contentHeader(v)?.epoch ?? null, v.slice(0, 16)).toBe(core);
+    }
   });
 });
