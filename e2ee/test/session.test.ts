@@ -11,6 +11,7 @@ import {
   KEY_PACKAGE_BATCH,
   MemoryKeyStore,
   PINS,
+  VERIFIED,
   ensureCrypto,
   openMlsManager,
   qualify,
@@ -180,6 +181,26 @@ describe("restart from the file store", () => {
     restarted.dispose();
     await store.close();
   });
+
+  it("refuses to start over silently when the pins or verified contacts cannot be read", async () => {
+    for (const [, makeStore] of kinds) await refusesUnreadable(makeStore);
+  });
+
+  async function refusesUnreadable(makeStore: () => KeyStore) {
+    const net = new Network();
+    const alice = await party(net, "alice", DEV.a, makeStore());
+    alice.mls.dispose();
+    for (const name of [PINS, VERIFIED]) {
+      const broken = new TextEncoder().encode("{not json");
+      await alice.store.putSecret(name, broken.slice());
+      // A reset would pin every contact again without a "key changed" warning: fail loudly and keep the blob.
+      await expect(open(net, alice.address, alice.deviceId, alice.store, [])).rejects.toMatchObject({ name: "E2eeError", code: "state_unreadable" });
+      expect(await alice.store.getSecret(name)).toEqual(broken);
+      await alice.store.putSecret(name, new TextEncoder().encode("{}"));
+    }
+    const reopened = await open(net, alice.address, alice.deviceId, alice.store, []);
+    reopened.dispose();
+  }
 
   it("a wrong master secret does not open the state directory", async () => {
     const net = new Network();

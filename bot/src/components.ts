@@ -11,7 +11,7 @@
  */
 import { ComponentValuesVerifier, qualify } from "@tavrn/e2ee";
 import { validateComponents, validateModal, type Button, type ButtonStyle, type Component, type InputStyle, type Modal, type ModalInput, type Row, type Select, type SelectOption } from "@tavrn/sdk";
-import { Interaction, type CommandInvokeData, type InteractionResult, type InvokeContext } from "./commands";
+import { Interaction, answerError, runInteraction, type CommandInvokeData, type InteractionResult, type InvokeContext } from "./commands";
 import type { BotLogger } from "./logger";
 
 /** `data` of `component.invoke` and `modal.submit` (§5.10.2, §5.10.4) as the runtime reads it. */
@@ -127,34 +127,21 @@ export class ComponentRouter {
       return null;
     }
     const kind = event === "component.invoke" ? "component" : "modal";
-    const answerError = (message: string) =>
-      ctx.request("POST", `/interactions/${encodeURIComponent(data.interaction_id)}/callback`, { type: "error", message }).catch((e: unknown) => log.warn("could not answer the interaction", { interaction: data.interaction_id, error: e }));
+    const answer = (message: string) => answerError(ctx, data.interaction_id, message, log);
     const id = (kind === "component" ? data.custom_id : data.modal_custom_id) ?? "";
     const handler = this.find(kind === "component" ? this.components : this.modals, id);
     if (!handler) {
       log.warn(`${kind} without a handler`, { custom_id: id, interaction: data.interaction_id });
-      await answerError(MSG.unknown);
+      await answer(MSG.unknown);
       return null;
     }
     const values = await this.values(kind, data, ctx);
     if (!values.ok) {
-      await answerError(values.reason === "joining" ? MSG.joining : MSG.values);
+      await answer(values.reason === "joining" ? MSG.joining : MSG.values);
       return null;
     }
     const interaction = new ComponentInteraction(kind, data, kind === "component" ? strings(values.values) : null, kind === "modal" ? fieldsOf(values.values) : {}, ctx);
-    const timer = setTimeout(() => void interaction.autoDefer(), this.autoDeferMs);
-    try {
-      await handler(interaction);
-      if (!interaction.answered) {
-        log.warn(`${kind} handler returned without answering`, { custom_id: id, interaction: data.interaction_id });
-        await interaction.error(MSG.noAnswer).catch(() => undefined);
-      }
-    } catch (e) {
-      log.error(`${kind} handler failed`, { custom_id: id, interaction: data.interaction_id, error: e });
-      if (!interaction.answered) await interaction.error(MSG.failed).catch(() => undefined);
-    } finally {
-      clearTimeout(timer);
-    }
+    await runInteraction(interaction, () => handler(interaction), { logger: log, autoDeferMs: this.autoDeferMs, what: kind, fields: { custom_id: id, interaction: data.interaction_id }, messages: MSG });
     return interaction;
   }
 

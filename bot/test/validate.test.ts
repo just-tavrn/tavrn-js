@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import { activityRequest, checkContent, presenceRequest, uploadCategory } from "../src";
+
+const vectors = JSON.parse(readFileSync(new URL("../../protocol/testvectors/upload_categories.json", import.meta.url), "utf8")) as {
+  cases: { name: string; file_name: string; mime: string; head_hex: string | null; category: string; executable: boolean }[];
+};
 
 describe("content checks (PROTOCOL.md §7, APPLICATIONS.md §6.4)", () => {
   it("accepts text, actions, embeds and other types, refuses reserved ones and over-long bodies", () => {
@@ -58,5 +63,15 @@ describe("upload categories (PROTOCOL.md §7a)", () => {
     expect(uploadCategory("photo.png.exe", "image/png")).toBe("executable");
     expect(uploadCategory("x", "application/x-msdownload")).toBe("executable");
     expect(uploadCategory("data.bin.unknown")).toBe("other");
+  });
+
+  it("is the SDK's table: content first when the bytes are given, the protocol's vectors hold", () => {
+    expect(uploadCategory("notes.txt", "text/plain", new TextEncoder().encode("MZ\u0090"))).toBe("executable");
+    expect(uploadCategory("image.txt", "text/plain", new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))).toBe("images");
+    expect(uploadCategory("a.lzma")).toBe("archives");
+    for (const c of vectors.cases) {
+      const head = c.head_hex === null ? undefined : new Uint8Array((c.head_hex.match(/../g) ?? []).map((b) => parseInt(b, 16)));
+      expect(uploadCategory(c.file_name, c.mime, head), c.name).toBe(c.executable ? "executable" : c.category);
+    }
   });
 });

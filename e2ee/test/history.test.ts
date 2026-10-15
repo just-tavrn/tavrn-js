@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 // History for new members (ENCRYPTION.md §7b): the pure parts (policy, windows, chunking, election, payload
 // codec, key check) and the flows of HistorySync between real session managers on an in-memory node.
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { Client, MasterSecret } from "@tavrn/crypto";
 import { b64urlEncode, jcs, type HistoryShare, type Message } from "@tavrn/sdk";
 import { ensureCrypto } from "../src/wasm";
@@ -242,7 +242,11 @@ describe("HistorySync", () => {
     expect(JSON.stringify(shares)).not.toContain("history_keys");
 
     const log: string[] = [];
+    // The keys are checked against their samples without a throwaway MLS client (and its fresh device key) per key.
+    const create = vi.spyOn(Client, "create");
     expect(await sync(bob, undefined, log).receive(CONV)).toBe(1);
+    expect(create).not.toHaveBeenCalled();
+    create.mockRestore();
     expect(log).toEqual([]);
     expect(bob.mls.knownEpochs(CONV)).toEqual([0, 1]);
     expect(await bob.mls.decrypt(CONV, old)).toEqual({ ok: true, content: { type: "text", body: "vor Bobs Beitritt" } });

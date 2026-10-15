@@ -47,6 +47,8 @@ describe("TavrnSocket", () => {
       WebSocketImpl: FakeWebSocket as unknown as typeof WebSocket,
       onStatus: (s) => statuses.push(s),
       onEvent: (e) => events.push(e),
+      // runOnlyPendingTimersAsync() would fire the liveness watchdog: only the watchdog tests turn it on.
+      livenessMs: 0,
       ...overrides,
     });
     return { socket, statuses, events };
@@ -299,5 +301,129 @@ describe("TavrnSocket", () => {
     expect(socket.status).toBe("ready");
     expect(events).toHaveLength(0);
     socket.close();
+  });
+  it("reconnects when a ready connection goes silent (no ping within the liveness interval)", async () => {
+    const closes: number[] = [];
+    // The default interval (75 s: two missed pings plus slack).
+    const { socket, statuses } = make({ onClose: (code) => closes.push(code), livenessMs: undefined });
+    socket.connect();
+    await vi.advanceTimersByTimeAsync(0);
+    const ws = FakeWebSocket.instances[0]!;
+    ws.serverOpen();
+    ws.serverSend({ op: "ready", session_id: "s1" });
+    // The node pings every 30 s: a live connection is kept for as long as the pings arrive.
+    for (let i = 0; i < 5; i++) {
+      await vi.advanceTimersByTimeAsync(30_000);
+      ws.serverSend({ op: "ping" });
+    }
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(socket.status).toBe("ready");
+    // Then silence (a half-open connection): closed locally and reconnected, which makes the node resync.
+    await vi.advanceTimersByTimeAsync(76_000);
+    expect(ws.readyState).toBe(3);
+    expect(closes).toEqual([4000]);
+    expect(statuses).toContain("reconnecting");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    const next = FakeWebSocket.instances[1]!;
+    next.serverOpen();
+    expect(JSON.parse(next.sent[0]!)).toMatchObject({ op: "hello" });
+    socket.close();
+  });
+
+  it("the liveness interval is configurable and 0 turns the watchdog off", async () => {
+    const quick = make({ livenessMs: 5_000 });
+    quick.socket.connect();
+    await vi.advanceTimersByTimeAsync(0);
+    FakeWebSocket.instances[0]!.serverOpen();
+    FakeWebSocket.instances[0]!.serverSend({ op: "ready", session_id: "s1" });
+    await vi.advanceTimersByTimeAsync(5_500);
+    expect(FakeWebSocket.instances[0]!.readyState).toBe(3);
+    quick.socket.close();
+    FakeWebSocket.instances = [];
+    const off = make({ livenessMs: 0 });
+    off.socket.connect();
+    await vi.runOnlyPendingTimersAsync();
+    FakeWebSocket.instances[0]!.serverOpen();
+    FakeWebSocket.instances[0]!.serverSend({ op: "ready", session_id: "s1" });
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(off.socket.status).toBe("ready");
+    off.socket.close();
+  });
+
+  it("retries with backoff when the token provider fails instead of never reconnecting", async () => {
+    let fail = 2;
+    const getToken = vi.fn(async () => {
+      if (fail > 0) {
+        fail -= 1;
+        throw new Error("refresh endpoint unreachable");
+      }
+      return "tok";
+    });
+    const { socket } = make({ getToken });
+    socket.connect();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    expect(socket.status).toBe("reconnecting");
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(getToken).toHaveBeenCalledTimes(3);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    FakeWebSocket.instances[0]!.serverOpen();
+    FakeWebSocket.instances[0]!.serverSend({ op: "ready", session_id: "s1" });
+    expect(socket.status).toBe("ready");
+    socket.close();
+  });
+
+  it("retries when the WebSocket cannot even be created", async () => {
+    let throwOnce = true;
+    class Flaky extends FakeWebSocket {
+      constructor(url: string) {
+        if (throwOnce) {
+          throwOnce = false;
+          throw new SyntaxError("bad url");
+        }
+        super(url);
+      }
+    }
+    const { socket } = make({ WebSocketImpl: Flaky as unknown as typeof WebSocket });
+    socket.connect();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(socket.status).toBe("reconnecting");
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    socket.close();
+  });
+
+  it("isolates event listeners: one that throws does not stop the others", async () => {
+    const errors: unknown[] = [];
+    const { socket } = make({
+      onEvent: () => {
+        throw new Error("onEvent broke");
+      },
+      onListenerError: (e) => errors.push(e),
+    });
+    socket.connect();
+    await vi.runOnlyPendingTimersAsync();
+    const ws = FakeWebSocket.instances[0]!;
+    ws.serverOpen();
+    ws.serverSend({ op: "ready", session_id: "s1" });
+    const seen: string[] = [];
+    socket.on("message.create", () => {
+      throw new Error("first broke");
+    });
+    socket.on("message.create", () => seen.push("second"));
+    socket.on("*", () => seen.push("any"));
+    expect(() => ws.serverSend({ op: "event", id: "e1", type: "message.create", data: {} })).not.toThrow();
+    expect(seen).toEqual(["second", "any"]);
+    expect(errors.map((e) => (e as Error).message)).toEqual(["onEvent broke", "first broke"]);
+    socket.close();
+  });
+
+  it("drops the listener set of a type once its last listener unsubscribed", async () => {
+    const { socket } = make();
+    const off = socket.on("message.create", () => undefined);
+    off();
+    expect((socket as unknown as { listeners: Map<string, unknown> }).listeners.has("message.create")).toBe(false);
   });
 });

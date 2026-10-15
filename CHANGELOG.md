@@ -22,8 +22,63 @@ package instead of a git dependency.
   replies in threads, signed answers to interactions, token rotation, installations on other nodes) and the example
   bots.
 
+### Changed
+
+- **`@tavrn/e2ee` costs per message**: `decrypt` makes one call into the crypto core (the core compares the attested
+  key with the author's leaf, §3.3) instead of `hasGroup`, `roster` and `decryptContent`, and the core keeps its
+  groups loaded; `contentHeader` reads the 28 header characters in JavaScript; `encrypt` takes the epoch from the
+  encryption.
+- **Bounded session caches**: decrypted messages and plaintext signature checks keep at most `DECRYPT_CACHE_LIMIT`
+  (5000) results, keyed by message id with a fingerprint of the ciphertext instead of the ciphertext itself; message
+  nonces of the replay rule are kept for the last `NONCE_WINDOW` (50,000) messages; a re-render with the same envelope
+  objects does not canonicalize plaintext messages again.
+- **A failed device lookup is no verdict**: `decrypt` answers the new reason `retry` (not cached) instead of a
+  permanent `invalid` when the author's keys cannot be fetched; the bot runtime tries such a message once more.
+- **Background writes**: failed `saveMeta` writes are reported through the new `onError` option instead of unhandled
+  rejections (which ended a Node.js process); the bot runtime logs them and stops with `BotError("state_unwritable")`
+  after three in a row.
+- **Attachments** are encrypted and decrypted with WebCrypto AES-GCM (same format, checked against the `file` vector):
+  no copy of the file through the WebAssembly memory, which never shrinks.
+- **History keys**: each key is checked with one decryption (`decryptContentWithKey`, no throwaway MLS client and
+  device key per epoch), and up to six epochs are checked at once.
+- **Identity chains**: `chainKeys` verifies each continuity statement once in the crypto core (`continuityKeys`)
+  instead of one chain walk per statement; chains longer than 10,000 statements are not followed.
+- **`FileKeyStore`** coalesces bursts of writes: a write that has not started yet takes the newest state, so a burst
+  of changes rewrites the state file once or twice instead of once per secret (two fsyncs each).
+- **Replay windows** of signed command arguments and component values are swept from the oldest end instead of
+  scanning the whole window on every check.
+
 ### Added
 
+- `@tavrn/sdk`: request deadlines and abort signals. `ApiOptions.timeoutMs` (default 30 s), `transferTimeoutMs` (file
+  uploads and downloads, default 10 minutes), `maxResponseBytes` (JSON answers, default 32 MiB, checked against
+  `Content-Length` and while reading) and `signal`; `api.withSignal(signal)` binds every call of a client to one
+  signal. Failures on the way are `TavrnApiError` with status 0 and the codes `network.timeout`, `request.aborted`,
+  `response.too_large` and `request.invalid_path` (next to `network.error`). Discovery (`resolveNode`, `discoverNode`,
+  `identityOfHost`: `timeoutMs`, `signal`, default `DISCOVERY_TIMEOUT_MS` = 15 s) and the hook verifier's key fetch
+  (`timeoutMs`) read at most `MAX_DISCOVERY_BYTES` within their deadline.
+- `@tavrn/sdk`: the upload category table of PROTOCOL.md §7a in one place, `uploads.ts`: `classifyUpload(name, type,
+  head?)` (content first when the first bytes are given, then the extension, then the type, as the node does),
+  `declaredCategory`, `executableKind`, `extensionOf`, `extensionsOf`, `DANGEROUS_EXTENSIONS`, `UPLOAD_HEAD_BYTES`;
+  it runs the protocol's new `testvectors/upload_categories.json`. `isUlid` for canonical ULIDs.
+- `@tavrn/sdk`: `TavrnSocket` watches the connection: without any frame for `livenessMs` (default 75 s, two missed
+  pings of the node; 0 turns it off) it closes the connection locally (code 4000) and reconnects, which resyncs.
+  `onListenerError` receives the errors of event listeners.
+- `@tavrn/bot`: `requestTimeoutMs` (default 30 s per API request, rate-limit waits on top) and `stopTimeoutMs`
+  (default 30 s: `stop()` no longer waits forever for a handler that never finishes); the error code
+  `encryption_unavailable`.
+- **Files channels for bots** (tavrn-protocol#44): `bot.files.list(channel, folder?)` (every page, decrypted and
+  sorted in encrypted channels, unreadable records as `locked` entries), `get`, `download(entry)`, `upload(channel,
+  { name, data | path, mime, folder, rename })`, `createFolder` and `delete` (own entries; others' with
+  `rooms:manage`), and the event `files` for `files.update`. Encrypted files channels use the records and chunked
+  encryption of `@tavrn/e2ee` like the web client; taken names are refused (`files.name_taken`) or numbered. The bot
+  joins encrypted files channels eagerly like text channels (`JOINABLE_KINDS` includes `files`).
+
+- **Moderation bots read the room's report inbox** (tavrn-protocol#45, `MODERATION.md` §1.4a): `bot.reports(room,
+  { status, limit, before })`, `bot.report(id, node?)` and the `report` event (`bot.onReport`) for bots with
+  `moderation` and "Moderate members" in the room; metadata only (`AppReport`: kind, category, target, status, counts,
+  times, the reported message's id, the reporter as a pseudonym). `api.reports.roomForApp` and `api.reports.getForApp`
+  in `@tavrn/sdk`. Reports stay read-only for bots.
 - **Reactors** (tavrn-protocol#43, tavrn-node#83): the `reaction` event names the reactor from the node's `reaction`
   field (`user`, the new `userId`), also on messages the bot has never seen, and no longer reports the bot's own
   reactions; `bot.reactors(conversation, messageId, emoji, { after, limit })` and `api.reactions.list(conversationId,
@@ -73,6 +128,23 @@ package instead of a git dependency.
 
 ### Changed
 
+- `@tavrn/sdk`: every route goes through one request layer. Downloads (attachments, files, emoji, sounds, whiteboards,
+  backups) and uploads now refresh the token on `401`, send `Tavrn-Client`, report network failures as
+  `TavrnApiError` (never a raw `TypeError`) and pass Blobs through without copying them. An aborted upload reports
+  `request.aborted` (was `upload.aborted`); `files.downloadResponse` takes an optional signal; `exchange` takes an
+  optional `signal` and lost its internal retry parameters. Ids in paths are percent-encoded, and a request whose
+  path would hold an empty or dot segment is refused before it is sent.
+- `@tavrn/sdk`: the generated fetch client (`src/generated/client`, `core`, `client.gen.ts`) is gone; only the types
+  are generated, `TavrnApi` is the client.
+- `@tavrn/bot`: encrypted uploads declare the category from the file's first bytes, name and type with the SDK's
+  table (`uploadCategory(name, mime, head?)`). A malformed conversation id is a `RangeError`; errors of the session
+  manager surface as `BotError` (`not_member`, `encryption_unavailable`, with the `MlsError` as `cause`), node
+  refusals stay `TavrnApiError`. Resyncs of a node never overlap (one more run when requested during one), rooms load
+  with bounded concurrency, an unknown conversation id reloads the rooms once and is then remembered for 30 s. DMs
+  claim KeyPackages for a member's missing device only while that device is due: after a claim that left it missing
+  the bot waits (1 minute, doubling up to 30 minutes, or until `devices.changed`). Failures of background work are
+  logged. Rate-limit waits end when the request's signal aborts.
+- `just protocol` also updates a stale checkout of the protocol submodule (the pin moved), not only a missing one.
 - `@tavrn/e2ee`: fewer round trips before a voice join. `ghostCheck` looks the members' devices up in parallel (one
   round trip instead of one per user); `LeafCleaner` skips the fresh lookups when the roster is unchanged since its
   last check without findings (`FRESH_REUSE_MS`, not with a pending removal of a leaf in the group); `selfUpdate` does
@@ -84,6 +156,8 @@ package instead of a git dependency.
 
 ### Fixed
 
+- `@tavrn/sdk`: a socket whose token provider failed once (or whose WebSocket could not be created) never connected
+  again; it retries with backoff now. A throwing event listener no longer keeps the other listeners from the event.
 - `@tavrn/e2ee`: `LeafCleaner.clean` takes `noWait` for a voice join, which must not wait for the election: it joins
   a running cleanup and ends its election wait, runs at once when this device is elected and otherwise returns the new
   outcome `postponed` without committing (the caller cleans again later, in the background); `isRunning(q)` tells
@@ -110,6 +184,11 @@ package instead of a git dependency.
 
 ### Security
 
+- `@tavrn/sdk`: response bodies from other nodes are read with a size cap (discovery documents, hook keys, JSON
+  answers) and within a deadline.
+- `@tavrn/e2ee`: key pins and verified contacts that decrypt but cannot be parsed are no longer replaced by empty
+  ones (which would trust every key again without a warning): `openMlsManager` throws `E2eeError`
+  `state_unreadable` and the stored blob stays.
 - `@tavrn/e2ee`: content (messages, thread titles, ephemeral events) waits for an explicit `acknowledgeGhosts` while
   the roster has a ghost leaf; a ghost check alone no longer counts as shown, and `encrypt` lost `knownGhosts`.
 - `@tavrn/e2ee`: a claimed KeyPackage is added only when its leaf carries the attested key and identity of its device.

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from "vitest";
-import { newUlid, ulidTime } from "../src";
+import { isUlid, newUlid, ulidTime } from "../src";
 
 describe("client ULIDs (PROTOCOL.md §7e: thread ids chosen by the client)", () => {
   it("encodes the time and 80 random bits as 26 uppercase Crockford characters", () => {
@@ -21,5 +21,10 @@ describe("client ULIDs (PROTOCOL.md §7e: thread ids chosen by the client)", () 
     expect(() => newUlid(1.5)).toThrow(RangeError);
     expect(ulidTime("01ARYZ6S41TSV4RRFFQ69G5FAV")).toBe(1469918176385);
     for (const bad of ["01arYZ6S41TSV4RRFFQ69G5FAV", "01ARYZ6S41TSV4RRFFQ69G5FA", "81ARYZ6S41TSV4RRFFQ69G5FAV", "01ARYZ6S41TSV4RRFFQ69G5FAU"]) expect(ulidTime(bad)).toBeNull();
+  });
+  it("tells canonical ULIDs apart", () => {
+    expect(isUlid(newUlid())).toBe(true);
+    expect(isUlid("01ARYZ6S41TSV4RRFFQ69G5FAV")).toBe(true);
+    for (const bad of ["01aryz6s41tsv4rrffq69g5fav", "81ARYZ6S41TSV4RRFFQ69G5FAV", "01ARYZ6S41TSV4RRFFQ69G5FA", "01ARYZ6S41TSV4RRFFQ69G5FAI", 42, null]) expect(isUlid(bad)).toBe(false);
   });
 });

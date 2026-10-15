@@ -88,11 +88,18 @@ jobs:
   # test host (label tavrn-e2e) with the node binary copied out of the node's container image, only on pushes to main
   # and by hand (never for pull requests: a self-hosted runner executes the code it checks out). Additionally gated by
   # the variable BOT_NODE_TESTS until the node image exists (docs/GITHUB.md).
+  # The organization's trust rule for the self-hosted runners (just-tavrn/.github route.yml): never for forks,
+  # Dependabot or dependabot/* branches, even when a person dispatches the run (the runner executes the code).
+  route:
+    if: ${{ vars.CI_ENABLED == 'true' && vars.BOT_NODE_TESTS == 'true' && github.event_name != 'pull_request' }}
+    uses: just-tavrn/.github/.github/workflows/route.yml@main
+    with:
+      runner: tavrn-e2e
+
   bot-node:
     name: Bot integration tests (real nodes)
-    # Never for Dependabot or dependabot/* branches, even when a person dispatches the run (the runner executes the code).
-    needs: changes
-    if: ${{ vars.CI_ENABLED == 'true' && vars.BOT_NODE_TESTS == 'true' && github.event_name != 'pull_request' && github.actor != 'dependabot[bot]' && !startsWith(github.ref, 'refs/heads/dependabot/') && needs.changes.outputs.code == 'true' }}
+    needs: [changes, route]
+    if: ${{ vars.CI_ENABLED == 'true' && vars.BOT_NODE_TESTS == 'true' && github.event_name != 'pull_request' && needs.route.outputs.trusted == 'true' && needs.changes.outputs.code == 'true' }}
     runs-on: [self-hosted, tavrn-e2e]
     timeout-minutes: 30
     permissions:
@@ -146,3 +153,9 @@ jobs:
       - name: Clean up
         if: ${{ always() }}
         run: rm -rf "$RUNNER_TEMP/tavrn-bin" "$RUNNER_TEMP/gitconfig"
+
+  shared-scripts:
+    # The copies of the organization's shared scripts (SPDX check, publication check, labels, JS licenses) are the
+    # source in just-tavrn/.github apart from their SPDX line (its docs/GITHUB.md "Shared scripts").
+    if: ${{ vars.CI_ENABLED == 'true' }}
+    uses: just-tavrn/.github/.github/workflows/shared-scripts.yml@main

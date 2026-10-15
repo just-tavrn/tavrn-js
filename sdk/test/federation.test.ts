@@ -258,6 +258,38 @@ describe("discovery", () => {
     await discoverNode("home.example", { fetchImpl, proxy });
     expect(proxy).toHaveBeenCalled();
   });
+
+  it("stops reading a discovery document at the size cap (a hostile domain cannot fill the memory)", async () => {
+    let pulled = 0;
+    const endless = () =>
+      new ReadableStream<Uint8Array>({
+        pull(c) {
+          pulled += 1;
+          c.enqueue(new Uint8Array(16 * 1024).fill(0x20));
+        },
+      });
+    const fetchImpl = (async () => new Response(endless(), { status: 200 })) as unknown as typeof fetch;
+    const proxy = vi.fn(async () => doc());
+    await discoverNode("home.example", { fetchImpl, proxy });
+    expect(proxy).toHaveBeenCalled();
+    expect(pulled).toBeLessThanOrEqual(6);
+    // A declared length above the cap is refused before reading.
+    pulled = 0;
+    const declared = (async () => new Response(endless(), { status: 200, headers: { "Content-Length": String(512 * 1024 * 1024) } })) as unknown as typeof fetch;
+    await expect(discoverNode("home.example", { fetchImpl: declared })).rejects.toMatchObject({ code: "federation.peer_unreachable" });
+    expect(pulled).toBeLessThanOrEqual(1);
+  });
+
+  it("gives up on a domain that does not answer within the timeout", async () => {
+    const hang = ((_url: string, init: RequestInit) =>
+      new Promise<Response>((_, reject) => init.signal?.addEventListener("abort", () => reject(init.signal!.reason), { once: true }))) as unknown as typeof fetch;
+    const proxy = vi.fn(async () => doc());
+    const started = Date.now();
+    await discoverNode("home.example", { fetchImpl: hang, proxy, timeoutMs: 30 });
+    expect(proxy).toHaveBeenCalled();
+    await expect(resolveNode("home.example", { fetchImpl: hang, timeoutMs: 30 })).rejects.toMatchObject({ code: "federation.peer_unreachable" });
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
 });
 
 describe("PKCE", () => {

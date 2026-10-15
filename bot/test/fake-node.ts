@@ -30,6 +30,8 @@ export interface Call {
   query: URLSearchParams;
   headers: Record<string, string>;
   body: unknown;
+  /** The request's abort signal (deadlines). */
+  signal?: AbortSignal;
 }
 
 const ANSWER = Symbol("answer");
@@ -139,7 +141,7 @@ export class FakeNode {
     for (const [k, v] of Object.entries((init?.headers ?? {}) as Record<string, string>)) headers[k.toLowerCase()] = v;
     let body: unknown = init?.body;
     if (typeof body === "string" && headers["content-type"]?.includes("json")) body = JSON.parse(body);
-    const call: Call = { method: init?.method ?? "GET", path: url.pathname, query: url.searchParams, headers, body };
+    const call: Call = { method: init?.method ?? "GET", path: url.pathname, query: url.searchParams, headers, body, signal: init?.signal ?? undefined };
     this.calls.push(call);
     for (const r of this.routes) {
       if (r.method !== call.method) continue;

@@ -133,6 +133,31 @@ describe("HookVerifier", () => {
     expect(node.state.fetches).toBe(1);
   });
 
+  it("reads the node's keys with a size cap and a timeout", async () => {
+    const k = await keyPair("k1");
+    const pulls: number[] = [];
+    const huge = (async () => {
+      const n = pulls.push(0) - 1;
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          pull(c) {
+            pulls[n]! += 1;
+            c.enqueue(new Uint8Array(16 * 1024).fill(0x20));
+          },
+        }),
+        { status: 200 },
+      );
+    }) as unknown as typeof fetch;
+    const v = new HookVerifier({ node: NODE, applicationId: APP, url: URL, fetch: huge, now: () => NOW });
+    expect(await v.verify({ headers: { "tavrn-signature": await k.sign(await claims(body)) }, body })).toEqual({ ok: false, reason: "keys_unavailable" });
+    // Every fetch (the first one and the refetch for the unknown key) stops at the cap.
+    expect(pulls.length).toBeGreaterThan(0);
+    for (const p of pulls) expect(p).toBeLessThanOrEqual(6);
+    const hang = ((_url: string, init: RequestInit) => new Promise<Response>((_, reject) => init.signal?.addEventListener("abort", () => reject(init.signal!.reason), { once: true }))) as unknown as typeof fetch;
+    const slow = new HookVerifier({ node: NODE, applicationId: APP, url: URL, fetch: hang, now: () => NOW, timeoutMs: 30 });
+    expect(await slow.verify({ headers: { "tavrn-signature": await k.sign(await claims(body)) }, body })).toEqual({ ok: false, reason: "keys_unavailable" });
+  });
+
   it("answers keys_unavailable when the node cannot be reached", async () => {
     const k = await keyPair("k1");
     const failing = (async () => new Response("nope", { status: 503 })) as typeof fetch;

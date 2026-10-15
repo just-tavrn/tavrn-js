@@ -8,5 +8,6 @@ import { defineConfig } from "@hey-api/openapi-ts";
 export default defineConfig({
   input: "../protocol/openapi.json",
   output: process.env.TAVRN_SDK_GENERATED_DIR || "src/generated",
-  plugins: ["@hey-api/typescript", "@hey-api/client-fetch"],
+  // Types only: the hand-written TavrnApi is the client (one request layer with refresh, timeouts and size caps).
+  plugins: ["@hey-api/typescript"],
 });

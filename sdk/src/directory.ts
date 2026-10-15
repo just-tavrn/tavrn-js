@@ -8,6 +8,7 @@
  * member count, whichever node relayed the entry. Clients prefer the signed values.
  */
 import type { DirectoryRoom, PublicKeyInfo } from "./generated/types.gen";
+import { decodeJsonPart as decodeJson } from "./jwt";
 import { b64urlDecode } from "./webauthn";
 
 export const LISTING_AUDIENCE = "tavrn-directory";
@@ -44,21 +45,6 @@ export interface VerifyOptions {
   subtle?: SubtleCrypto;
 }
 
-/** UTF-8 bytes → string, without TextDecoder (whose typed-array realm checks differ between runtimes). */
-function utf8(bytes: Uint8Array): string {
-  let escaped = "";
-  for (const b of bytes) escaped += `%${b.toString(16).padStart(2, "0")}`;
-  return decodeURIComponent(escaped);
-}
-
-function decodeJson(part: string): Record<string, unknown> | null {
-  try {
-    const value: unknown = JSON.parse(utf8(b64urlDecode(part)));
-    return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
-  } catch {
-    return null;
-  }
-}
 
 function decodeBytes(part: string): Uint8Array<ArrayBuffer> | null {
   try {

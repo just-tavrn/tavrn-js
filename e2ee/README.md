@@ -63,7 +63,7 @@ sign in again; false while locked). Errors: `E2eeError` with `code` (`recovery_k
 MlsDeps)` with the node API injected (`MlsApi`: `node(domain)` → `MlsNodeApi` delivery service of the hosting
 node, `keys(address)` from the user's home node, backups on the own home node; `mlsApiOf({ home, node, keys })`
 adapts `@tavrn/sdk` clients) and persistence injected (`persist`, `savePins`, `saveMeta`, `saveVerified`).
-`openMlsManager(store, { api, address, deviceId, homeDomain, onEvent?, backupDelayMs?, tabs? })` wires it to a
+`openMlsManager(store, { api, address, deviceId, homeDomain, onEvent?, onError?, backupDelayMs?, tabs? })` wires it to a
 `KeyStore` (secrets `PINS`, `META`, `VERIFIED`) and returns null when the device has no MLS client yet.
 Conversation ids are qualified (`qualify(domain, ulid)`, `splitQualified`). Methods:
 
@@ -101,6 +101,16 @@ Conversation ids are qualified (`qualify(domain, ulid)`, `splitQualified`). Meth
   has `keyPackages`, see below).
 
 Events (`onEvent`): `epoch`, `rejoined`, `removed`, `added`, `key_changed`, `key_rotated`, `verification`.
+Failed background writes of the bookkeeping (`saveMeta`, which nothing waits for) go to `onError({ operation,
+error, consecutive })` (`console.error` without it); a caller that cannot run without its state stops after a few
+in a row (the bot runtime does, with `BotError("state_unwritable")`).
+
+`decrypt` failures (`Decrypted.reason`): `missing_key`, `bad_signature`, `unknown_device` (not attested, or the
+author's leaf in the group carries another key than the attested one), `replay`, `invalid`, `envelope_mismatch`,
+`locked`, and `retry`: the author's devices could not be looked up (network, the author's node, a rate limit). Results
+are cached for the session (the least recently used of at most `DECRYPT_CACHE_LIMIT` go first, keyed by message id
+with a fingerprint of the ciphertext), except `missing_key` and `retry`, which are tried again on the next call;
+message nonces for the replay rule are kept for the last `NONCE_WINDOW` messages.
 
 **Tabs of one browser** (`tabs.ts`, option `tabs` of `openMlsManager`) — the tabs of a browser profile share one
 IndexedDB store and so one MLS state. Without coordination every tab keeps its own copy in memory and writes it:

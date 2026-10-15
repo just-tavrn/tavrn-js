@@ -34,7 +34,8 @@ against a real node.
 | Member join / leave events | PROTOCOL.md §6 | `members:read` | raw `event` only | typed: `memberJoin`, `memberLeave` |
 | Moderation: timeout, kick, ban, unban, ban list, audit log | MODERATION.md, APPLICATIONS.md §2.4 | `moderation` | missing | typed: `timeout()`, `kick()`, `ban()`, `unban()`, `bans()`, `auditLog()` |
 | Moderation: purge, nickname moderation | MODERATION.md | `moderation` | missing | raw: `bot.api(node).rooms.purge`, `.members.moderateProfile` |
-| Reports (read or act) | MODERATION.md §1 | — | closed (`report.bot_forbidden`) | closed; proposal tavrn-protocol#45 |
+| Reports: the room's inbox (read-only, metadata only; reporter as a pseudonym), report events | MODERATION.md §1.4a, §1.5 | `moderation` + `moderate_members` in the room | closed (`report.bot_forbidden`) | typed: `reports()`, `report()`, `report` / `onReport()` (tavrn-protocol#45) |
+| Reports: create, triage, action shortcuts, forward, delete | MODERATION.md §1 | — | closed (`report.bot_forbidden`) | closed by design: acting on reports stays with people |
 | Auto-moderation rules | MODERATION.md §2 | — | closed (not in the route table) | closed |
 | Presence: status, custom status, activity | APPLICATIONS.md §7.1, PROTOCOL.md §6a | `presence` | missing | typed: `setPresence()`, `setActivity()`, `clearActivity()` (every connected node) |
 | Presence of others | PROTOCOL.md §6a | `members:read` | missing | raw: `bot.api(node).presence.list()` |
@@ -44,7 +45,7 @@ against a real node.
 | Voice moderation: mute, move, disconnect | VOICE.md §7 | `moderation` | missing | raw: `bot.api(node).voice.serverMute/move/disconnect` |
 | Room management: channels, roles, overrides, invites, emojis | APPLICATIONS.md §2.4 | `rooms:manage` | missing | raw: `bot.api(node).channels/roles/invites/emojis` |
 | Webhooks: create, list, reset, delete (management) | APPLICATIONS.md §6.1 | `webhooks:manage` | missing | raw: `bot.api(node).webhooks` |
-| Files channels | FILES.md | — | closed (`FILES.md` §2: not in the route table) | closed; proposal tavrn-protocol#44 |
+| Files channels: list, download, upload (bytes or a file on disk), folders, delete; `files.update` events | FILES.md §3 "Bots", §8 | `messages:read` / `messages:write` (others' entries: `rooms:manage`) | closed (`FILES.md` §2: not in the route table) | typed: `bot.files.list()`, `get()`, `download()`, `upload()`, `createFolder()`, `delete()`, event `files` (encrypted channels: records and chunks through `@tavrn/e2ee`); rename/move raw: `bot.api(node).files.update`; storage backend closed |
 | Whiteboard | WHITEBOARD.md | `whiteboard` | missing | raw (no drawing support in the runtime) |
 | Hook requests (interactions URL, subscriptions) | APPLICATIONS.md §6.3 | — | typed (`verifyHookRequest`) | typed |
 | Token expiry / rotation | APPLICATIONS.md §2.2 | always | typed (`tokenExpiring`, `rotateToken`) | typed |

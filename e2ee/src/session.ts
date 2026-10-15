@@ -25,6 +25,8 @@ export interface OpenMlsOptions {
   /** Domain of this user's home node. */
   homeDomain: string;
   onEvent?: MlsDeps["onEvent"];
+  /** Failed background writes of the bookkeeping (see {@link MlsDeps.onError}). */
+  onError?: MlsDeps["onError"];
   backupDelayMs?: number;
   /**
    * Browsers: coordinate the MLS state with the other tabs of this browser profile that open the same account
@@ -97,7 +99,9 @@ export async function openMlsManager(store: KeyStore, opts: OpenMlsOptions): Pro
           stale = true;
         },
         event: (e) => {
-          void refresh().then(() => opts.onEvent?.(e as MlsEvent));
+          void refresh()
+            .then(() => opts.onEvent?.(e as MlsEvent))
+            .catch(() => undefined);
         },
       })
     : null;
@@ -108,9 +112,19 @@ export async function openMlsManager(store: KeyStore, opts: OpenMlsOptions): Pro
     resolveManager(null);
     return null;
   }
-  const pins = await readJsonSecret<Record<string, Pin>>(store, PINS, {});
-  const meta = await readJsonSecret<MlsMeta>(store, META, { convs: {} });
-  const verified = await readJsonSecret<Record<string, VerifiedContact>>(store, VERIFIED, {});
+  let pins: Record<string, Pin>;
+  let meta: MlsMeta;
+  let verified: Record<string, VerifiedContact>;
+  try {
+    // Pins and verified contacts must not reset silently (every changed key would be trusted again, TOFU).
+    pins = await readJsonSecret<Record<string, Pin>>(store, PINS, {}, { strict: true });
+    meta = await readJsonSecret<MlsMeta>(store, META, { convs: {} });
+    verified = await readJsonSecret<Record<string, VerifiedContact>>(store, VERIFIED, {}, { strict: true });
+  } catch (e) {
+    tabs?.close();
+    resolveManager(null);
+    throw e;
+  }
   const own = { key: await ownIdentityPublicKey(store) };
   const link: MlsTabLink | undefined = tabs
     ? {
@@ -148,6 +162,7 @@ export async function openMlsManager(store: KeyStore, opts: OpenMlsOptions): Pro
       opts.onEvent?.(e);
       if (SHARED_EVENTS.has(e.type)) tabs?.notifyEvent(e);
     },
+    onError: opts.onError,
     backupDelayMs: opts.backupDelayMs,
     tabs: link,
   });

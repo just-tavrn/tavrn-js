@@ -197,6 +197,20 @@ describe("FileKeyStore", () => {
     expect(readdirSync(dir)).toEqual([STATE_FILE]);
   });
 
+  it("coalesces a burst of changes into few file writes, each caller resolved once its change is on disk", async () => {
+    const dir = freshDir();
+    const store = new FileKeyStore(dir);
+    await store.saveMaster(ALICE, DEV, master());
+    const files = () => (store as unknown as { filesWritten: number }).filesWritten;
+    const before = files();
+    await Promise.all(Array.from({ length: 25 }, (_, i) => store.putSecret(`k${i}`, new Uint8Array([i]))));
+    // The first change starts a write, the other 24 share the next one (was: 25 rewrites with 50 fsyncs).
+    expect(files() - before).toBeLessThanOrEqual(2);
+    const again = new FileKeyStore(dir);
+    await again.unlockWithMaster(ALICE, master());
+    for (let i = 0; i < 25; i++) expect(await again.getSecret(`k${i}`)).toEqual(new Uint8Array([i]));
+  });
+
   it("close() waits for pending writes and locks", async () => {
     const dir = freshDir();
     const store = new FileKeyStore(dir);

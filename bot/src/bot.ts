@@ -19,27 +19,39 @@
  */
 import { LocalKeyMismatchError, MlsError, checkPollVote, contentAttachments, decryptAttachment, encryptAttachment, encryptPollVote, ensureDevice, localStatus, mlsApiOf, openMlsManager, parsePoll, pollContent, pollHash, pollVoteContent, qualify, signPlainPollVote, signedAttachments, splitQualified, tallyPoll, verifyPlainAttachment, type ContentAttachment, type Decrypted, type MlsManager, type PlainStatus, type Poll, type PollInput, type PollSelection, type PollTally, type VoteCheck } from "@tavrn/e2ee";
 import { FileKeyStore, StateDirInUseError } from "@tavrn/e2ee/node";
-import { TavrnApi, TavrnApiError, b64urlEncode, newUlid, resolveNode, type Attachment, type AuditEntry, type Ban, type Channel, type CommandDefinition, type CommandSet, type ConversationRequest, type CreateMessageRequest, type Member, type Message, type MyPresence, type NodeEndpoints, type PollVote, type Profile, type Room, type RoomDetail, type SearchQuery, type SearchResponse, type TavrnEvent, type Thread, type ThreadListQuery, type User, type UserKeys, type UserPrivate, type WellKnown } from "@tavrn/sdk";
+import { TavrnApi, TavrnApiError, b64urlEncode, newUlid, resolveNode, type AppReport, type AppReportList, type Attachment, type AuditEntry, type Ban, type Channel, type CommandDefinition, type CommandSet, type ConversationRequest, type CreateMessageRequest, type Member, type Message, type MyPresence, type NodeEndpoints, type PollVote, type Profile, type Room, type RoomDetail, type SearchQuery, type SearchResponse, type TavrnEvent, type Thread, type ThreadListQuery, type User, type UserKeys, type UserPrivate, type WellKnown } from "@tavrn/sdk";
 import { threadTitle } from "./threads";
+import { BotFiles, type FilesEvent } from "./files";
 import { CommandRouter, type CommandCrypto, type CommandHandler, type InvokeContext, type ReplyContent } from "./commands";
 import { ComponentRouter, type ComponentHandler, type Matcher } from "./components";
-import { BotError } from "./errors";
+import { ClaimGuard } from "./claims";
+import { ConversationDirectory, type ChannelInfo, type DirectoryLink } from "./directory";
+import { BotError, botErrorOf } from "./errors";
 import { createKeyFile, defaultKeyFile, identityKeyOf, readKey } from "./keyfile";
 import { consoleLogger, type BotLogger } from "./logger";
 import { sealUnderPolicy, type GhostPolicy } from "./ghosts";
 import { NodeLink } from "./node-link";
 import { retryingFetch, type RetryOptions } from "./ratelimit";
 import { MessageTracker, validReaction } from "./reactions";
-import { MAX_ATTACHMENTS, asFile, uploadCategory, type BotFile, type DownloadedFile } from "./uploads";
-import { activityRequest, banSubject, checkContent, presenceRequest, reason as checkReason, timeoutMinutes, ulid, voiceStatus, type ActivityInput, type PresenceInput } from "./validate";
+import { MAX_ATTACHMENTS, asFile, type BotFile, type DownloadedFile } from "./uploads";
+import { activityRequest, banSubject, checkContent, mentionList, normalizeContent, presenceRequest, reason as checkReason, timeoutMinutes, ulid, voiceStatus, type ActivityInput, type PresenceInput, reportQuery, type ReportStatus } from "./validate";
 import { appTokenClaims, type AppTokenClaims } from "./token";
+
+/** Failed background writes of the encryption bookkeeping in a row after which the bot stops (`state_unwritable`). */
+const MLS_SAVE_FAILURES_FATAL = 3;
+/** Wait before the second try of a message whose author's devices could not be looked up (reason `retry`). */
+const DECRYPT_RETRY_MS = 1000;
 
 export const BOT_VERSION = "0.2.1";
 /** Default state directory (`TAVRN_BOT_STATE_DIR`, APPLICATIONS.md §3.3). */
 export const DEFAULT_STATE_DIR = ".tavrn-state";
 /** Channel kinds whose MLS groups the bot joins (voice groups only carry frame keys). */
-export const JOINABLE_KINDS = new Set(["text", "announcement", "forum"]);
+export const JOINABLE_KINDS = new Set(["text", "announcement", "forum", "files"]);
 const READY_TIMEOUT_MS = 30_000;
+const REQUEST_TIMEOUT_MS = 30_000;
+const STOP_TIMEOUT_MS = 30_000;
+/** Largest keys document read from a node the bot has no session on (FEDERATION.md §3.5). */
+const KEYS_MAX_BYTES = 1024 * 1024;
 const MAINTENANCE_MS = 10 * 60 * 1000;
 
 export interface BotOptions {
@@ -88,6 +100,14 @@ export interface BotOptions {
    * hands every `429` to the caller at once.
    */
   rateLimit?: RetryOptions | false;
+  /**
+   * Deadline of one API request in milliseconds (default 30 s): a node that does not answer in time fails the call
+   * with `TavrnApiError` `network.timeout` instead of stalling the bot (also inside the encryption queue). The waits of
+   * {@link BotOptions.rateLimit} come on top. File transfers have their own, longer deadline (10 minutes).
+   */
+  requestTimeoutMs?: number;
+  /** How long `stop()` waits for running handlers and background work (default 30 s); then it stops anyway. */
+  stopTimeoutMs?: number;
   /** WebSocket implementation (Node.js 20 without `--experimental-websocket`: `import WebSocket from "ws"`). */
   WebSocketImpl?: typeof WebSocket;
   fetchImpl?: typeof fetch;
@@ -186,6 +206,28 @@ export interface ReactionEvent {
   encrypted: boolean;
   /** The message envelope after the change (content not decrypted; use {@link Bot.messages} for it). */
   message: Message;
+}
+
+/**
+ * `report.create` / `report.update` (MODERATION.md §1.4a, §1.5; scope `moderation` and `moderate_members` in the room):
+ * a report of a room the bot moderates was made or changed. The node tells no reason, evidence or reporter here; read
+ * the metadata with {@link Bot.report}.
+ */
+export interface ReportEvent {
+  node: string;
+  /** `create`: a new report; `update`: triaged, acted on or deleted. */
+  action: "create" | "update";
+  reportId: string;
+  roomId: string | null;
+  /** `open` for a new report; after an update `open`, `resolved`, `dismissed` or `deleted`. */
+  status: string;
+  /** `message`, `user` or `room` (`create` only, null for `update`). */
+  kind: string | null;
+  /** The category (`create` only, null for `update`). */
+  category: string | null;
+  /** `user` or `automod` (`create` only, null for `update`). */
+  source: string | null;
+  createdAt: string | null;
 }
 
 /** `message.delete`: a message was deleted (by its author or a moderator). */
@@ -363,23 +405,18 @@ export interface BotEvents {
   memberLeave: [MemberEvent];
   /** A thread was started, changed (title, archive, lock, counters) or deleted. */
   thread: [ThreadEvent];
+  /** A report of a room the bot moderates was made or changed (`moderation`, `moderate_members`; metadata only). */
+  report: [ReportEvent];
   /** A message request (somebody who is not the owner opened a DM with the bot): answer it with `acceptDm`/`declineDm`. */
   dmRequest: [DmRequestEvent];
+  /** The content of a folder of a files channel changed (`files.update`, `messages:read`): list it again with `bot.files`. */
+  files: [FilesEvent];
   /** Every WebSocket event of every node, unchanged (for events the runtime does not interpret). */
   event: [{ node: string; event: TavrnEvent }];
   error: [Error];
 }
 
 type Listener<A extends unknown[]> = (...args: A) => void | Promise<void>;
-
-interface ChannelInfo {
-  node: string;
-  roomId: string;
-  id: string;
-  kind: string;
-  encrypted: boolean;
-  noBots: boolean;
-}
 
 /** The backup store of a bot without `historyBackup`: lists nothing, has nothing, keeps nothing. */
 const NO_BACKUPS = {
@@ -397,15 +434,6 @@ function code(e: unknown): string | undefined {
   return e instanceof TavrnApiError ? e.code : undefined;
 }
 
-function normalizeContent(content: ReplyContent): Record<string, unknown> {
-  if (typeof content === "string") return { type: "text", body: content };
-  if (!content || typeof content !== "object" || Array.isArray(content)) throw new TypeError("content must be text or a content object");
-  return content;
-}
-
-function mentionList(list: string[] | undefined): string[] {
-  return [...new Set((list ?? []).map((a) => a.trim().toLowerCase()).filter(Boolean))];
-}
 
 export class Bot {
   readonly logger: BotLogger;
@@ -415,9 +443,13 @@ export class Bot {
   private readonly components: ComponentRouter;
   private readonly links = new Map<string, NodeLink>();
   private readonly connecting = new Map<string, Promise<NodeLink | null>>();
-  private readonly channels = new Map<string, ChannelInfo>();
-  /** DMs: whether they are encrypted (always, on current nodes) and their members. */
-  private readonly direct = new Map<string, { encrypted: boolean; members: string[] }>();
+  /** Room channels and DMs the bot knows, per node. */
+  private readonly dir: ConversationDirectory;
+  private readonly channels: Map<string, ChannelInfo>;
+  /** KeyPackage claims for DM members' devices: no repeated claims while a device has none (ENCRYPTION.md §3.2). */
+  private readonly claimGuard = new ClaimGuard();
+  /** Running resyncs per node; a request during one runs it once more afterwards. */
+  private readonly syncs = new Map<string, { again: boolean; done: Promise<void> }>();
   private readonly tracker = new MessageTracker();
   /** Nodes announcing `threads.client_ids` (PROTOCOL.md §7e), per domain. */
   private readonly clientIds = new Map<string, Promise<boolean>>();
@@ -435,14 +467,38 @@ export class Bot {
   private starting: Promise<void> | null = null;
   private state: "new" | "starting" | "running" | "stopping" | "stopped" = "new";
   private allowInsecure: boolean;
+  /** Deadline of API requests: the request itself plus the longest rate-limit waits. */
+  private readonly requestTimeoutMs: number;
+  /** Files channels (FILES.md §3 "Bots"): list, download, upload, folders, delete; encrypted where the channel is. */
+  readonly files: BotFiles;
 
   constructor(private readonly opts: BotOptions) {
     this.logger = opts.logger ?? consoleLogger();
     this.token = opts.token.trim();
     this.commands = new CommandRouter({ logger: this.logger, autoDeferMs: opts.autoDeferMs });
     this.components = new ComponentRouter({ logger: this.logger, autoDeferMs: opts.autoDeferMs });
+    this.dir = new ConversationDirectory({ logger: this.logger, onRoomLoaded: (link, channels) => this.joinEager(link, channels) });
+    this.channels = this.dir.channels;
     this.allowInsecure = opts.allowInsecure ?? /^http:\/\//i.test(opts.node.trim());
     this.fetchImpl = opts.rateLimit === false ? opts.fetchImpl : retryingFetch(opts.fetchImpl ?? ((input, init) => fetch(input, init)), { logger: this.logger, ...opts.rateLimit });
+    const waits = opts.rateLimit === false ? 0 : (opts.rateLimit?.retries ?? 3) * (opts.rateLimit?.maxWaitMs ?? 30_000);
+    this.requestTimeoutMs = (opts.requestTimeoutMs ?? REQUEST_TIMEOUT_MS) + waits;
+    this.files = new BotFiles({
+      target: (c) => {
+        const t = this.target(c);
+        return { q: t.q, domain: t.domain, id: t.id, api: t.link.api };
+      },
+      channel: async (q) => {
+        const c = await this.channelOf(this.target(q).link, q).catch((e: unknown) => {
+          throw e instanceof BotError ? new BotError("not_member", `The bot cannot view the files channel ${q}`) : e;
+        });
+        return { roomId: c.roomId, kind: c.kind, encrypted: c.encrypted };
+      },
+      join: (q, create) => this.join(q, create),
+      mls: () => this.mls!,
+      seal: (q, fn) => this.seal(q, fn),
+      freshEpoch: (q, fn) => this.freshEpoch(q, fn),
+    });
   }
 
   // ---- Events and commands --------------------------------------------------------------------
@@ -511,9 +567,10 @@ export class Bot {
     return home.api.commands.setMine(commands);
   }
 
+  /** Background work `stop()` waits for; a failure that nothing else handled is logged. */
   private track<T>(p: Promise<T>): Promise<T> {
     this.inflight.add(p);
-    void p.finally(() => this.inflight.delete(p)).catch(() => undefined);
+    void p.finally(() => this.inflight.delete(p)).catch((e: unknown) => this.logger.warn("background task failed", { error: e }));
     return p;
   }
 
@@ -590,6 +647,7 @@ export class Bot {
       clientHeader: `tavrn-bot/${BOT_VERSION}`,
       fetchImpl: this.fetchImpl,
       WebSocketImpl: this.opts.WebSocketImpl,
+      timeoutMs: this.requestTimeoutMs,
       handlers: {
         onEvent: (link: NodeLink, event: TavrnEvent) => this.onEvent(link, event),
         onReady: (link: NodeLink, first: boolean) => {
@@ -610,7 +668,7 @@ export class Bot {
     if (/^https?:\/\//i.test(node)) {
       let doc: WellKnown;
       try {
-        doc = await new TavrnApi({ baseUrl: node, fetchImpl: this.fetchImpl }).node.wellKnown();
+        doc = await new TavrnApi({ baseUrl: node, fetchImpl: this.fetchImpl, timeoutMs: this.requestTimeoutMs }).node.wellKnown();
       } catch (e) {
         throw new BotError("node_invalid", `${node} is not reachable or not a tavrn node`, { cause: e });
       }
@@ -696,6 +754,15 @@ export class Bot {
       homeDomain: claims.iss,
       backupDelayMs: this.opts.backupDelayMs,
       onEvent: (e) => log.debug("mls", { ...e }),
+      onError: (e) => {
+        log.error("the encryption bookkeeping could not be saved", { operation: e.operation, consecutive: e.consecutive, error: e.error });
+        // A state directory that stays unwritable (full disk, removed, permissions): stop instead of running on with
+        // encryption state that is not kept. A single failure is written again with the next change.
+        if (e.consecutive >= MLS_SAVE_FAILURES_FATAL && (this.state === "running" || this.state === "starting")) {
+          this.emit("error", new BotError("state_unwritable", "The bot's state directory cannot be written; the bot stops", { cause: e.error }));
+          void this.stop();
+        }
+      },
     });
     if (!mls) throw new Error("the MLS client state is missing after the device setup");
     this.mls = mls;
@@ -763,7 +830,8 @@ export class Bot {
     let client = this.publicClients.get(domain);
     if (!client) {
       const endpoints = await this.resolve(domain);
-      client = new TavrnApi({ baseUrl: endpoints.base, clientHeader: `tavrn-bot/${BOT_VERSION}`, fetchImpl: this.fetchImpl });
+      // Only public keys documents come from here (any author's node): a small answer cap is plenty.
+      client = new TavrnApi({ baseUrl: endpoints.base, clientHeader: `tavrn-bot/${BOT_VERSION}`, fetchImpl: this.fetchImpl, timeoutMs: this.requestTimeoutMs, maxResponseBytes: KEYS_MAX_BYTES });
       this.publicClients.set(domain, client);
     }
     return client.keys.get(username);
@@ -814,44 +882,61 @@ export class Bot {
     return running;
   }
 
-  /** After connecting or a gap: Welcomes, the rooms and their channels, eager joins and catch-up. */
-  private async syncNode(link: NodeLink): Promise<void> {
+  /**
+   * After connecting or a gap: Welcomes, the rooms and their channels, eager joins and catch-up. Single flight per
+   * node: a resync requested while one runs (a flapping connection, `ready` and `resync` back to back) runs it once
+   * more afterwards instead of overlapping.
+   */
+  private syncNode(link: NodeLink): Promise<void> {
+    const running = this.syncs.get(link.domain);
+    if (running) {
+      running.again = true;
+      return running.done;
+    }
+    const sync = { again: false, done: Promise.resolve() };
+    sync.done = (async () => {
+      try {
+        do {
+          sync.again = false;
+          await this.syncNodeOnce(link);
+        } while (sync.again && this.state !== "stopping" && this.state !== "stopped");
+      } finally {
+        this.syncs.delete(link.domain);
+      }
+    })();
+    this.syncs.set(link.domain, sync);
+    return sync.done;
+  }
+
+  private async syncNodeOnce(link: NodeLink): Promise<void> {
     const mls = this.mls;
     if (!mls || this.state === "stopping" || this.state === "stopped") return;
     await mls.processWelcomes(link.domain).catch((e: unknown) => this.logger.warn("Welcomes could not be processed", { node: link.domain, error: e }));
-    let rooms: { id: string }[];
     try {
-      rooms = await link.api.rooms.list();
+      await this.dir.refreshRooms(link);
     } catch (e) {
       this.logger.warn("rooms could not be listed", { node: link.domain, error: e });
       return;
     }
-    for (const room of rooms) await this.loadRoom(link, room.id);
-    for (const q of this.channels.keys()) {
-      if (q.startsWith(`${link.domain}/`) && mls.hasGroup(q)) await mls.catchUp(q).catch(() => undefined);
+    // Commits of the gap are lost with its events: every group of the node catches up (the channel list carries no
+    // epoch to tell which ones are behind). The MLS queue runs them one after another.
+    for (const q of [...this.channels.keys()]) {
+      if (q.startsWith(`${link.domain}/`) && mls.hasGroup(q)) await mls.catchUp(q).catch((e: unknown) => this.logger.debug("catch-up failed", { conversation: q, error: e }));
     }
   }
 
   /** Reads a room's channels (the ones the bot can view) and joins their groups when eager. */
-  private async loadRoom(link: NodeLink, roomId: string): Promise<void> {
-    let channels: Channel[];
-    try {
-      channels = (await link.api.rooms.get(roomId)).channels;
-    } catch (e) {
-      this.logger.warn("room could not be loaded", { node: link.domain, room: roomId, error: e });
-      return;
-    }
-    for (const q of [...this.channels.keys()]) if (this.channels.get(q)?.roomId === roomId && q.startsWith(`${link.domain}/`)) this.channels.delete(q);
-    for (const c of channels) this.rememberChannel(link.domain, c);
+  private loadRoom(link: NodeLink, roomId: string): Promise<void> {
+    return this.dir.loadRoom(link, roomId);
+  }
+
+  /** Eager joins of a room's channels (after the directory loaded them). */
+  private async joinEager(link: DirectoryLink, channels: Channel[]): Promise<void> {
     if (this.opts.joinPolicy === "lazy") return;
     for (const c of channels) {
       const q = qualify(link.domain, c.id);
       if (this.eagerTarget(q)) await this.join(q, false);
     }
-  }
-
-  private rememberChannel(node: string, c: Channel) {
-    this.channels.set(qualify(node, c.id), { node, roomId: c.room_id, id: c.id, kind: c.kind, encrypted: !!c.encrypted, noBots: !!c.no_bots_effective });
   }
 
   private eagerTarget(q: string): boolean {
@@ -914,7 +999,7 @@ export class Bot {
       case "channel.update": {
         const c = data as unknown as Channel;
         if (typeof c.id !== "string" || typeof c.room_id !== "string") break;
-        this.rememberChannel(link.domain, c);
+        this.dir.remember(link.domain, c);
         const q = qualify(link.domain, c.id);
         if (this.opts.joinPolicy !== "lazy" && this.eagerTarget(q)) void this.track(this.join(q, false));
         break;
@@ -927,6 +1012,7 @@ export class Bot {
         break;
       case "devices.changed":
         if (mls && typeof data.user === "string") mls.forgetDevices(data.user);
+        if (typeof data.user === "string") this.claimGuard.forget(data.user);
         break;
       case "application.install":
         void this.track(this.onInstall(link, data));
@@ -982,6 +1068,31 @@ export class Bot {
         this.emit("thread", { node: link.domain, action, roomId: data.room_id, conversation: qualify(link.domain, channelId), threadId, thread });
         break;
       }
+      case "files.update": {
+        if (typeof data.room_id !== "string" || typeof data.channel_id !== "string") break;
+        const folderId = typeof data.parent_id === "string" ? data.parent_id : null;
+        this.emit("files", { node: link.domain, conversation: qualify(link.domain, data.channel_id), roomId: data.room_id, channelId: data.channel_id, folderId });
+        break;
+      }
+      case "report.create":
+      case "report.update": {
+        const created = event.type === "report.create";
+        const r = (created ? data.report : data) as Record<string, unknown> | undefined;
+        if (!r || typeof r.id !== "string") break;
+        const str = (v: unknown) => (typeof v === "string" ? v : null);
+        this.emit("report", {
+          node: link.domain,
+          action: created ? "create" : "update",
+          reportId: r.id,
+          roomId: str(r.room_id),
+          status: created ? "open" : (str(r.status) ?? ""),
+          kind: str(r.kind),
+          category: str(r.category),
+          source: str(r.source),
+          createdAt: str(r.created_at),
+        });
+        break;
+      }
       case "conversation.request": {
         const request = data.request as ConversationRequest | undefined;
         const conv = request?.conversation;
@@ -1028,8 +1139,8 @@ export class Bot {
     const node = typeof data.node === "string" && data.node ? data.node : link.domain;
     const roomId = String(data.room_id ?? "");
     this.logger.info("removed from a room", { node, room: roomId, reason: data.reason });
-    for (const [q, c] of [...this.channels]) if (c.node === node && c.roomId === roomId) this.channels.delete(q);
-    if (node !== this.claims?.iss && ![...this.channels.values()].some((c) => c.node === node)) {
+    const stillThere = this.dir.forgetRoom(node, roomId);
+    if (node !== this.claims?.iss && !stillThere) {
       this.links.get(node)?.close();
       this.links.delete(node);
     }
@@ -1077,7 +1188,12 @@ export class Bot {
     let files: (BotAttachment & { crypto: ContentAttachment | null; sha256: string })[];
     if (m.encrypted) {
       if (!mls.hasGroup(q) && !(await this.join(q, false))) return { reason: "not_member" };
-      const d = await mls.decrypt(q, m);
+      let d = await mls.decrypt(q, m);
+      // The author's devices could not be looked up (their node, the network): one more try a moment later.
+      if (!d.ok && d.reason === "retry") {
+        await new Promise((r) => setTimeout(r, DECRYPT_RETRY_MS));
+        d = await mls.decrypt(q, m);
+      }
       if (!d.ok) {
         this.logger.debug("message not decrypted", { conversation: q, message: m.id, reason: d.reason });
         return { reason: d.reason };
@@ -1156,30 +1272,42 @@ export class Bot {
 
   /** An encryption under the bot's ghost policy (see {@link BotOptions.ghostPolicy}). */
   private seal<T>(q: string, fn: () => Promise<T>): Promise<T> {
-    return sealUnderPolicy(this.mls!, q, this.opts.ghostPolicy ?? "strict", this.logger, fn);
+    return sealUnderPolicy(this.mls!, q, this.opts.ghostPolicy ?? "strict", this.logger, fn).catch((e: unknown) => {
+      throw botErrorOf(e, q);
+    });
+  }
+
+  /** A catch-up before a retried write, with the session manager's errors as `BotError`. */
+  private async catchUp(q: string): Promise<void> {
+    await this.mls!.catchUp(q).catch((e: unknown) => {
+      throw botErrorOf(e, q);
+    });
   }
 
   /** `<node>/<id>` for a qualified id, a bare id of the home node, or a received message's conversation. */
   private qualified(conversation: string | { conversation: string }): string {
     const raw = typeof conversation === "string" ? conversation : conversation.conversation;
     const q = raw.includes("/") ? raw : qualify(this.claims!.iss, raw);
-    splitQualified(q);
+    try {
+      splitQualified(q);
+    } catch {
+      throw new RangeError("conversation: a qualified id <node>/<id> or an id of the home node");
+    }
     return q;
   }
 
   /** Whether a conversation is end-to-end encrypted: known channels, else the DM itself. */
   private async isEncrypted(link: NodeLink, q: string, id: string): Promise<boolean> {
-    const known = this.channels.get(q)?.encrypted ?? this.direct.get(q)?.encrypted;
+    const known = this.channels.get(q)?.encrypted ?? this.dir.direct.get(q)?.encrypted;
     if (known !== undefined) return known;
     try {
       const c = await link.api.conversations.get(id);
-      this.direct.set(q, { encrypted: !!c.encrypted, members: (c.members ?? []).map((u) => u.address) });
+      this.dir.rememberDirect(q, { encrypted: !!c.encrypted, members: (c.members ?? []).map((u) => u.address) });
       return !!c.encrypted;
     } catch (e) {
       if (code(e) !== "conversation.not_found" && !(e instanceof TavrnApiError && e.status === 404)) throw e;
     }
-    for (const room of await link.api.rooms.list()) await this.loadRoom(link, room.id);
-    const after = this.channels.get(q);
+    const after = await this.dir.find(link, q);
     if (!after) throw new BotError("not_member", `The bot is not a member of ${q}`);
     return after.encrypted;
   }
@@ -1210,8 +1338,11 @@ export class Bot {
   /** Joins an encrypted conversation's group before writing; in DMs also adds the members' new devices (§4.2). */
   private async prepareEncrypted(q: string): Promise<void> {
     if (!(await this.join(q, true))) throw new BotError("not_member", `The bot could not join the encryption group of ${q}`);
-    const dm = this.direct.get(q);
-    if (dm?.members.length) await this.mls!.addMissingDevices(q, dm.members).catch((e: unknown) => this.logger.warn("devices of the DM could not be added", { conversation: q, error: e }));
+    const dm = this.dir.direct.get(q);
+    if (dm?.members.length) {
+      const own = `${this.me!.address}/${this.claims!.dev}`;
+      await this.claimGuard.addMissing(this.mls!, q, dm.members, own).catch((e: unknown) => this.logger.warn("devices of the DM could not be added", { conversation: q, error: e }));
+    }
   }
 
   /** Runs an encrypted write once more after catching up when the node says the epoch is stale (ENCRYPTION.md §5.3). */
@@ -1220,7 +1351,7 @@ export class Bot {
       return await post();
     } catch (e) {
       if (!(e instanceof TavrnApiError && e.code === "mls.epoch_stale")) throw e;
-      await this.mls!.catchUp(q);
+      await this.catchUp(q);
       return post();
     }
   }
@@ -1231,14 +1362,14 @@ export class Bot {
     const stored: Attachment[] = [];
     const keys: ContentAttachment[] = [];
     for (const f of files) {
-      const file = await asFile(f);
+      const { file, category } = await asFile(f);
       if (!encrypted) {
         stored.push({ ...(await link.api.attachments.uploadToConversation(id, file, file.name)), spoiler: f.spoiler === true });
         continue;
       }
       // ENCRYPTION.md §6: only ciphertext leaves the bot; the category is declared (PROTOCOL.md §7a).
       const { blob, meta } = await encryptAttachment(file);
-      const up = await link.api.attachments.uploadToConversation(id, blob, "", undefined, uploadCategory(file.name, file.type));
+      const up = await link.api.attachments.uploadToConversation(id, blob, "", undefined, category);
       if (up.sha256 !== meta.sha256) throw new BotError("node_invalid", "The node stored another ciphertext than the bot uploaded");
       stored.push(up);
       keys.push({ id: up.id, ...meta, ...(f.spoiler ? { spoiler: true } : {}) });
@@ -1330,17 +1461,10 @@ export class Bot {
     const mls = this.mls!;
     const content = pollVoteContent(poll, messageId, hash, selection);
     if (!encrypted) return link.api.polls.vote(id, messageId, { content, signature: signPlainPollVote(mls, q, content) });
-    const post = async () => {
+    return this.freshEpoch(q, async () => {
       const sealed = await this.seal(q, () => encryptPollVote(mls, q, content));
       return link.api.polls.vote(id, messageId, { content: sealed.content, epoch: sealed.epoch });
-    };
-    try {
-      return await post();
-    } catch (e) {
-      if (!(e instanceof TavrnApiError && e.code === "mls.epoch_stale")) throw e;
-      await mls.catchUp(q);
-      return post();
-    }
+    });
   }
 
   /** Retracts the bot's vote. */
@@ -1571,11 +1695,7 @@ export class Bot {
 
   /** The room channel behind a conversation (threads exist in room channels only). */
   private async channelOf(link: NodeLink, q: string): Promise<ChannelInfo> {
-    let c = this.channels.get(q);
-    if (!c) {
-      for (const room of await link.api.rooms.list()) await this.loadRoom(link, room.id);
-      c = this.channels.get(q);
-    }
+    const c = await this.dir.find(link, q);
     if (!c) throw new BotError("not_member", "Threads exist in room channels the bot can view only");
     return c;
   }
@@ -1810,6 +1930,35 @@ export class Bot {
   }
 
   /**
+   * The room's reports, newest first (MODERATION.md §1.4a; scope `moderation` and `moderate_members` in the room).
+   * Metadata only: kind, category, the reported user, status, counts, times and the reported message's id; the
+   * reporter is a pseudonym (the same for the same reporter in this room), never the address, and the reason, a
+   * snapshot or released messages are never part of it. `before` = the last report id of the previous page. Bots only
+   * read reports: creating, triage and the action shortcuts stay with people.
+   */
+  async reports(room: RoomRef, query: { status?: ReportStatus; limit?: number; before?: string } = {}): Promise<AppReportList> {
+    const { link, roomId } = this.roomTarget(room);
+    return link.api.reports.roomForApp(roomId, reportQuery(query));
+  }
+
+  /**
+   * One report of a room the bot moderates, in the shape of {@link Bot.reports}. `id` is the report id on `node`
+   * (default: the home node) or qualified as `"<node>/<id>"`, e.g. from a {@link ReportEvent}.
+   */
+  async report(id: string, node?: string): Promise<AppReport> {
+    this.running();
+    const slash = typeof id === "string" ? id.indexOf("/") : -1;
+    const domain = slash > 0 ? id.slice(0, slash) : (node ?? this.claims!.iss);
+    const reportId = ulid("reportId", slash > 0 ? id.slice(slash + 1) : id);
+    return this.linkFor(domain).api.reports.getForApp(reportId);
+  }
+
+  /** Adds a listener for {@link ReportEvent}s (see {@link Bot.reports}); returns a function that removes it. */
+  onReport(listener: (event: ReportEvent) => void | Promise<void>): () => void {
+    return this.on("report", listener);
+  }
+
+  /**
    * Searches a room's plaintext channels (scope `messages:read`, SEARCH.md): the node indexes no encrypted content, so
    * encrypted channels are not searched (`searched` in the answer tells what was).
    */
@@ -1876,7 +2025,7 @@ export class Bot {
     const home = this.home!;
     const c = await home.api.conversations.create({ kind: "dm", members: [user] });
     const q = qualify(home.domain, c.id);
-    this.direct.set(q, { encrypted: !!c.encrypted, members: (c.members ?? []).map((u) => u.address) });
+    this.dir.rememberDirect(q, { encrypted: !!c.encrypted, members: (c.members ?? []).map((u) => u.address) });
     if (c.encrypted) await this.prepareEncrypted(q);
     return q;
   }
@@ -1925,8 +2074,16 @@ export class Bot {
     this.state = "stopping";
     if (this.maintenance) clearInterval(this.maintenance);
     for (const link of this.links.values()) link.close();
-    // Handlers may still send; give them their time (they fail fast once the bot is stopped).
-    for (let i = 0; i < 5 && this.inflight.size; i++) await Promise.allSettled([...this.inflight]);
+    // Handlers may still send; give them their time (they fail fast once the bot is stopped), but not forever.
+    const until = Date.now() + (this.opts.stopTimeoutMs ?? STOP_TIMEOUT_MS);
+    for (let i = 0; i < 5 && this.inflight.size; i++) {
+      const left = until - Date.now();
+      if (left <= 0) break;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([Promise.allSettled([...this.inflight]), new Promise((r) => (timer = setTimeout(r, left)))]);
+      clearTimeout(timer);
+    }
+    if (this.inflight.size) this.logger.warn("stopping while handlers are still running", { running: this.inflight.size });
     const mls = this.mls;
     if (mls) {
       await mls.flushBackups().catch((e: unknown) => this.logger.warn("history backups could not be flushed", { error: e }));

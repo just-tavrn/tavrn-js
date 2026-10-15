@@ -4,6 +4,7 @@
  * (`src/generated`, from the protocol's `openapi.json` via `just generate`). Errors always arrive as `TavrnApiError` with Problem Details.
  */
 import { TavrnApiError, toProblem } from "./errors";
+import { DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_TIMEOUT_MS, DEFAULT_TRANSFER_TIMEOUT_MS, deadline, discard, readText, safePath, transportError, type Deadline } from "./http";
 import type {
   AccountInvite,
   Application,
@@ -197,7 +198,7 @@ import type { BackendInfo, BackendRequest, BackendTest, DeleteResult, FileEntry,
 import type { AdminApplication, AdminApplicationUpdate, ApplicationBlock, ApplicationBlockRequest, InstallIndexEntry, InstallRequest, Installation, PublicApplication } from "./generated/types.gen";
 import type { PeerResolution } from "./generated/types.gen";
 import type { PushRegistration, PushSubscriptionRequest, VapidInfo } from "./generated/types.gen";
-import type { AdminRoom, AutomodRule, AutomodSettings, CreateReportRequest, ModerationReport, ReportActionRequest, ReportActionResult, ReportCreated, ReportList, UpdateReportRequest } from "./generated/types.gen";
+import type { AdminRoom, AppReport, AppReportList, AutomodRule, AutomodSettings, CreateReportRequest, ModerationReport, ReportActionRequest, ReportActionResult, ReportCreated, ReportList, UpdateReportRequest } from "./generated/types.gen";
 import type { AcceptTermsRequest, AccountDeletion, CounterDecision, CounterNoticeRequest, DataSummary, DeleteAccountRequest, DeletionStarted, LegalContact, LegalDocument, LegalTemplate, Notice, NoticeAction, NoticeActionResult, NoticeCreated, NoticeDetail, NoticeRequest, NoticeStatus, TermsStatus, UploaderNotice } from "./generated/types.gen";
 import type { Modal } from "./components";
 import type { Callback, ComponentInvokeRequest, ModalSubmitRequest, CommandApproval, CommandApprovalRequest, CommandApprovalSettings, CommandDefinition, CommandSet, FollowUp, FollowUpResponse, InvokeRequest, InvokeResponse, PaletteCommand, PutCommandSettings, RoomCommand, RoomCommands } from "./generated/types.gen";
@@ -275,9 +276,41 @@ export interface ApiOptions {
    * (e.g. a dialog that calls `auth.reauth`) and resolve true to repeat the request once with the new reauth token.
    */
   onReauthRequired?: (methods: string[]) => Promise<boolean>;
+  /**
+   * Deadline of a request in milliseconds (default 30 s; 0 = none): the answer must be complete by then, otherwise
+   * the request fails with `TavrnApiError` `network.timeout` (status 0). Uploads and downloads of files use
+   * {@link ApiOptions.transferTimeoutMs}.
+   */
+  timeoutMs?: number;
+  /** Deadline of file uploads and downloads (attachments, files channels, backups; default 10 minutes; 0 = none). */
+  transferTimeoutMs?: number;
+  /** Largest JSON answer read (default 32 MiB): a larger one fails with `response.too_large` before it is buffered. */
+  maxResponseBytes?: number;
+  /** Aborts every request of this client (`request.aborted`); {@link TavrnApi.withSignal} scopes one to a task. */
+  signal?: AbortSignal;
 }
 
 type Query = Record<string, string | number | undefined | null>;
+
+/** How {@link TavrnApi} sends one request: JSON (`body`) or raw (`raw`), and what the answer is. */
+interface SendInit {
+  /** JSON body. */
+  body?: unknown;
+  /** Raw body (files, ciphertext), sent unchanged. */
+  raw?: BodyInit;
+  query?: Query;
+  headers?: Record<string, string>;
+  /** Upload progress (XMLHttpRequest where the runtime has it). */
+  onProgress?: (fraction: number) => void;
+  /** Aborts this request (in addition to the client's signal). */
+  signal?: AbortSignal;
+  /** A file transfer: the transfer timeout applies. */
+  transfer?: boolean;
+  /** No credentials, no refresh (public documents such as `/.well-known/tavrn`). */
+  anonymous?: boolean;
+  /** The path is absolute on the node (`/.well-known/tavrn`) instead of below `/api/v1`. */
+  root?: boolean;
+}
 
 /** Filters of `GET /rooms/{room_id}/search` (PROTOCOL.md §7d). Dates: RFC 3339 or `YYYY-MM-DD`. */
 export interface SearchQuery {
@@ -310,6 +343,52 @@ export interface ThreadListQuery {
 export const SEARCH_MARK_START = "\u0001";
 export const SEARCH_MARK_END = "\u0002";
 
+/** Problem Details are small; a refusal is read up to this size. */
+const PROBLEM_MAX_BYTES = 64 * 1024;
+
+/** A signal that aborts when either one does. */
+function anySignal(a: AbortSignal, b: AbortSignal): AbortSignal {
+  const c = new AbortController();
+  for (const s of [a, b]) {
+    if (s.aborted) {
+      c.abort(s.reason);
+      break;
+    }
+    s.addEventListener("abort", () => c.abort(s.reason), { once: true });
+  }
+  return c.signal;
+}
+
+/** Response headers of an XMLHttpRequest. */
+function xhrHeaders(raw: string): Headers {
+  const headers = new Headers();
+  for (const line of raw.trim().split(/[\r\n]+/)) {
+    const at = line.indexOf(":");
+    if (at > 0) headers.append(line.slice(0, at).trim(), line.slice(at + 1).trim());
+  }
+  return headers;
+}
+
+/** An upload with progress through XMLHttpRequest (fetch reports no upload progress), answered as a `Response`. */
+function xhrSend(url: string, method: string, headers: Record<string, string>, body: BodyInit | undefined, onProgress: (fraction: number) => void, signal: AbortSignal | undefined): Promise<Response> {
+  return new Promise<Response>((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason);
+    const xhr = new XMLHttpRequest();
+    xhr.open(method, url);
+    xhr.responseType = "arraybuffer";
+    for (const [k, v] of Object.entries(headers)) xhr.setRequestHeader(k, v);
+    xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
+    xhr.onload = () => {
+      const empty = xhr.status === 204 || xhr.status === 205 || xhr.status === 304;
+      resolve(new Response(empty ? null : (xhr.response as ArrayBuffer), { status: xhr.status, statusText: xhr.statusText, headers: xhrHeaders(xhr.getAllResponseHeaders()) }));
+    };
+    xhr.onerror = () => reject(new TypeError("upload failed"));
+    xhr.onabort = () => reject(signal?.reason ?? new TypeError("upload aborted"));
+    signal?.addEventListener("abort", () => xhr.abort(), { once: true });
+    xhr.send((body ?? null) as XMLHttpRequestBodyInit | null);
+  });
+}
+
 export class TavrnApi {
   private readonly opts: ApiOptions;
 
@@ -327,48 +406,9 @@ export class TavrnApi {
     return (await this.exchange<T>(method, path, { body, query })).data;
   }
 
-  /** Like {@link TavrnApi.request} with extra request headers; also returns the response headers. */
-  async exchange<T>(method: string, path: string, init: { body?: unknown; query?: Query; headers?: Record<string, string> } = {}, retried = false, reauthed = false): Promise<{ data: T; headers: Headers }> {
-    const { body, query } = init;
-    const url = new URL(`${this.baseUrl}/api/v1${path}`, typeof location !== "undefined" ? location.origin : "http://localhost");
-    for (const [k, v] of Object.entries(query ?? {})) if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
-    const headers: Record<string, string> = { Accept: "application/json", ...init.headers };
-    if (body !== undefined) headers["Content-Type"] = "application/json";
-    const token = this.opts.getToken?.();
-    if (token) headers.Authorization = `Bearer ${token}`;
-    if (this.opts.clientHeader) headers["Tavrn-Client"] = this.opts.clientHeader;
-    const reauth = token ? this.opts.reauthToken?.() : null;
-    if (reauth) headers["Tavrn-Reauth"] = reauth;
-    const doFetch = this.opts.fetchImpl ?? fetch;
-    let resp: Response;
-    try {
-      resp = await doFetch(url.toString(), { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
-    } catch (e) {
-      throw new TavrnApiError({ type: "about:blank", title: "Network error", status: 0, detail: e instanceof Error ? e.message : String(e), code: "network.error" });
-    }
-    if (resp.status === 401 && !retried && this.opts.refreshToken && token) {
-      const fresh = await this.opts.refreshToken();
-      if (fresh && fresh !== token) return this.exchange<T>(method, path, init, true, reauthed);
-    }
-    if (resp.status === 204) return { data: undefined as T, headers: resp.headers };
-    const text = await resp.text();
-    let json: unknown = null;
-    if (text) {
-      try {
-        json = JSON.parse(text);
-      } catch {
-        json = null;
-      }
-    }
-    if (!resp.ok) {
-      const problem = toProblem(resp.status, json, resp.statusText);
-      if (resp.status === 403 && problem.code === "auth.reauth_required" && !reauthed && this.opts.onReauthRequired) {
-        const methods = ((problem as { meta?: { methods?: unknown } }).meta?.methods as string[] | undefined) ?? [];
-        if (await this.opts.onReauthRequired(methods)) return this.exchange<T>(method, path, init, retried, true);
-      }
-      throw new TavrnApiError(problem);
-    }
-    return { data: json as T, headers: resp.headers };
+  /** Like {@link TavrnApi.request} with extra request headers and an optional signal; also returns the response headers. */
+  async exchange<T>(method: string, path: string, init: { body?: unknown; query?: Query; headers?: Record<string, string>; signal?: AbortSignal } = {}): Promise<{ data: T; headers: Headers }> {
+    return this.json<T>(method, path, init);
   }
 
   /**
@@ -379,26 +419,125 @@ export class TavrnApi {
     return new TavrnApi({ ...this.opts, getToken: () => token, refreshToken: undefined });
   }
 
-  private authHeaders(): Record<string, string> {
-    const headers: Record<string, string> = {};
-    const token = this.opts.getToken?.();
-    if (token) headers.Authorization = `Bearer ${token}`;
-    if (this.opts.clientHeader) headers["Tavrn-Client"] = this.opts.clientHeader;
-    return headers;
+  /**
+   * The same client with every request bound to `signal` as well (`request.aborted` once it aborts), e.g. for the
+   * requests of one view or task: `api.withSignal(controller.signal).messages.list(…)`.
+   */
+  withSignal(signal: AbortSignal): TavrnApi {
+    const outer = this.opts.signal;
+    return new TavrnApi({ ...this.opts, signal: outer ? anySignal(outer, signal) : signal });
   }
 
-  /** Binary request (backups): returns the response; errors become `TavrnApiError`, 404 can be allowed. */
-  private async binary(method: string, path: string, init: { body?: Uint8Array; headers?: Record<string, string>; allow404?: boolean } = {}): Promise<Response | null> {
-    const doFetch = this.opts.fetchImpl ?? fetch;
+  private get maxResponseBytes(): number {
+    return this.opts.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+  }
+
+  /**
+   * The request layer every route goes through: URL and path check, credentials, client and reauth headers, the
+   * deadline, one refresh on `401`, one re-authentication on `403 auth.reauth_required`, Problem Details as
+   * `TavrnApiError`. Returns a `2xx` answer (or an allowed `404`) whose body the caller reads under `deadline`.
+   */
+  private async send(method: string, path: string, init: SendInit & { allow404?: boolean; accept?: boolean }, retried = false, reauthed = false): Promise<{ resp: Response; deadline: Deadline }> {
+    if (!safePath(path)) throw transportError("request.invalid_path", "an id is empty or a dot segment");
+    const url = new URL(`${this.baseUrl}${init.root ? "" : "/api/v1"}${path}`, typeof location !== "undefined" ? location.origin : "http://localhost");
+    for (const [k, v] of Object.entries(init.query ?? {})) if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
+    const headers: Record<string, string> = init.accept ? { Accept: "application/json", ...init.headers } : { ...init.headers };
+    if (init.body !== undefined) headers["Content-Type"] = "application/json";
+    const token = init.anonymous ? null : this.opts.getToken?.();
+    if (token) headers.Authorization = `Bearer ${token}`;
+    if (this.opts.clientHeader) headers["Tavrn-Client"] = this.opts.clientHeader;
+    const reauth = token ? this.opts.reauthToken?.() : null;
+    if (reauth) headers["Tavrn-Reauth"] = reauth;
+    const body = init.raw ?? (init.body === undefined ? undefined : JSON.stringify(init.body));
+    const ms = init.transfer ? (this.opts.transferTimeoutMs ?? DEFAULT_TRANSFER_TIMEOUT_MS) : (this.opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+    const d = deadline(ms, this.opts.signal, init.signal);
     let resp: Response;
     try {
-      resp = await doFetch(`${this.baseUrl}/api/v1${path}`, { method, headers: { ...this.authHeaders(), ...init.headers }, body: init.body as BodyInit | undefined });
+      if (d.signal?.aborted) throw d.signal.reason;
+      resp =
+        init.onProgress && typeof XMLHttpRequest !== "undefined"
+          ? await xhrSend(url.toString(), method, headers, body, init.onProgress, d.signal)
+          : await (this.opts.fetchImpl ?? fetch)(url.toString(), { method, headers, body, signal: d.signal });
     } catch (e) {
-      throw new TavrnApiError({ type: "about:blank", title: "Network error", status: 0, detail: e instanceof Error ? e.message : String(e), code: "network.error" });
+      d.done();
+      throw d.failure(e);
     }
-    if (resp.status === 404 && init.allow404) return null;
-    if (!resp.ok) throw new TavrnApiError(toProblem(resp.status, await resp.json().catch(() => null), resp.statusText));
-    return resp;
+    if (resp.status === 401 && !retried && token && this.opts.refreshToken) {
+      const fresh = await this.opts.refreshToken().catch(() => null);
+      if (fresh && fresh !== token) {
+        d.done();
+        discard(resp);
+        return this.send(method, path, init, true, reauthed);
+      }
+    }
+    if (resp.ok || (resp.status === 404 && init.allow404)) return { resp, deadline: d };
+    let json: unknown = null;
+    try {
+      const text = await readText(resp, PROBLEM_MAX_BYTES);
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      json = null;
+    } finally {
+      d.done();
+    }
+    const problem = toProblem(resp.status, json, resp.statusText);
+    if (resp.status === 403 && problem.code === "auth.reauth_required" && !reauthed && this.opts.onReauthRequired) {
+      const methods = ((problem as { meta?: { methods?: unknown } }).meta?.methods as string[] | undefined) ?? [];
+      if (await this.opts.onReauthRequired(methods)) return this.send(method, path, init, retried, true);
+    }
+    throw new TavrnApiError(problem);
+  }
+
+  /** {@link TavrnApi.send} and a read of the answer under the same deadline; null for an allowed `404`. */
+  private async receive<T>(method: string, path: string, init: SendInit & { allow404?: boolean; accept?: boolean }, read: (resp: Response) => Promise<T>): Promise<T | null> {
+    const { resp, deadline: d } = await this.send(method, path, init);
+    try {
+      if (!resp.ok) {
+        discard(resp);
+        return null;
+      }
+      return await read(resp);
+    } catch (e) {
+      throw d.failure(e);
+    } finally {
+      d.done();
+    }
+  }
+
+  /** A JSON answer (an empty body or `204` is `undefined`, an unparsable one `null`). */
+  private async json<T>(method: string, path: string, init: SendInit): Promise<{ data: T; headers: Headers }> {
+    const max = this.maxResponseBytes;
+    return (await this.receive(method, path, { ...init, accept: true }, async (resp) => {
+      if (resp.status === 204) {
+        discard(resp);
+        return { data: undefined as T, headers: resp.headers };
+      }
+      const text = await readText(resp, max);
+      let data: unknown = null;
+      if (text) {
+        try {
+          data = JSON.parse(text);
+        } catch {
+          data = null;
+        }
+      }
+      return { data: data as T, headers: resp.headers };
+    }))!;
+  }
+
+  /** A raw body (file, ciphertext) with a JSON answer. */
+  private async rawJson<T>(method: string, path: string, raw: BodyInit, headers: Record<string, string>, opts: { transfer?: boolean; onProgress?: (fraction: number) => void; signal?: AbortSignal } = {}): Promise<T> {
+    return (await this.json<T>(method, path, { raw, headers, ...opts })).data;
+  }
+
+  /** A binary answer as bytes (and its headers); null for `404` when `allow404`. */
+  private async bytes(path: string, opts: { allow404?: boolean; transfer?: boolean; headers?: Record<string, string> } = {}): Promise<{ bytes: Uint8Array; headers: Headers } | null> {
+    return this.receive("GET", path, opts, async (resp) => ({ bytes: new Uint8Array(await resp.arrayBuffer()), headers: resp.headers }));
+  }
+
+  /** A binary answer as a Blob. */
+  private async blob(method: string, path: string, opts: { raw?: BodyInit; headers?: Record<string, string>; transfer?: boolean } = {}): Promise<Blob> {
+    return (await this.receive(method, path, opts, (resp) => resp.blob()))!;
   }
 
   private clipHeaders(name: string, file: Blob, durationMs: number, emoji?: string): Record<string, string> {
@@ -408,79 +547,16 @@ export class TavrnApi {
   }
 
   /** Raw upload to a conversation or channel route (`Tavrn-File-Name` may be empty for ciphertext). */
-  private async uploadTo(url: string, file: Blob, name: string, onProgress?: (fraction: number) => void, category?: string): Promise<Attachment> {
-    const headers: Record<string, string> = { "Content-Type": file.type || "application/octet-stream", "Tavrn-File-Name": encodeURIComponent(name), ...this.authHeaders() };
+  private uploadTo(path: string, file: Blob, name: string, onProgress?: (fraction: number) => void, category?: string): Promise<Attachment> {
+    const headers: Record<string, string> = { "Content-Type": file.type || "application/octet-stream", "Tavrn-File-Name": encodeURIComponent(name) };
     // Encrypted uploads declare their category (PROTOCOL.md §7a); plaintext ones are classified by the node.
     if (category) headers["Tavrn-Upload-Category"] = category;
-    if (typeof XMLHttpRequest !== "undefined" && onProgress) {
-      return new Promise<Attachment>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open("POST", url);
-        for (const [k, v] of Object.entries(headers)) xhr.setRequestHeader(k, v);
-        xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
-        xhr.onload = () => {
-          let json: unknown = null;
-          try {
-            json = JSON.parse(xhr.responseText);
-          } catch {
-            json = null;
-          }
-          if (xhr.status >= 200 && xhr.status < 300) resolve(json as Attachment);
-          else reject(new TavrnApiError(toProblem(xhr.status, json, xhr.statusText)));
-        };
-        xhr.onerror = () => reject(new TavrnApiError({ type: "about:blank", title: "Network error", status: 0, detail: "Upload aborted", code: "network.error" }));
-        xhr.send(file);
-      });
-    }
-    const resp = await (this.opts.fetchImpl ?? fetch)(url, { method: "POST", headers, body: file });
-    const json: unknown = await resp.json().catch(() => null);
-    if (!resp.ok) throw new TavrnApiError(toProblem(resp.status, json, resp.statusText));
-    return json as Attachment;
-  }
-
-  /** Raw POST of a blob with progress (XMLHttpRequest when available) and abort; the answer is JSON. */
-  private async sendBlob<T>(url: string, file: Blob, headers: Record<string, string>, onProgress?: (fraction: number) => void, signal?: AbortSignal): Promise<T> {
-    if (typeof XMLHttpRequest !== "undefined" && onProgress) {
-      return new Promise<T>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open("POST", url);
-        for (const [k, v] of Object.entries(headers)) xhr.setRequestHeader(k, v);
-        xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
-        xhr.onload = () => {
-          let json: unknown = null;
-          try {
-            json = JSON.parse(xhr.responseText);
-          } catch {
-            json = null;
-          }
-          if (xhr.status >= 200 && xhr.status < 300) resolve(json as T);
-          else reject(new TavrnApiError(toProblem(xhr.status, json, xhr.statusText)));
-        };
-        const aborted = () => reject(new TavrnApiError({ type: "about:blank", title: "Aborted", status: 0, detail: "Upload aborted", code: "upload.aborted" }));
-        xhr.onerror = () => reject(new TavrnApiError({ type: "about:blank", title: "Network error", status: 0, detail: "Upload failed", code: "network.error" }));
-        xhr.onabort = aborted;
-        signal?.addEventListener("abort", () => xhr.abort(), { once: true });
-        xhr.send(file);
-      });
-    }
-    const resp = await (this.opts.fetchImpl ?? fetch)(url, { method: "POST", headers, body: file, signal });
-    const json: unknown = await resp.json().catch(() => null);
-    if (!resp.ok) throw new TavrnApiError(toProblem(resp.status, json, resp.statusText));
-    return json as T;
+    return this.rawJson<Attachment>("POST", path, file, headers, { transfer: true, onProgress });
   }
 
   /** Raw upload (images for the media pipeline, design note 4.9): the body is the file, the answer JSON. */
-  private async rawUpload<T>(path: string, file: Blob): Promise<T> {
-    const headers: Record<string, string> = { "Content-Type": file.type || "application/octet-stream", ...this.authHeaders() };
-    let resp: Response;
-    try {
-      resp = await (this.opts.fetchImpl ?? fetch)(`${this.baseUrl}/api/v1${path}`, { method: "PUT", headers, body: file });
-    } catch (e) {
-      throw new TavrnApiError({ type: "about:blank", title: "Network error", status: 0, detail: e instanceof Error ? e.message : String(e), code: "network.error" });
-    }
-    const json: unknown = await resp.json().catch(() => null);
-    if (!resp.ok) throw new TavrnApiError(toProblem(resp.status, json, resp.statusText));
-    return json as T;
+  private rawUpload<T>(path: string, file: Blob): Promise<T> {
+    return this.rawJson<T>("PUT", path, file, { "Content-Type": file.type || "application/octet-stream" });
   }
 
   /**
@@ -512,9 +588,9 @@ export class TavrnApi {
   node = {
     info: () => this.get<NodeInfo>("/node"),
     wellKnown: async (): Promise<WellKnown> => {
-      const resp = await (this.opts.fetchImpl ?? fetch)(`${this.baseUrl}/.well-known/tavrn`);
-      if (!resp.ok) throw new TavrnApiError(toProblem(resp.status, null, resp.statusText));
-      return (await resp.json()) as WellKnown;
+      const doc = (await this.json<WellKnown | null>("GET", "/.well-known/tavrn", { root: true, anonymous: true })).data;
+      if (!doc || typeof doc !== "object") throw new TavrnApiError({ type: "about:blank", title: "Invalid node", status: 0, detail: "no discovery document", code: "federation.peer_invalid" });
+      return doc;
     },
   };
 
@@ -644,8 +720,8 @@ export class TavrnApi {
   admin = {
     overview: () => this.get<AdminOverview>("/admin/overview"),
     users: (query?: { q?: string; limit?: number; after?: string }) => this.get<AdminUser[]>("/admin/users", query),
-    updateUser: (userId: string, req: UpdateUserRequest) => this.patch<AdminUser>(`/admin/users/${userId}`, req),
-    purgeUser: (userId: string, req: PurgeUserRequest) => this.post<PurgeUserResponse>(`/admin/users/${userId}/purge`, req),
+    updateUser: (userId: string, req: UpdateUserRequest) => this.patch<AdminUser>(`/admin/users/${encodeURIComponent(userId)}`, req),
+    purgeUser: (userId: string, req: PurgeUserRequest) => this.post<PurgeUserResponse>(`/admin/users/${encodeURIComponent(userId)}/purge`, req),
     /** Corrects a user's date of birth on request; `null` removes it (the user is asked again). PROTOCOL.md §5e. */
     setDateOfBirth: (userId: string, dateOfBirth: string | null) =>
       this.put<void>(`/admin/users/${encodeURIComponent(userId)}/date-of-birth`, { date_of_birth: dateOfBirth }),
@@ -764,18 +840,18 @@ export class TavrnApi {
 
   /** MLS delivery service of a conversation (ENCRYPTION.md §4.4). */
   mls = {
-    createGroup: (conversationId: string, req: CreateGroupRequest) => this.post<EpochResponse>(`/conversations/${conversationId}/mls/group`, req),
-    groupInfo: (conversationId: string) => this.get<GroupInfoResponse>(`/conversations/${conversationId}/mls/group-info`),
-    postCommit: (conversationId: string, req: CommitRequest) => this.post<EpochResponse>(`/conversations/${conversationId}/mls/commits`, req),
-    log: (conversationId: string, sinceEpoch: number, limit = 100) => this.get<LogPage>(`/conversations/${conversationId}/mls/messages`, { since_epoch: sinceEpoch, limit }),
+    createGroup: (conversationId: string, req: CreateGroupRequest) => this.post<EpochResponse>(`/conversations/${encodeURIComponent(conversationId)}/mls/group`, req),
+    groupInfo: (conversationId: string) => this.get<GroupInfoResponse>(`/conversations/${encodeURIComponent(conversationId)}/mls/group-info`),
+    postCommit: (conversationId: string, req: CommitRequest) => this.post<EpochResponse>(`/conversations/${encodeURIComponent(conversationId)}/mls/commits`, req),
+    log: (conversationId: string, sinceEpoch: number, limit = 100) => this.get<LogPage>(`/conversations/${encodeURIComponent(conversationId)}/mls/messages`, { since_epoch: sinceEpoch, limit }),
     welcomes: () => this.get<WelcomeList>("/mls/welcomes"),
     deleteWelcome: (welcomeId: string) => this.del(`/mls/welcomes/${encodeURIComponent(welcomeId)}`),
     /** Leaves of the conversation's group that must be removed (ENCRYPTION.md §4.7); members only. */
-    pendingRemovals: (conversationId: string) => this.get<PendingRemovalList>(`/conversations/${conversationId}/mls/pending-removals`),
+    pendingRemovals: (conversationId: string) => this.get<PendingRemovalList>(`/conversations/${encodeURIComponent(conversationId)}/mls/pending-removals`),
     /** Pending removals of the caller's own leaves in every conversation of this node. */
     ownPendingRemovals: () => this.get<PendingRemovalList>("/mls/pending-removals"),
     /** Publishes the inbox key of write-only webhooks for an epoch (ENCRYPTION.md §5b; channels with webhooks). */
-    publishInboxKey: (conversationId: string, req: PublishInboxKeyRequest) => this.put<InboxKey>(`/conversations/${conversationId}/inbox-key`, req),
+    publishInboxKey: (conversationId: string, req: PublishInboxKeyRequest) => this.put<InboxKey>(`/conversations/${encodeURIComponent(conversationId)}/inbox-key`, req),
   };
 
   /**
@@ -783,10 +859,10 @@ export class TavrnApi {
    * acknowledgements, and the members of a channel who still wait for keys.
    */
   history = {
-    share: (conversationId: string, req: CreateHistoryShareRequest) => this.post<HistoryShareCreated>(`/conversations/${conversationId}/history-keys`, req),
-    shares: (conversationId: string) => this.get<HistoryShareList>(`/conversations/${conversationId}/history-keys`),
-    ack: (conversationId: string, shareId: string) => this.del(`/conversations/${conversationId}/history-keys/${encodeURIComponent(shareId)}`),
-    pending: (conversationId: string) => this.get<HistoryPendingList>(`/conversations/${conversationId}/history-pending`),
+    share: (conversationId: string, req: CreateHistoryShareRequest) => this.post<HistoryShareCreated>(`/conversations/${encodeURIComponent(conversationId)}/history-keys`, req),
+    shares: (conversationId: string) => this.get<HistoryShareList>(`/conversations/${encodeURIComponent(conversationId)}/history-keys`),
+    ack: (conversationId: string, shareId: string) => this.del(`/conversations/${encodeURIComponent(conversationId)}/history-keys/${encodeURIComponent(shareId)}`),
+    pending: (conversationId: string) => this.get<HistoryPendingList>(`/conversations/${encodeURIComponent(conversationId)}/history-pending`),
   };
 
   /**
@@ -794,16 +870,16 @@ export class TavrnApi {
    * asks for its history; members with `restore_history` approve (then share the keys from their device) or deny.
    */
   historyRequests = {
-    create: (roomId: string, message?: string) => this.post<HistoryRequest>(`/rooms/${roomId}/history-requests`, message ? { message } : {}),
+    create: (roomId: string, message?: string) => this.post<HistoryRequest>(`/rooms/${encodeURIComponent(roomId)}/history-requests`, message ? { message } : {}),
     /** The requester's own state in the room: its key reset, an approved restore and its latest request. */
-    mine: (roomId: string) => this.get<MyHistoryState>(`/rooms/${roomId}/history-requests/mine`),
-    cancel: (roomId: string, requestId: string) => this.del(`/rooms/${roomId}/history-requests/${encodeURIComponent(requestId)}`),
+    mine: (roomId: string) => this.get<MyHistoryState>(`/rooms/${encodeURIComponent(roomId)}/history-requests/mine`),
+    cancel: (roomId: string, requestId: string) => this.del(`/rooms/${encodeURIComponent(roomId)}/history-requests/${encodeURIComponent(requestId)}`),
     /** Open requests with the channels each would restore (`restore_history`). */
-    list: (roomId: string) => this.get<HistoryRequestList>(`/rooms/${roomId}/history-requests`),
+    list: (roomId: string) => this.get<HistoryRequestList>(`/rooms/${encodeURIComponent(roomId)}/history-requests`),
     approve: (roomId: string, requestId: string, req: ApproveHistoryRequest = {}) =>
-      this.post<HistoryRequest>(`/rooms/${roomId}/history-requests/${encodeURIComponent(requestId)}/approve`, req),
+      this.post<HistoryRequest>(`/rooms/${encodeURIComponent(roomId)}/history-requests/${encodeURIComponent(requestId)}/approve`, req),
     deny: (roomId: string, requestId: string, reason: string) =>
-      this.post<HistoryRequest>(`/rooms/${roomId}/history-requests/${encodeURIComponent(requestId)}/deny`, { reason }),
+      this.post<HistoryRequest>(`/rooms/${encodeURIComponent(roomId)}/history-requests/${encodeURIComponent(requestId)}/deny`, { reason }),
   };
 
   /** Encrypted history backups on the home node (ENCRYPTION.md §7). */
@@ -811,45 +887,43 @@ export class TavrnApi {
     list: () => this.get<BackupList>("/users/me/backups"),
     /** The blob and its ETag, or null if there is no backup yet. */
     get: async (domain: string, conversationUlid: string): Promise<{ blob: Uint8Array; etag: string } | null> => {
-      const resp = await this.binary("GET", `/users/me/backups/${encodeURIComponent(domain)}/${encodeURIComponent(conversationUlid)}`, { allow404: true });
-      if (!resp) return null;
-      return { blob: new Uint8Array(await resp.arrayBuffer()), etag: resp.headers.get("ETag") ?? "" };
+      const r = await this.bytes(`/users/me/backups/${encodeURIComponent(domain)}/${encodeURIComponent(conversationUlid)}`, { allow404: true, transfer: true });
+      return r ? { blob: r.bytes, etag: r.headers.get("ETag") ?? "" } : null;
     },
     /** Stores the blob; `etag` (If-Match) is required when replacing (412 `backup.etag_mismatch`). */
     put: async (domain: string, conversationUlid: string, blob: Uint8Array, etag: string | null): Promise<BackupInfo> => {
       const headers: Record<string, string> = { "Content-Type": "application/octet-stream" };
       if (etag) headers["If-Match"] = etag;
-      const resp = await this.binary("PUT", `/users/me/backups/${encodeURIComponent(domain)}/${encodeURIComponent(conversationUlid)}`, { body: blob, headers });
-      return (await resp!.json()) as BackupInfo;
+      return this.rawJson<BackupInfo>("PUT", `/users/me/backups/${encodeURIComponent(domain)}/${encodeURIComponent(conversationUlid)}`, blob as BodyInit, headers, { transfer: true });
     },
   };
 
   /** DMs and group DMs (PROTOCOL.md §8a); messages of any conversation (also room channels). */
   conversations = {
     list: () => this.get<Conversation[]>("/conversations"),
-    get: (conversationId: string) => this.get<Conversation>(`/conversations/${conversationId}`),
+    get: (conversationId: string) => this.get<Conversation>(`/conversations/${encodeURIComponent(conversationId)}`),
     create: (req: CreateConversationRequest) => this.post<Conversation>("/conversations", req),
-    update: (conversationId: string, req: UpdateConversationRequest) => this.patch<Conversation>(`/conversations/${conversationId}`, req),
-    addMember: (conversationId: string, user: string) => this.post<Conversation>(`/conversations/${conversationId}/members`, { user }),
+    update: (conversationId: string, req: UpdateConversationRequest) => this.patch<Conversation>(`/conversations/${encodeURIComponent(conversationId)}`, req),
+    addMember: (conversationId: string, user: string) => this.post<Conversation>(`/conversations/${encodeURIComponent(conversationId)}/members`, { user }),
     /** Leave (own username) or, as the creator, remove a member. */
-    removeMember: (conversationId: string, username: string) => this.del(`/conversations/${conversationId}/members/${encodeURIComponent(username)}`),
+    removeMember: (conversationId: string, username: string) => this.del(`/conversations/${encodeURIComponent(conversationId)}/members/${encodeURIComponent(username)}`),
     /** `epoch`: only encrypted messages of that MLS epoch (key checks, ENCRYPTION.md §7b). */
     /** `around`: the page around a message, newest first (jump to a search result; PROTOCOL.md §7). */
     /**
      * `thread`: page one thread of the channel; without it the channel's list leaves thread messages out (§7e).
      * `threads: "all"`: the channel together with its threads (local search index syncs).
      */
-    messages: (conversationId: string, query?: { limit?: number; before?: string; after?: string; around?: string; epoch?: number; thread?: string; threads?: "all" }) => this.get<Message[]>(`/conversations/${conversationId}/messages`, query),
+    messages: (conversationId: string, query?: { limit?: number; before?: string; after?: string; around?: string; epoch?: number; thread?: string; threads?: "all" }) => this.get<Message[]>(`/conversations/${encodeURIComponent(conversationId)}/messages`, query),
     /** Moves the read marker forward (never backwards); returns the counts after the update. */
-    markRead: (conversationId: string, lastReadMessageId: string) => this.put<ReadState>(`/conversations/${conversationId}/read`, { last_read_message_id: lastReadMessageId }),
-    send: (conversationId: string, req: CreateMessageRequest) => this.post<Message>(`/conversations/${conversationId}/messages`, req),
-    edit: (conversationId: string, messageId: string, req: EditMessageRequest) => this.patch<Message>(`/conversations/${conversationId}/messages/${messageId}`, req),
-    deleteMessage: (conversationId: string, messageId: string) => this.del(`/conversations/${conversationId}/messages/${messageId}`),
-    react: (conversationId: string, messageId: string, emoji: string) => this.put<Message>(`/conversations/${conversationId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}`, {}),
-    unreact: (conversationId: string, messageId: string, emoji: string) => this.del<Message>(`/conversations/${conversationId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}`),
-    pins: (conversationId: string) => this.get<PinList>(`/conversations/${conversationId}/pins`),
-    pin: (conversationId: string, messageId: string) => this.put<Message>(`/conversations/${conversationId}/pins/${messageId}`, {}),
-    unpin: (conversationId: string, messageId: string) => this.del<Message>(`/conversations/${conversationId}/pins/${messageId}`),
+    markRead: (conversationId: string, lastReadMessageId: string) => this.put<ReadState>(`/conversations/${encodeURIComponent(conversationId)}/read`, { last_read_message_id: lastReadMessageId }),
+    send: (conversationId: string, req: CreateMessageRequest) => this.post<Message>(`/conversations/${encodeURIComponent(conversationId)}/messages`, req),
+    edit: (conversationId: string, messageId: string, req: EditMessageRequest) => this.patch<Message>(`/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}`, req),
+    deleteMessage: (conversationId: string, messageId: string) => this.del(`/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}`),
+    react: (conversationId: string, messageId: string, emoji: string) => this.put<Message>(`/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/reactions/${encodeURIComponent(emoji)}`, {}),
+    unreact: (conversationId: string, messageId: string, emoji: string) => this.del<Message>(`/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/reactions/${encodeURIComponent(emoji)}`),
+    pins: (conversationId: string) => this.get<PinList>(`/conversations/${encodeURIComponent(conversationId)}/pins`),
+    pin: (conversationId: string, messageId: string) => this.put<Message>(`/conversations/${encodeURIComponent(conversationId)}/pins/${encodeURIComponent(messageId)}`, {}),
+    unpin: (conversationId: string, messageId: string) => this.del<Message>(`/conversations/${encodeURIComponent(conversationId)}/pins/${encodeURIComponent(messageId)}`),
   };
 
   /**
@@ -859,18 +933,18 @@ export class TavrnApi {
    */
   polls = {
     /** Casts or replaces the caller's vote (`content` ciphertext + `epoch`, or the plaintext vote + `signature`). */
-    vote: (conversationId: string, messageId: string, req: PollVoteRequest) => this.put<PollVote>(`/conversations/${conversationId}/messages/${messageId}/poll/vote`, req),
+    vote: (conversationId: string, messageId: string, req: PollVoteRequest) => this.put<PollVote>(`/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/poll/vote`, req),
     /** Retracts the caller's vote (`404 poll.vote_not_found` without one, `409 poll.closed` after the close). */
-    retract: (conversationId: string, messageId: string) => this.del(`/conversations/${conversationId}/messages/${messageId}/poll/vote`),
+    retract: (conversationId: string, messageId: string) => this.del(`/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/poll/vote`),
     /** Every vote record of the poll, oldest first (at most one per member). */
-    votes: (conversationId: string, messageId: string) => this.get<PollVoteList>(`/conversations/${conversationId}/messages/${messageId}/poll/votes`),
+    votes: (conversationId: string, messageId: string) => this.get<PollVoteList>(`/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/poll/votes`),
     /**
      * Closes the poll early (author or `manage_messages`): `at` not after now (the default) closes it at once, also a
      * poll created without a close time; a future `at` only moves an existing close time earlier (never later, and a
      * poll without one never gets a future one).
      */
     close: (conversationId: string, messageId: string, at?: string) =>
-      this.patch<Message>(`/conversations/${conversationId}/messages/${messageId}`, { poll_closes_at: at ?? new Date().toISOString() } satisfies EditMessageRequest),
+      this.patch<Message>(`/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}`, { poll_closes_at: at ?? new Date().toISOString() } satisfies EditMessageRequest),
   };
 
   /**
@@ -883,8 +957,8 @@ export class TavrnApi {
      * With the node capability `threads.client_ids` pass `id` ({@link newUlid}) and sign the first message with it as
      * `thread_id` (`400 thread.id_invalid`, `409 thread.id_taken`).
      */
-    create: (roomId: string, channelId: string, req: CreateThreadRequest) => this.post<Thread>(`/rooms/${roomId}/channels/${channelId}/threads`, req),
-    list: (roomId: string, channelId: string, query?: ThreadListQuery) => this.get<ThreadList>(`/rooms/${roomId}/channels/${channelId}/threads`, query as Query),
+    create: (roomId: string, channelId: string, req: CreateThreadRequest) => this.post<Thread>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/threads`, req),
+    list: (roomId: string, channelId: string, query?: ThreadListQuery) => this.get<ThreadList>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/threads`, query as Query),
     get: (threadId: string) => this.get<Thread>(`/threads/${encodeURIComponent(threadId)}`),
     /** Rename (ciphertext with `title_epoch` in encrypted channels), retag, archive or lock (creator or `manage_threads`). */
     update: (threadId: string, req: UpdateThreadRequest) => this.patch<Thread>(`/threads/${encodeURIComponent(threadId)}`, req),
@@ -895,15 +969,15 @@ export class TavrnApi {
     follow: (threadId: string) => this.post<ThreadReadState>(`/threads/${encodeURIComponent(threadId)}/follow`, {}),
     unfollow: (threadId: string) => this.del<ThreadReadState>(`/threads/${encodeURIComponent(threadId)}/follow`),
     /** The requester's followed threads in a room (badges, which thread messages notify). */
-    followed: (roomId: string) => this.get<FollowedThreads>(`/rooms/${roomId}/followed-threads`),
+    followed: (roomId: string) => this.get<FollowedThreads>(`/rooms/${encodeURIComponent(roomId)}/followed-threads`),
     /** A page of a thread's messages (same paging as the channel). */
     messages: (conversationId: string, threadId: string, query?: { limit?: number; before?: string; after?: string; around?: string }) =>
-      this.get<Message[]>(`/conversations/${conversationId}/messages`, { ...query, thread: threadId }),
+      this.get<Message[]>(`/conversations/${encodeURIComponent(conversationId)}/messages`, { ...query, thread: threadId }),
   };
 
   /** Node-side message search over the unencrypted channels of a room (PROTOCOL.md §7d, `search.v1`). */
   search = {
-    room: (roomId: string, query: SearchQuery) => this.get<SearchResponse>(`/rooms/${roomId}/search`, query as Query),
+    room: (roomId: string, query: SearchQuery) => this.get<SearchResponse>(`/rooms/${encodeURIComponent(roomId)}/search`, query as Query),
   };
 
   /** Friends, requests and blocks (PROTOCOL.md §8a). `user` is `username` or `username@domain`. */
@@ -931,8 +1005,7 @@ export class TavrnApi {
     uploadBackground: (file: Blob) => this.rawUpload<Background>("/users/me/background", file),
     deleteBackground: () => this.del<Background>("/users/me/background"),
     backgroundImage: async (variant: "still" | "animated"): Promise<Blob> => {
-      const resp = await this.binary("GET", `/users/me/background/${variant}`);
-      return resp!.blob();
+      return this.blob("GET", `/users/me/background/${encodeURIComponent(variant)}`);
     },
   };
 
@@ -942,8 +1015,8 @@ export class TavrnApi {
    * derives from `whiteboard.open|grant|close`.
    */
   ephemeral = {
-    send: (conversationId: string, req: EphemeralRequest) => this.post<EphemeralAccepted>(`/conversations/${conversationId}/ephemeral`, req),
-    session: (conversationId: string) => this.get<SessionResponse>(`/conversations/${conversationId}/whiteboard`),
+    send: (conversationId: string, req: EphemeralRequest) => this.post<EphemeralAccepted>(`/conversations/${encodeURIComponent(conversationId)}/ephemeral`, req),
+    session: (conversationId: string) => this.get<SessionResponse>(`/conversations/${encodeURIComponent(conversationId)}/whiteboard`),
   };
 
   /** The personal whiteboard scene library on the home node (encrypted blobs, design note 4.10). */
@@ -951,30 +1024,26 @@ export class TavrnApi {
     list: () => this.get<SceneList>("/users/me/whiteboards"),
     /** The encrypted scene blob, or null if there is no such scene. */
     get: async (sceneId: string): Promise<Uint8Array | null> => {
-      const resp = await this.binary("GET", `/users/me/whiteboards/${encodeURIComponent(sceneId)}`, { allow404: true });
-      return resp ? new Uint8Array(await resp.arrayBuffer()) : null;
+      return (await this.bytes(`/users/me/whiteboards/${encodeURIComponent(sceneId)}`, { allow404: true }))?.bytes ?? null;
     },
     /** Creates (`name` required) or replaces (`name` optional) a scene. */
     put: async (sceneId: string, blob: Uint8Array, name?: string): Promise<SceneInfo> => {
       const headers: Record<string, string> = { "Content-Type": "application/octet-stream" };
       if (name !== undefined) headers["Tavrn-Scene-Name"] = encodeURIComponent(name);
-      const resp = await this.binary("PUT", `/users/me/whiteboards/${encodeURIComponent(sceneId)}`, { body: blob, headers });
-      return (await resp!.json()) as SceneInfo;
+      return this.rawJson<SceneInfo>("PUT", `/users/me/whiteboards/${encodeURIComponent(sceneId)}`, blob as BodyInit, headers);
     },
     rename: (sceneId: string, name: string) => this.patch<SceneInfo>(`/users/me/whiteboards/${encodeURIComponent(sceneId)}`, { name }),
     delete: (sceneId: string) => this.del(`/users/me/whiteboards/${encodeURIComponent(sceneId)}`),
     /** The encrypted thumbnail, or null without one. */
     thumbnail: async (sceneId: string): Promise<Uint8Array | null> => {
-      const resp = await this.binary("GET", `/users/me/whiteboards/${encodeURIComponent(sceneId)}/thumbnail`, { allow404: true });
-      return resp ? new Uint8Array(await resp.arrayBuffer()) : null;
+      return (await this.bytes(`/users/me/whiteboards/${encodeURIComponent(sceneId)}/thumbnail`, { allow404: true }))?.bytes ?? null;
     },
     putThumbnail: async (sceneId: string, blob: Uint8Array): Promise<void> => {
-      await this.binary("PUT", `/users/me/whiteboards/${encodeURIComponent(sceneId)}/thumbnail`, { body: blob, headers: { "Content-Type": "application/octet-stream" } });
+      await this.rawJson("PUT", `/users/me/whiteboards/${encodeURIComponent(sceneId)}/thumbnail`, blob as BodyInit, { "Content-Type": "application/octet-stream" });
     },
     /** Runs an image through the media pipeline (sanitized, fit into 1280 px); nothing is stored. */
     convertBackground: async (file: Blob): Promise<Blob> => {
-      const resp = await this.binary("POST", "/users/me/whiteboards/background", { body: new Uint8Array(await file.arrayBuffer()), headers: { "Content-Type": "application/octet-stream" } });
-      return resp!.blob();
+      return this.blob("POST", "/users/me/whiteboards/background", { raw: file, headers: { "Content-Type": "application/octet-stream" } });
     },
   };
 
@@ -986,15 +1055,15 @@ export class TavrnApi {
     clearActivity: () => this.del<MyPresence>("/users/me/activity"),
     /** Presences of the users this node shows me (everyone else is offline). */
     list: () => this.get<Presence[]>("/presence"),
-    roomSetting: (roomId: string) => this.get<RoomPresenceSetting>(`/rooms/${roomId}/presence`),
-    setRoomSetting: (roomId: string, hidden: boolean) => this.put<RoomPresenceSetting>(`/rooms/${roomId}/presence`, { hidden }),
+    roomSetting: (roomId: string) => this.get<RoomPresenceSetting>(`/rooms/${encodeURIComponent(roomId)}/presence`),
+    setRoomSetting: (roomId: string, hidden: boolean) => this.put<RoomPresenceSetting>(`/rooms/${encodeURIComponent(roomId)}/presence`, { hidden }),
   };
 
   /** Message requests: DMs and group DMs of non-friends on this node (design note 4.9). */
   requests = {
     list: () => this.get<ConversationRequest[]>("/conversations/requests"),
-    accept: (conversationId: string) => this.post<Conversation>(`/conversations/${conversationId}/accept`),
-    decline: (conversationId: string, req: DeclineRequest = {}) => this.post<void>(`/conversations/${conversationId}/decline`, req),
+    accept: (conversationId: string) => this.post<Conversation>(`/conversations/${encodeURIComponent(conversationId)}/accept`),
+    decline: (conversationId: string, req: DeclineRequest = {}) => this.post<void>(`/conversations/${encodeURIComponent(conversationId)}/decline`, req),
   };
 
   /** The personal block list with private notes (design note 4.9). */
@@ -1021,7 +1090,7 @@ export class TavrnApi {
      */
     setDateOfBirth: (dateOfBirth: string) => this.put<UserPrivate>("/users/me/date-of-birth", { date_of_birth: dateOfBirth }),
     devices: () => this.get<DeviceInfo[]>("/users/me/devices"),
-    deleteDevice: (deviceId: string) => this.del(`/users/me/devices/${deviceId}`),
+    deleteDevice: (deviceId: string) => this.del(`/users/me/devices/${encodeURIComponent(deviceId)}`),
     /** Attests a deleted own device again as retired, from its MLS leaf key (ENCRYPTION.md §5.2). */
     putRetiredDevice: (req: RetiredDeviceRequest) => this.post<void>("/users/me/devices/retired", req),
     changePassword: (req: ChangePasswordRequest) => this.post<void>("/users/me/password", req),
@@ -1103,11 +1172,11 @@ export class TavrnApi {
     /** The public document of an application of this node (no authentication, §1.8). */
     publicDocument: (applicationId: string) => this.get<PublicApplication>(`/applications/${encodeURIComponent(applicationId)}/public`),
     /** Applications installed in a room (`manage_room`, §4.3). */
-    installed: (roomId: string) => this.get<Installation[]>(`/rooms/${roomId}/applications`),
+    installed: (roomId: string) => this.get<Installation[]>(`/rooms/${encodeURIComponent(roomId)}/applications`),
     /** Install an application (`<domain>/<id>`) in a room of this node (§4.2). */
-    install: (roomId: string, req: InstallRequest) => this.post<Installation>(`/rooms/${roomId}/applications`, req),
+    install: (roomId: string, req: InstallRequest) => this.post<Installation>(`/rooms/${encodeURIComponent(roomId)}/applications`, req),
     /** Uninstall an application from a room (`manage_room`). */
-    uninstall: (roomId: string, applicationRef: string) => this.del(`/rooms/${roomId}/applications/${encodeURIComponent(applicationRef)}`),
+    uninstall: (roomId: string, applicationRef: string) => this.del(`/rooms/${encodeURIComponent(roomId)}/applications/${encodeURIComponent(applicationRef)}`),
   };
 
   /**
@@ -1124,19 +1193,19 @@ export class TavrnApi {
     /** With an app token (scope `commands`): replaces the bot's own set. */
     setMine: (commands: CommandDefinition[]) => this.put<CommandSet>("/applications/me/commands", { commands }),
     /** The application commands the signed-in user can invoke in a conversation right now (§5.4). */
-    palette: (conversationId: string) => this.get<PaletteCommand[]>(`/conversations/${conversationId}/commands`),
+    palette: (conversationId: string) => this.get<PaletteCommand[]>(`/conversations/${encodeURIComponent(conversationId)}/commands`),
     /** Invokes a command; resolves with the application's first response (at most 3 s, §5.5). */
-    invoke: (conversationId: string, req: InvokeRequest) => this.post<InvokeResponse>(`/conversations/${conversationId}/interactions`, req),
+    invoke: (conversationId: string, req: InvokeRequest) => this.post<InvokeResponse>(`/conversations/${encodeURIComponent(conversationId)}/interactions`, req),
     /** With an app token: the first response to an interaction (`reply`, `defer`, `error`, §5.7). */
     reply: (interactionId: string, callback: Callback) => this.post<InvokeResponse>(`/interactions/${encodeURIComponent(interactionId)}/callback`, callback),
     /** With an app token: a follow-up until the interaction expires (at most 10). */
     followUp: (interactionId: string, req: FollowUp) => this.post<FollowUpResponse>(`/interactions/${encodeURIComponent(interactionId)}/messages`, req),
     /** The commands of every installed application with their settings in a room (`manage_applications` or `manage_room`, §5.3). */
-    room: (roomId: string) => this.get<RoomCommands[]>(`/rooms/${roomId}/commands`),
+    room: (roomId: string) => this.get<RoomCommands[]>(`/rooms/${encodeURIComponent(roomId)}/commands`),
     /** Replaces the settings of one command (`<application ref>/<command id>`) in a room. */
-    setRoomSettings: (roomId: string, commandRef: string, settings: PutCommandSettings) => this.put<RoomCommand>(`/rooms/${roomId}/commands/${encodeURIComponent(commandRef)}`, settings),
+    setRoomSettings: (roomId: string, commandRef: string, settings: PutCommandSettings) => this.put<RoomCommand>(`/rooms/${encodeURIComponent(roomId)}/commands/${encodeURIComponent(commandRef)}`, settings),
     /** Resets one command of a room to the defaults. */
-    resetRoomSettings: (roomId: string, commandRef: string) => this.del(`/rooms/${roomId}/commands/${encodeURIComponent(commandRef)}`),
+    resetRoomSettings: (roomId: string, commandRef: string) => this.del(`/rooms/${encodeURIComponent(roomId)}/commands/${encodeURIComponent(commandRef)}`),
     /** Node admins: command definitions and their approval state (§5.2). */
     approvals: (state?: "pending" | "approved" | "rejected") => this.get<CommandApproval[]>("/admin/applications/commands", state ? { state } : undefined),
     approve: (req: CommandApprovalRequest) => this.post<void>("/admin/applications/commands/approve", req),
@@ -1151,7 +1220,7 @@ export class TavrnApi {
    */
   components = {
     invoke: (conversationId: string, messageId: string, req: ComponentInvokeRequest) =>
-      this.post<ComponentInvokeResponse>(`/conversations/${conversationId}/messages/${encodeURIComponent(messageId)}/interactions`, req),
+      this.post<ComponentInvokeResponse>(`/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/interactions`, req),
   };
 
   /** Interactions of the signed-in user (§5.10.4): submitting the modal an application opened. */
@@ -1164,14 +1233,14 @@ export class TavrnApi {
    * returned once by `create` and `reset`.
    */
   webhooks = {
-    list: (roomId: string) => this.get<Webhook[]>(`/rooms/${roomId}/webhooks`),
-    listChannel: (roomId: string, channelId: string) => this.get<Webhook[]>(`/rooms/${roomId}/channels/${channelId}/webhooks`),
-    create: (roomId: string, channelId: string, req: CreateWebhookRequest) => this.post<CreatedWebhook>(`/rooms/${roomId}/channels/${channelId}/webhooks`, req),
-    update: (roomId: string, webhookId: string, req: UpdateWebhookRequest) => this.patch<Webhook>(`/rooms/${roomId}/webhooks/${encodeURIComponent(webhookId)}`, req),
-    reset: (roomId: string, webhookId: string) => this.post<CreatedWebhook>(`/rooms/${roomId}/webhooks/${encodeURIComponent(webhookId)}/reset`),
-    delete: (roomId: string, webhookId: string) => this.del(`/rooms/${roomId}/webhooks/${encodeURIComponent(webhookId)}`),
-    uploadAvatar: (roomId: string, webhookId: string, file: Blob) => this.rawUpload<Webhook>(`/rooms/${roomId}/webhooks/${encodeURIComponent(webhookId)}/avatar`, file),
-    deleteAvatar: (roomId: string, webhookId: string) => this.del<Webhook>(`/rooms/${roomId}/webhooks/${encodeURIComponent(webhookId)}/avatar`),
+    list: (roomId: string) => this.get<Webhook[]>(`/rooms/${encodeURIComponent(roomId)}/webhooks`),
+    listChannel: (roomId: string, channelId: string) => this.get<Webhook[]>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/webhooks`),
+    create: (roomId: string, channelId: string, req: CreateWebhookRequest) => this.post<CreatedWebhook>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/webhooks`, req),
+    update: (roomId: string, webhookId: string, req: UpdateWebhookRequest) => this.patch<Webhook>(`/rooms/${encodeURIComponent(roomId)}/webhooks/${encodeURIComponent(webhookId)}`, req),
+    reset: (roomId: string, webhookId: string) => this.post<CreatedWebhook>(`/rooms/${encodeURIComponent(roomId)}/webhooks/${encodeURIComponent(webhookId)}/reset`),
+    delete: (roomId: string, webhookId: string) => this.del(`/rooms/${encodeURIComponent(roomId)}/webhooks/${encodeURIComponent(webhookId)}`),
+    uploadAvatar: (roomId: string, webhookId: string, file: Blob) => this.rawUpload<Webhook>(`/rooms/${encodeURIComponent(roomId)}/webhooks/${encodeURIComponent(webhookId)}/avatar`, file),
+    deleteAvatar: (roomId: string, webhookId: string) => this.del<Webhook>(`/rooms/${encodeURIComponent(roomId)}/webhooks/${encodeURIComponent(webhookId)}/avatar`),
   };
 
   // ---- Rooms
@@ -1179,19 +1248,19 @@ export class TavrnApi {
     list: () => this.get<Room[]>("/rooms"),
     discover: () => this.get<PublicRoom[]>("/rooms/discover"),
     create: (req: CreateRoomRequest) => this.post<RoomDetail>("/rooms", req),
-    get: (roomId: string) => this.get<RoomDetail>(`/rooms/${roomId}`),
-    update: (roomId: string, req: UpdateRoomRequest) => this.patch<RoomDetail>(`/rooms/${roomId}`, req),
+    get: (roomId: string) => this.get<RoomDetail>(`/rooms/${encodeURIComponent(roomId)}`),
+    update: (roomId: string, req: UpdateRoomRequest) => this.patch<RoomDetail>(`/rooms/${encodeURIComponent(roomId)}`, req),
     /** Deletes the room; `keepExternal` keeps the objects of its unencrypted external files channels (FILES.md §9). */
-    delete: (roomId: string, opts: { keepExternal?: boolean } = {}) => this.del(`/rooms/${roomId}${opts.keepExternal ? "?keep_external=true" : ""}`),
-    join: (roomId: string, req: JoinRequest = {}) => this.post<RoomDetail>(`/rooms/${roomId}/join`, req),
-    leave: (roomId: string) => this.post<void>(`/rooms/${roomId}/leave`),
+    delete: (roomId: string, opts: { keepExternal?: boolean } = {}) => this.del(`/rooms/${encodeURIComponent(roomId)}${opts.keepExternal ? "?keep_external=true" : ""}`),
+    join: (roomId: string, req: JoinRequest = {}) => this.post<RoomDetail>(`/rooms/${encodeURIComponent(roomId)}/join`, req),
+    leave: (roomId: string) => this.post<void>(`/rooms/${encodeURIComponent(roomId)}/leave`),
     /** Room icon (`manage_room`; PNG, JPEG, GIF, WebP, MP4, WebM; converted by the node). */
-    uploadIcon: (roomId: string, file: Blob) => this.rawUpload<Room>(`/rooms/${roomId}/icon`, file),
-    deleteIcon: (roomId: string) => this.del<Room>(`/rooms/${roomId}/icon`),
-    auditLog: (roomId: string, query?: { limit?: number; before?: string }) => this.get<AuditEntry[]>(`/rooms/${roomId}/audit-log`, query),
-    purge: (roomId: string, req: PurgeRequest) => this.post<PurgeResponse>(`/rooms/${roomId}/moderation/purge`, req),
+    uploadIcon: (roomId: string, file: Blob) => this.rawUpload<Room>(`/rooms/${encodeURIComponent(roomId)}/icon`, file),
+    deleteIcon: (roomId: string) => this.del<Room>(`/rooms/${encodeURIComponent(roomId)}/icon`),
+    auditLog: (roomId: string, query?: { limit?: number; before?: string }) => this.get<AuditEntry[]>(`/rooms/${encodeURIComponent(roomId)}/audit-log`, query),
+    purge: (roomId: string, req: PurgeRequest) => this.post<PurgeResponse>(`/rooms/${encodeURIComponent(roomId)}/moderation/purge`, req),
     /** Hands the room to another member (owner only, needs a reauth token, MODERATION.md §4). */
-    transfer: (roomId: string, userId: string) => this.post<RoomDetail>(`/rooms/${roomId}/transfer`, { user_id: userId }),
+    transfer: (roomId: string, userId: string) => this.post<RoomDetail>(`/rooms/${encodeURIComponent(roomId)}/transfer`, { user_id: userId }),
   };
 
   /**
@@ -1211,56 +1280,63 @@ export class TavrnApi {
      * capability `reports.v2` on both nodes). Idempotent; the reporter stays pseudonymous to the home node.
      */
     forward: (reportId: string) => this.post<ModerationReport>(`/reports/${encodeURIComponent(reportId)}/forward`, {}),
-    room: (roomId: string, query?: { status?: string; limit?: number; before?: string }) => this.get<ReportList>(`/rooms/${roomId}/reports`, query),
+    room: (roomId: string, query?: { status?: string; limit?: number; before?: string }) => this.get<ReportList>(`/rooms/${encodeURIComponent(roomId)}/reports`, query),
     admin: (query?: { status?: string; scope?: string; limit?: number; before?: string }) => this.get<ReportList>("/admin/reports", query),
+    /**
+     * Moderation bots (app token scope `moderation`, `moderate_members` in the room, MODERATION.md §1.4a): the room's
+     * reports in the reduced shape, metadata only, the reporter as a pseudonym. App tokens always get this shape.
+     */
+    roomForApp: (roomId: string, query?: { status?: string; limit?: number; before?: string }) => this.get<AppReportList>(`/rooms/${roomId}/reports`, query),
+    /** Moderation bots: one report of a room they moderate in the reduced shape (MODERATION.md §1.4a). */
+    getForApp: (reportId: string) => this.get<AppReport>(`/reports/${encodeURIComponent(reportId)}`),
   };
 
   /** Content rules of a room's unencrypted channels (MODERATION.md §2, capability `automod.v1`). */
   automod = {
-    get: (roomId: string) => this.get<AutomodSettings>(`/rooms/${roomId}/automod`),
+    get: (roomId: string) => this.get<AutomodSettings>(`/rooms/${encodeURIComponent(roomId)}/automod`),
     /** Replaces the whole list (`manage_room`). */
-    set: (roomId: string, rules: AutomodRule[]) => this.put<AutomodSettings>(`/rooms/${roomId}/automod`, { rules }),
+    set: (roomId: string, rules: AutomodRule[]) => this.put<AutomodSettings>(`/rooms/${encodeURIComponent(roomId)}/automod`, { rules }),
   };
 
   invites = {
     preview: (code: string) => this.get<InvitePreview>(`/invites/${encodeURIComponent(code)}`),
     join: (code: string, req: JoinRequest = {}) => this.post<RoomDetail>(`/invites/${encodeURIComponent(code)}/join`, req),
-    create: (roomId: string, req: CreateInviteRequest = {}) => this.post<Invite>(`/rooms/${roomId}/invites`, req),
+    create: (roomId: string, req: CreateInviteRequest = {}) => this.post<Invite>(`/rooms/${encodeURIComponent(roomId)}/invites`, req),
     /** Invites one user of any node (`name` or `name@domain`) with a single-use invite bound to them (FEDERATION.md §3.4). */
-    direct: (roomId: string, user: string) => this.post<DirectInviteResponse>(`/rooms/${roomId}/invites/direct`, { user }),
-    list: (roomId: string) => this.get<Invite[]>(`/rooms/${roomId}/invites`),
-    delete: (roomId: string, code: string) => this.del(`/rooms/${roomId}/invites/${encodeURIComponent(code)}`),
+    direct: (roomId: string, user: string) => this.post<DirectInviteResponse>(`/rooms/${encodeURIComponent(roomId)}/invites/direct`, { user }),
+    list: (roomId: string) => this.get<Invite[]>(`/rooms/${encodeURIComponent(roomId)}/invites`),
+    delete: (roomId: string, code: string) => this.del(`/rooms/${encodeURIComponent(roomId)}/invites/${encodeURIComponent(code)}`),
   };
 
   members = {
-    list: (roomId: string, query?: { limit?: number; after?: string }) => this.get<Member[]>(`/rooms/${roomId}/members`, query),
-    update: (roomId: string, userId: string, req: UpdateMemberRequest) => this.patch<Member>(`/rooms/${roomId}/members/${userId}`, req),
+    list: (roomId: string, query?: { limit?: number; after?: string }) => this.get<Member[]>(`/rooms/${encodeURIComponent(roomId)}/members`, query),
+    update: (roomId: string, userId: string, req: UpdateMemberRequest) => this.patch<Member>(`/rooms/${encodeURIComponent(roomId)}/members/${encodeURIComponent(userId)}`, req),
     kick: (roomId: string, userId: string, reason?: string) =>
-      reason ? this.request<void>("DELETE", `/rooms/${roomId}/members/${userId}`, { reason }) : this.del(`/rooms/${roomId}/members/${userId}`),
+      reason ? this.request<void>("DELETE", `/rooms/${encodeURIComponent(roomId)}/members/${encodeURIComponent(userId)}`, { reason }) : this.del(`/rooms/${encodeURIComponent(roomId)}/members/${encodeURIComponent(userId)}`),
     /** Own per-room profile (nickname, bio; `change_nickname`), PROTOCOL.md §6b. */
-    setMyProfile: (roomId: string, req: RoomProfileRequest) => this.put<Member>(`/rooms/${roomId}/members/me/profile`, req),
-    resetMyProfile: (roomId: string) => this.del<Member>(`/rooms/${roomId}/members/me/profile`),
-    uploadMyAvatar: (roomId: string, file: Blob) => this.rawUpload<Member>(`/rooms/${roomId}/members/me/avatar`, file),
-    deleteMyAvatar: (roomId: string) => this.del<Member>(`/rooms/${roomId}/members/me/avatar`),
+    setMyProfile: (roomId: string, req: RoomProfileRequest) => this.put<Member>(`/rooms/${encodeURIComponent(roomId)}/members/me/profile`, req),
+    resetMyProfile: (roomId: string) => this.del<Member>(`/rooms/${encodeURIComponent(roomId)}/members/me/profile`),
+    uploadMyAvatar: (roomId: string, file: Blob) => this.rawUpload<Member>(`/rooms/${encodeURIComponent(roomId)}/members/me/avatar`, file),
+    deleteMyAvatar: (roomId: string) => this.del<Member>(`/rooms/${encodeURIComponent(roomId)}/members/me/avatar`),
     /** Change or reset another member's per-room profile (`manage_nicknames`). */
-    moderateProfile: (roomId: string, userId: string, req: ModerateProfileRequest) => this.patch<Member>(`/rooms/${roomId}/members/${userId}/profile`, req),
-    timeout: (roomId: string, userId: string, req: TimeoutRequest) => this.put<Member>(`/rooms/${roomId}/members/${userId}/timeout`, req),
-    ban: (roomId: string, req: BanRequest) => this.post<Ban>(`/rooms/${roomId}/bans`, req),
-    unban: (roomId: string, subject: string) => this.del(`/rooms/${roomId}/bans/${encodeURIComponent(subject)}`),
-    bans: (roomId: string) => this.get<Ban[]>(`/rooms/${roomId}/bans`),
+    moderateProfile: (roomId: string, userId: string, req: ModerateProfileRequest) => this.patch<Member>(`/rooms/${encodeURIComponent(roomId)}/members/${encodeURIComponent(userId)}/profile`, req),
+    timeout: (roomId: string, userId: string, req: TimeoutRequest) => this.put<Member>(`/rooms/${encodeURIComponent(roomId)}/members/${encodeURIComponent(userId)}/timeout`, req),
+    ban: (roomId: string, req: BanRequest) => this.post<Ban>(`/rooms/${encodeURIComponent(roomId)}/bans`, req),
+    unban: (roomId: string, subject: string) => this.del(`/rooms/${encodeURIComponent(roomId)}/bans/${encodeURIComponent(subject)}`),
+    bans: (roomId: string) => this.get<Ban[]>(`/rooms/${encodeURIComponent(roomId)}/bans`),
   };
 
   channels = {
-    create: (roomId: string, req: CreateChannelRequest) => this.post<Channel>(`/rooms/${roomId}/channels`, req),
-    update: (roomId: string, channelId: string, req: UpdateChannelRequest) => this.patch<Channel>(`/rooms/${roomId}/channels/${channelId}`, req),
+    create: (roomId: string, req: CreateChannelRequest) => this.post<Channel>(`/rooms/${encodeURIComponent(roomId)}/channels`, req),
+    update: (roomId: string, channelId: string, req: UpdateChannelRequest) => this.patch<Channel>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}`, req),
     /** Deletes the channel; `keepExternal` keeps the objects of an unencrypted external files channel (FILES.md §9). */
     delete: (roomId: string, channelId: string, opts: { keepExternal?: boolean } = {}) =>
-      this.del(`/rooms/${roomId}/channels/${channelId}${opts.keepExternal ? "?keep_external=true" : ""}`),
-    createCategory: (roomId: string, req: CreateCategoryRequest) => this.post<Category>(`/rooms/${roomId}/categories`, req),
-    updateCategory: (roomId: string, categoryId: string, req: UpdateCategoryRequest) => this.patch<Category>(`/rooms/${roomId}/categories/${categoryId}`, req),
-    deleteCategory: (roomId: string, categoryId: string) => this.del(`/rooms/${roomId}/categories/${categoryId}`),
+      this.del(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}${opts.keepExternal ? "?keep_external=true" : ""}`),
+    createCategory: (roomId: string, req: CreateCategoryRequest) => this.post<Category>(`/rooms/${encodeURIComponent(roomId)}/categories`, req),
+    updateCategory: (roomId: string, categoryId: string, req: UpdateCategoryRequest) => this.patch<Category>(`/rooms/${encodeURIComponent(roomId)}/categories/${encodeURIComponent(categoryId)}`, req),
+    deleteCategory: (roomId: string, categoryId: string) => this.del(`/rooms/${encodeURIComponent(roomId)}/categories/${encodeURIComponent(categoryId)}`),
     /** Set an override (channel-scoped bits only, `permissions.not_channel_scoped`); allow = deny = "0" removes it. */
-    setOverride: (roomId: string, req: SetOverrideRequest) => this.put<PermissionOverride[]>(`/rooms/${roomId}/overrides`, req),
+    setOverride: (roomId: string, req: SetOverrideRequest) => this.put<PermissionOverride[]>(`/rooms/${encodeURIComponent(roomId)}/overrides`, req),
     /**
      * Removes these overrides (allow, deny and the upload categories set to nothing), one request each: "Reset to
      * category" of a channel clears the channel's own overrides, so the category's apply (layered overrides).
@@ -1273,50 +1349,43 @@ export class TavrnApi {
   };
 
   roles = {
-    create: (roomId: string, req: CreateRoleRequest) => this.post<Role>(`/rooms/${roomId}/roles`, req),
-    update: (roomId: string, roleId: string, req: UpdateRoleRequest) => this.patch<Role>(`/rooms/${roomId}/roles/${roleId}`, req),
-    delete: (roomId: string, roleId: string) => this.del(`/rooms/${roomId}/roles/${roleId}`),
+    create: (roomId: string, req: CreateRoleRequest) => this.post<Role>(`/rooms/${encodeURIComponent(roomId)}/roles`, req),
+    update: (roomId: string, roleId: string, req: UpdateRoleRequest) => this.patch<Role>(`/rooms/${encodeURIComponent(roomId)}/roles/${encodeURIComponent(roleId)}`, req),
+    delete: (roomId: string, roleId: string) => this.del(`/rooms/${encodeURIComponent(roomId)}/roles/${encodeURIComponent(roleId)}`),
   };
 
   attachments = {
     /** Uploads a raw file; the blob is bound when the message is sent. */
     upload: (roomId: string, channelId: string, file: Blob, name: string, onProgress?: (fraction: number) => void): Promise<Attachment> =>
-      this.uploadTo(`${this.baseUrl}/api/v1/rooms/${roomId}/channels/${channelId}/uploads`, file, name, onProgress),
+      this.uploadTo(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/uploads`, file, name, onProgress),
     /**
      * Upload to any conversation (channel, DM, group DM). In encrypted conversations `file` is ciphertext and
      * `category` declares the upload category of the plaintext file (`images` … `other` or `executable`).
      */
     uploadToConversation: (conversationId: string, file: Blob, name: string, onProgress?: (fraction: number) => void, category?: string): Promise<Attachment> =>
-      this.uploadTo(`${this.baseUrl}/api/v1/conversations/${conversationId}/uploads`, file, name, onProgress, category),
+      this.uploadTo(`/conversations/${encodeURIComponent(conversationId)}/uploads`, file, name, onProgress, category),
     /** What the requester may upload in a conversation (upload categories, PROTOCOL.md §7a). */
-    policy: (conversationId: string) => this.get<UploadPolicy>(`/conversations/${conversationId}/upload-policy`),
+    policy: (conversationId: string) => this.get<UploadPolicy>(`/conversations/${encodeURIComponent(conversationId)}/upload-policy`),
     /** Loads a file as a Blob (with the token); for <img>, use URL.createObjectURL. */
-    download: async (blobId: string): Promise<Blob> => {
-      const headers: Record<string, string> = {};
-      const token = this.opts.getToken?.();
-      if (token) headers.Authorization = `Bearer ${token}`;
-      const resp = await (this.opts.fetchImpl ?? fetch)(`${this.baseUrl}/api/v1/blobs/${blobId}`, { headers });
-      if (!resp.ok) throw new TavrnApiError(toProblem(resp.status, await resp.json().catch(() => null), resp.statusText));
-      return resp.blob();
-    },
+    download: (blobId: string): Promise<Blob> => this.blob("GET", `/blobs/${encodeURIComponent(blobId)}`, { transfer: true }),
   };
 
   reactions = {
-    add: (roomId: string, channelId: string, messageId: string, emoji: string) => this.put<Message>(`/rooms/${roomId}/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}`, {}),
-    remove: (roomId: string, channelId: string, messageId: string, emoji: string) => this.del<Message>(`/rooms/${roomId}/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}`),
+    add: (roomId: string, channelId: string, messageId: string, emoji: string) => this.put<Message>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/messages/${encodeURIComponent(messageId)}/reactions/${encodeURIComponent(emoji)}`, {}),
+    remove: (roomId: string, channelId: string, messageId: string, emoji: string) => this.del<Message>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/messages/${encodeURIComponent(messageId)}/reactions/${encodeURIComponent(emoji)}`),
     /**
      * Who reacted with `emoji` on a message of any conversation (PROTOCOL.md §7 "Reactions"), oldest first, `limit`
      * 1–100 (default 50); pass `next` as `after` for the next page. Needs what reading the message needs (bots:
      * `messages:read`).
      */
     list: (conversationId: string, messageId: string, emoji: string, query: { after?: string | null; limit?: number } = {}) =>
-      this.get<ReactorList>(`/conversations/${conversationId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}`, query as Query),
+      this.get<ReactorList>(`/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/reactions/${encodeURIComponent(emoji)}`, query as Query),
   };
 
   pins = {
-    list: (roomId: string, channelId: string) => this.get<PinList>(`/rooms/${roomId}/channels/${channelId}/pins`),
-    pin: (roomId: string, channelId: string, messageId: string) => this.put<Message>(`/rooms/${roomId}/channels/${channelId}/pins/${messageId}`, {}),
-    unpin: (roomId: string, channelId: string, messageId: string) => this.del<Message>(`/rooms/${roomId}/channels/${channelId}/pins/${messageId}`),
+    list: (roomId: string, channelId: string) => this.get<PinList>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/pins`),
+    pin: (roomId: string, channelId: string, messageId: string) => this.put<Message>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/pins/${encodeURIComponent(messageId)}`, {}),
+    unpin: (roomId: string, channelId: string, messageId: string) => this.del<Message>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/pins/${encodeURIComponent(messageId)}`),
   };
 
   /**
@@ -1328,22 +1397,21 @@ export class TavrnApi {
   files = {
     /** A folder's entries (`parent` absent: top level) or, with `q`, a name search across the channel. */
     list: (roomId: string, channelId: string, query: { parent?: string | null; q?: string; limit?: number; after?: string | null } = {}) =>
-      this.get<FileList>(`/rooms/${roomId}/channels/${channelId}/files`, { parent: query.parent ?? undefined, q: query.q || undefined, limit: query.limit, after: query.after ?? undefined }),
+      this.get<FileList>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/files`, { parent: query.parent ?? undefined, q: query.q || undefined, limit: query.limit, after: query.after ?? undefined }),
     /** One entry with its folder path. */
-    get: (roomId: string, channelId: string, entryId: string) => this.get<FileEntryDetail>(`/rooms/${roomId}/channels/${channelId}/files/${entryId}`),
+    get: (roomId: string, channelId: string, entryId: string) => this.get<FileEntryDetail>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/files/${encodeURIComponent(entryId)}`),
     createFolder: (roomId: string, channelId: string, name: string, parentId: string | null) =>
-      this.post<FileEntry>(`/rooms/${roomId}/channels/${channelId}/files/folders`, { name, parent_id: parentId }),
+      this.post<FileEntry>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/files/folders`, { name, parent_id: parentId }),
     /** Raw upload into a folder; `rename` stores a taken name as `name (2).ext` instead of failing with 409. */
     upload: (roomId: string, channelId: string, file: Blob, name: string, opts: { parentId?: string | null; rename?: boolean; onProgress?: (fraction: number) => void; signal?: AbortSignal } = {}): Promise<FileEntry> => {
-      const headers: Record<string, string> = { "Content-Type": file.type || "application/octet-stream", "Tavrn-File-Name": encodeURIComponent(name), ...this.authHeaders() };
+      const headers: Record<string, string> = { "Content-Type": file.type || "application/octet-stream", "Tavrn-File-Name": encodeURIComponent(name) };
       if (opts.parentId) headers["Tavrn-Parent"] = opts.parentId;
       if (opts.rename) headers["Tavrn-Conflict"] = "rename";
-      const url = `${this.baseUrl}/api/v1/rooms/${roomId}/channels/${channelId}/files/upload`;
-      return this.sendBlob<FileEntry>(url, file, headers, opts.onProgress, opts.signal);
+      return this.rawJson<FileEntry>("POST", `/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/files/upload`, file, headers, { transfer: true, onProgress: opts.onProgress, signal: opts.signal });
     },
     /** Encrypted channels: a folder with a client-chosen id and its entry record. */
     createFolderEncrypted: (roomId: string, channelId: string, req: { id: string; record: string; record_epoch: number; parent_id: string | null }) =>
-      this.post<FileEntry>(`/rooms/${roomId}/channels/${channelId}/files/folders`, req),
+      this.post<FileEntry>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/files/folders`, req),
     /** Encrypted channels: the ciphertext of a file with its client-chosen id, record and declared upload category. */
     uploadEncrypted: (
       roomId: string,
@@ -1357,70 +1425,54 @@ export class TavrnApi {
         "Tavrn-Record": req.record,
         "Tavrn-Record-Epoch": String(req.recordEpoch),
         "Tavrn-Upload-Category": req.category,
-        ...this.authHeaders(),
       };
       if (req.parentId) headers["Tavrn-Parent"] = req.parentId;
-      const url = `${this.baseUrl}/api/v1/rooms/${roomId}/channels/${channelId}/files/upload`;
-      return this.sendBlob<FileEntry>(url, ciphertext, headers, req.onProgress, req.signal);
+      return this.rawJson<FileEntry>("POST", `/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/files/upload`, ciphertext, headers, { transfer: true, onProgress: req.onProgress, signal: req.signal });
     },
     /** The raw response of a download (encrypted channels: the ciphertext as a stream), optionally of a byte range. */
-    downloadResponse: async (roomId: string, channelId: string, entryId: string, range?: { start: number; end: number }): Promise<Response> => {
+    downloadResponse: async (roomId: string, channelId: string, entryId: string, range?: { start: number; end: number }, signal?: AbortSignal): Promise<Response> => {
       const headers: Record<string, string> = range ? { Range: `bytes=${range.start}-${range.end}` } : {};
-      return (await this.binary("GET", `/rooms/${roomId}/channels/${channelId}/files/${entryId}/download`, { headers })) as Response;
+      // A stream for the caller: the deadline covers the response headers; the body stays abortable with `signal`.
+      const { resp, deadline: d } = await this.send("GET", `/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/files/${encodeURIComponent(entryId)}/download`, { headers, signal, transfer: true });
+      d.stopTimer();
+      return resp;
     },
     /** The requester's own entries (no names or records) with totals, for deleting without keys (FILES.md §8.8). */
     mine: (roomId: string, channelId: string, query: { limit?: number; after?: string | null } = {}) =>
-      this.get<MineList>(`/rooms/${roomId}/channels/${channelId}/files/mine`, { limit: query.limit, after: query.after ?? undefined }),
+      this.get<MineList>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/files/mine`, { limit: query.limit, after: query.after ?? undefined }),
     /** Encrypted channels: entries with records in the order they were written (history key checks, search sync). */
     records: (roomId: string, channelId: string, query: { epoch?: number; since?: string; after?: string | null; limit?: number } = {}) =>
-      this.get<RecordList>(`/rooms/${roomId}/channels/${channelId}/files/records`, { epoch: query.epoch, since: query.since, after: query.after ?? undefined, limit: query.limit }),
+      this.get<RecordList>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/files/records`, { epoch: query.epoch, since: query.since, after: query.after ?? undefined, limit: query.limit }),
     /** Encrypted channels: stores the thumbnail ciphertext of a file (at most 1 MiB). */
     putThumbnail: async (roomId: string, channelId: string, entryId: string, ciphertext: Uint8Array): Promise<void> => {
-      await this.binary("PUT", `/rooms/${roomId}/channels/${channelId}/files/${entryId}/thumbnail`, { body: ciphertext, headers: { "Content-Type": "application/octet-stream" } });
+      await this.rawJson("PUT", `/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/files/${encodeURIComponent(entryId)}/thumbnail`, ciphertext as BodyInit, { "Content-Type": "application/octet-stream" });
     },
     /** Encrypted channels: the thumbnail ciphertext, or null when the file has none. */
     thumbnail: async (roomId: string, channelId: string, entryId: string): Promise<Uint8Array | null> => {
-      const resp = await this.binary("GET", `/rooms/${roomId}/channels/${channelId}/files/${entryId}/thumbnail`, { allow404: true });
-      return resp ? new Uint8Array(await resp.arrayBuffer()) : null;
+      return (await this.bytes(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/files/${encodeURIComponent(entryId)}/thumbnail`, { allow404: true }))?.bytes ?? null;
     },
     /** The file's content (with the token); ranges are for streaming players and are not needed here. */
     download: async (roomId: string, channelId: string, entryId: string): Promise<Blob> => {
-      const resp = await this.binary("GET", `/rooms/${roomId}/channels/${channelId}/files/${entryId}/download`);
-      return (resp as Response).blob();
+      return this.blob("GET", `/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/files/${encodeURIComponent(entryId)}/download`, { transfer: true });
     },
     /** Rename (`name`) and/or move (`parent_id`, `null` = top level). */
-    update: (roomId: string, channelId: string, entryId: string, req: UpdateEntryRequest) => this.patch<FileEntry>(`/rooms/${roomId}/channels/${channelId}/files/${entryId}`, req),
+    update: (roomId: string, channelId: string, entryId: string, req: UpdateEntryRequest) => this.patch<FileEntry>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/files/${encodeURIComponent(entryId)}`, req),
     /** Deletes an entry; folders with everything inside. */
-    delete: (roomId: string, channelId: string, entryId: string) => this.del<DeleteResult>(`/rooms/${roomId}/channels/${channelId}/files/${entryId}`),
+    delete: (roomId: string, channelId: string, entryId: string) => this.del<DeleteResult>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/files/${encodeURIComponent(entryId)}`),
     /** Storage used, limits and the requester's abilities. */
-    usage: (roomId: string, channelId: string) => this.get<FilesInfo>(`/rooms/${roomId}/channels/${channelId}/files/usage`),
+    usage: (roomId: string, channelId: string) => this.get<FilesInfo>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/files/usage`),
     /** The storage backend (`manage_channels` + `manage_files`); secrets come back only as `*_set`. */
-    backend: (roomId: string, channelId: string) => this.get<BackendInfo>(`/rooms/${roomId}/channels/${channelId}/files/backend`),
-    setBackend: (roomId: string, channelId: string, req: BackendRequest) => this.put<BackendInfo>(`/rooms/${roomId}/channels/${channelId}/files/backend`, req),
+    backend: (roomId: string, channelId: string) => this.get<BackendInfo>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/files/backend`),
+    setBackend: (roomId: string, channelId: string, req: BackendRequest) => this.put<BackendInfo>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/files/backend`, req),
     /** Connection test of `req` (or the stored configuration without it). */
-    testBackend: (roomId: string, channelId: string, req?: BackendRequest) => this.post<BackendTest>(`/rooms/${roomId}/channels/${channelId}/files/backend/test`, req),
+    testBackend: (roomId: string, channelId: string, req?: BackendRequest) => this.post<BackendTest>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/files/backend/test`, req),
   };
 
   emojis = {
-    list: (roomId: string) => this.get<Emoji[]>(`/rooms/${roomId}/emojis`),
-    create: async (roomId: string, name: string, file: Blob): Promise<Emoji> => {
-      const headers: Record<string, string> = { "Content-Type": file.type || "application/octet-stream", "Tavrn-Emoji-Name": name };
-      const token = this.opts.getToken?.();
-      if (token) headers.Authorization = `Bearer ${token}`;
-      const resp = await (this.opts.fetchImpl ?? fetch)(`${this.baseUrl}/api/v1/rooms/${roomId}/emojis`, { method: "POST", headers, body: file });
-      const json: unknown = await resp.json().catch(() => null);
-      if (!resp.ok) throw new TavrnApiError(toProblem(resp.status, json, resp.statusText));
-      return json as Emoji;
-    },
-    delete: (roomId: string, emojiId: string) => this.del(`/rooms/${roomId}/emojis/${emojiId}`),
-    image: async (roomId: string, emojiId: string): Promise<Blob> => {
-      const headers: Record<string, string> = {};
-      const token = this.opts.getToken?.();
-      if (token) headers.Authorization = `Bearer ${token}`;
-      const resp = await (this.opts.fetchImpl ?? fetch)(`${this.baseUrl}/api/v1/rooms/${roomId}/emojis/${emojiId}/image`, { headers });
-      if (!resp.ok) throw new TavrnApiError(toProblem(resp.status, null, resp.statusText));
-      return resp.blob();
-    },
+    list: (roomId: string) => this.get<Emoji[]>(`/rooms/${encodeURIComponent(roomId)}/emojis`),
+    create: (roomId: string, name: string, file: Blob): Promise<Emoji> => this.rawJson<Emoji>("POST", `/rooms/${encodeURIComponent(roomId)}/emojis`, file, { "Content-Type": file.type || "application/octet-stream", "Tavrn-Emoji-Name": name }),
+    delete: (roomId: string, emojiId: string) => this.del(`/rooms/${encodeURIComponent(roomId)}/emojis/${encodeURIComponent(emojiId)}`),
+    image: (roomId: string, emojiId: string): Promise<Blob> => this.blob("GET", `/rooms/${encodeURIComponent(roomId)}/emojis/${encodeURIComponent(emojiId)}/image`),
     /** Public URL of any emoji of this node (room or personal; design note 4.13); `still` = the first frame. */
     imageUrl: (emojiId: string, still = false, host?: string) => {
       const q = [still ? "still=1" : "", host ? `host=${encodeURIComponent(host)}` : ""].filter(Boolean).join("&");
@@ -1429,12 +1481,9 @@ export class TavrnApi {
     /** Personal emojis on the home node (design note 4.13). */
     personal: {
       list: () => this.get<PersonalEmojis>("/users/me/emojis"),
-      create: async (name: string, file: Blob): Promise<UserEmoji> => {
-        const resp = await this.binary("POST", "/users/me/emojis", { body: new Uint8Array(await file.arrayBuffer()), headers: { "Content-Type": file.type || "application/octet-stream", "Tavrn-Emoji-Name": name } });
-        return (await resp!.json()) as UserEmoji;
-      },
-      rename: (emojiId: string, name: string) => this.patch<UserEmoji>(`/users/me/emojis/${emojiId}`, { name }),
-      delete: (emojiId: string) => this.del(`/users/me/emojis/${emojiId}`),
+      create: (name: string, file: Blob): Promise<UserEmoji> => this.rawJson<UserEmoji>("POST", "/users/me/emojis", file, { "Content-Type": file.type || "application/octet-stream", "Tavrn-Emoji-Name": name }),
+      rename: (emojiId: string, name: string) => this.patch<UserEmoji>(`/users/me/emojis/${encodeURIComponent(emojiId)}`, { name }),
+      delete: (emojiId: string) => this.del(`/users/me/emojis/${encodeURIComponent(emojiId)}`),
     },
   };
 
@@ -1457,79 +1506,73 @@ export class TavrnApi {
      * this device's screen publisher instead, which only publishes its screen share (§4b; the device must be there).
      */
     join: (roomId: string, channelId: string, role: VoiceRole = "device") =>
-      this.post<VoiceJoin>(`/rooms/${roomId}/channels/${channelId}/voice/join`, role === "device" ? undefined : { role }),
+      this.post<VoiceJoin>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/voice/join`, role === "device" ? undefined : { role }),
     /** This device leaves (with its screen publisher); `role: "screen"` ends only the screen publisher (§4b). */
     leave: (roomId: string, channelId: string, role: VoiceRole = "device") =>
-      this.post<void>(`/rooms/${roomId}/channels/${channelId}/voice/leave`, role === "device" ? undefined : { role }),
+      this.post<void>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/voice/leave`, role === "device" ? undefined : { role }),
     /** Own mute/deafen/streaming/camera flags (§5). */
-    updateState: (roomId: string, channelId: string, patch: VoiceStatePatch) => this.patch<VoiceChannelState>(`/rooms/${roomId}/channels/${channelId}/voice/state`, patch),
+    updateState: (roomId: string, channelId: string, patch: VoiceStatePatch) => this.patch<VoiceChannelState>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/voice/state`, patch),
     /** Voice channels of a room with at least one participant (initial state; then `voice.state`). */
-    roomStates: (roomId: string) => this.get<RoomVoiceStates>(`/rooms/${roomId}/voice`),
+    roomStates: (roomId: string) => this.get<RoomVoiceStates>(`/rooms/${encodeURIComponent(roomId)}/voice`),
     /** The same for every room of this node the user is a member of, in one request (after `ready` and a resync). */
     mine: () => this.get<MyVoiceStates>("/users/me/voice"),
     serverMute: (roomId: string, channelId: string, address: string, muted: boolean) =>
-      this.post<VoiceChannelState>(`/rooms/${roomId}/channels/${channelId}/voice/members/${encodeURIComponent(address)}/mute`, { muted }),
-    disconnect: (roomId: string, channelId: string, address: string) => this.post<void>(`/rooms/${roomId}/channels/${channelId}/voice/members/${encodeURIComponent(address)}/disconnect`),
+      this.post<VoiceChannelState>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/voice/members/${encodeURIComponent(address)}/mute`, { muted }),
+    disconnect: (roomId: string, channelId: string, address: string) => this.post<void>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/voice/members/${encodeURIComponent(address)}/disconnect`),
     move: (roomId: string, channelId: string, address: string, targetChannelId: string) =>
-      this.post<void>(`/rooms/${roomId}/channels/${channelId}/voice/members/${encodeURIComponent(address)}/move`, { channel_id: targetChannelId }),
+      this.post<void>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/voice/members/${encodeURIComponent(address)}/move`, { channel_id: targetChannelId }),
     /** Mass move into `toChannelId` (everybody in voice, or only from `fromChannelId`); partial within the user limit. */
     moveAll: (roomId: string, toChannelId: string, fromChannelId?: string) =>
-      this.post<MoveAllResult>(`/rooms/${roomId}/voice/move-all`, fromChannelId ? { to_channel_id: toChannelId, from_channel_id: fromChannelId } : { to_channel_id: toChannelId }),
+      this.post<MoveAllResult>(`/rooms/${encodeURIComponent(roomId)}/voice/move-all`, fromChannelId ? { to_channel_id: toChannelId, from_channel_id: fromChannelId } : { to_channel_id: toChannelId }),
     /** A token for an empty, hidden test room: the connection test of the voice settings (§10.4). */
     connectionTest: () => this.post<ConnectionTest>("/voice/test"),
   };
 
   /** Calls in DMs and group DMs (VOICE.md §11), on the conversation's node. */
   calls = {
-    get: (conversationId: string) => this.get<CallState>(`/conversations/${conversationId}/call`),
+    get: (conversationId: string) => this.get<CallState>(`/conversations/${encodeURIComponent(conversationId)}/call`),
     /** Starts the call (rings the others) or joins the running one. */
-    start: (conversationId: string) => this.post<CallJoin>(`/conversations/${conversationId}/call/start`),
+    start: (conversationId: string) => this.post<CallJoin>(`/conversations/${encodeURIComponent(conversationId)}/call/start`),
     /** Answers or joins the running call; `role: "screen"`: this device's screen publisher (VOICE.md §4b). */
     join: (conversationId: string, role: VoiceRole = "device") =>
-      this.post<CallJoin>(`/conversations/${conversationId}/call/join`, role === "device" ? undefined : { role }),
+      this.post<CallJoin>(`/conversations/${encodeURIComponent(conversationId)}/call/join`, role === "device" ? undefined : { role }),
     /** This device leaves (with its screen publisher); `role: "screen"` ends only the screen publisher. */
     leave: (conversationId: string, role: VoiceRole = "device") =>
-      this.post<void>(`/conversations/${conversationId}/call/leave`, role === "device" ? undefined : { role }),
-    decline: (conversationId: string) => this.post<void>(`/conversations/${conversationId}/call/decline`),
-    updateState: (conversationId: string, patch: VoiceStatePatch) => this.patch<CallState>(`/conversations/${conversationId}/call/state`, patch),
+      this.post<void>(`/conversations/${encodeURIComponent(conversationId)}/call/leave`, role === "device" ? undefined : { role }),
+    decline: (conversationId: string) => this.post<void>(`/conversations/${encodeURIComponent(conversationId)}/call/decline`),
+    updateState: (conversationId: string, patch: VoiceStatePatch) => this.patch<CallState>(`/conversations/${encodeURIComponent(conversationId)}/call/state`, patch),
   };
 
   /** Soundboard clips of a room (VOICE.md §8); playing them is client-side. */
   soundboard = {
-    list: (roomId: string) => this.get<Sound[]>(`/rooms/${roomId}/soundboard`),
+    list: (roomId: string) => this.get<Sound[]>(`/rooms/${encodeURIComponent(roomId)}/soundboard`),
     /** Uploads a clip (`manage_emojis`); `durationMs` is declared by the client (the node cannot decode audio). */
-    create: async (roomId: string, name: string, file: Blob, durationMs: number, emoji?: string): Promise<Sound> => {
-      const resp = await this.binary("POST", `/rooms/${roomId}/soundboard`, { body: new Uint8Array(await file.arrayBuffer()), headers: this.clipHeaders(name, file, durationMs, emoji) });
-      return (await resp!.json()) as Sound;
-    },
+    create: (roomId: string, name: string, file: Blob, durationMs: number, emoji?: string): Promise<Sound> => this.rawJson<Sound>("POST", `/rooms/${encodeURIComponent(roomId)}/soundboard`, file, this.clipHeaders(name, file, durationMs, emoji)),
     /** Rename a clip or set its emoji (`emoji: null` removes it). */
-    update: (roomId: string, soundId: string, patch: UpdateSound) => this.patch<Sound>(`/rooms/${roomId}/soundboard/${soundId}`, patch),
-    delete: (roomId: string, soundId: string) => this.del(`/rooms/${roomId}/soundboard/${soundId}`),
+    update: (roomId: string, soundId: string, patch: UpdateSound) => this.patch<Sound>(`/rooms/${encodeURIComponent(roomId)}/soundboard/${encodeURIComponent(soundId)}`, patch),
+    delete: (roomId: string, soundId: string) => this.del(`/rooms/${encodeURIComponent(roomId)}/soundboard/${encodeURIComponent(soundId)}`),
     /** Asks the node of the voice channel before playing (`use_external_sounds` for clips of other rooms; design note 4.13). */
     play: (roomId: string, channelId: string, soundId: string, host?: string) =>
-      this.post<PlayAllowed>(`/rooms/${roomId}/channels/${channelId}/soundboard/play`, host ? { sound_id: soundId, host } : { sound_id: soundId }),
+      this.post<PlayAllowed>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/soundboard/play`, host ? { sound_id: soundId, host } : { sound_id: soundId }),
     /** Public URL of any clip of this node (room or personal), or of this node's cached copy of a clip of `host`. */
     audioUrl: (soundId: string, host?: string) => `${this.baseUrl}/api/v1/sounds/${encodeURIComponent(soundId)}/audio${host ? `?host=${encodeURIComponent(host)}` : ""}`,
     /** Personal clips on the home node (design note 4.13). */
     personal: {
       list: () => this.get<PersonalSounds>("/users/me/sounds"),
-      create: async (name: string, file: Blob, durationMs: number, emoji?: string): Promise<UserSound> => {
-        const resp = await this.binary("POST", "/users/me/sounds", { body: new Uint8Array(await file.arrayBuffer()), headers: this.clipHeaders(name, file, durationMs, emoji) });
-        return (await resp!.json()) as UserSound;
-      },
-      update: (soundId: string, patch: UpdateSound) => this.patch<UserSound>(`/users/me/sounds/${soundId}`, patch),
-      delete: (soundId: string) => this.del(`/users/me/sounds/${soundId}`),
+      create: (name: string, file: Blob, durationMs: number, emoji?: string): Promise<UserSound> => this.rawJson<UserSound>("POST", "/users/me/sounds", file, this.clipHeaders(name, file, durationMs, emoji)),
+      update: (soundId: string, patch: UpdateSound) => this.patch<UserSound>(`/users/me/sounds/${encodeURIComponent(soundId)}`, patch),
+      delete: (soundId: string) => this.del(`/users/me/sounds/${encodeURIComponent(soundId)}`),
     },
     /** The clip's audio file (with the session token). */
-    audio: async (roomId: string, soundId: string): Promise<Blob> => (await this.binary("GET", `/rooms/${roomId}/soundboard/${soundId}/audio`))!.blob(),
+    audio: (roomId: string, soundId: string): Promise<Blob> => this.blob("GET", `/rooms/${encodeURIComponent(roomId)}/soundboard/${encodeURIComponent(soundId)}/audio`),
   };
 
   messages = {
     list: (roomId: string, channelId: string, query?: { limit?: number; before?: string; after?: string; around?: string; thread?: string }) =>
-      this.get<Message[]>(`/rooms/${roomId}/channels/${channelId}/messages`, query),
-    create: (roomId: string, channelId: string, req: CreateMessageRequest) => this.post<Message>(`/rooms/${roomId}/channels/${channelId}/messages`, req),
+      this.get<Message[]>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/messages`, query),
+    create: (roomId: string, channelId: string, req: CreateMessageRequest) => this.post<Message>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/messages`, req),
     edit: (roomId: string, channelId: string, messageId: string, req: EditMessageRequest) =>
-      this.patch<Message>(`/rooms/${roomId}/channels/${channelId}/messages/${messageId}`, req),
-    delete: (roomId: string, channelId: string, messageId: string) => this.del(`/rooms/${roomId}/channels/${channelId}/messages/${messageId}`),
+      this.patch<Message>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/messages/${encodeURIComponent(messageId)}`, req),
+    delete: (roomId: string, channelId: string, messageId: string) => this.del(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/messages/${encodeURIComponent(messageId)}`),
   };
 }
