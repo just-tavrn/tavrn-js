@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 /**
- * WebSocket client for `/api/v1/ws`: Hello/Ready, events, Ping/Pong, reconnection with backoff.
- * Runs in the browser and in Node.js (bots).
+ * WebSocket client for `/api/v1/ws`: Hello/Ready, events, Ping/Pong, reconnection with backoff, a liveness watchdog
+ * (the node pings every 30 s, PROTOCOL.md §6 item 5: a connection without any frame for {@link DEFAULT_LIVENESS_MS}
+ * is treated as dead and replaced). Runs in the browser and in Node.js (bots).
  */
 export type SocketStatus = "connecting" | "ready" | "reconnecting" | "closed";
 
@@ -35,7 +36,20 @@ export interface SocketOptions {
    * does not reconnect.
    */
   onClose?: (code: number, reason: string) => void;
+  /**
+   * A connection that delivers no frame at all (event, ping, ready) for this long is closed locally (code 4000,
+   * reported to {@link SocketOptions.onClose}) and replaced; the new connection resyncs. Default
+   * {@link DEFAULT_LIVENESS_MS}; 0 turns the watchdog off.
+   */
+  livenessMs?: number;
+  /**
+   * A listener (`onEvent`, `on()`) threw: the other listeners still get the event. Default: `console.error`.
+   */
+  onListenerError?: (error: unknown, event: TavrnEvent) => void;
 }
+
+/** Two missed pings of the node (every 30 s) plus slack. */
+export const DEFAULT_LIVENESS_MS = 75_000;
 
 const CLOSE_RESTART = 4000;
 const CLOSE_AUTH = 4001;
@@ -56,6 +70,8 @@ export class TavrnSocket {
    */
   private generation = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
+  /** Liveness watchdog of the current connection. */
+  private watchdog: ReturnType<typeof setTimeout> | null = null;
   private listeners = new Map<string, Set<(data: never) => void>>();
   status: SocketStatus = "closed";
   sessionId: string | null = null;
@@ -72,6 +88,7 @@ export class TavrnSocket {
     this.closedByUser = true;
     this.generation += 1;
     if (this.timer) clearTimeout(this.timer);
+    this.stopWatchdog();
     this.ws?.close(1000, "client");
     this.ws = null;
     this.setStatus("closed");
@@ -82,7 +99,10 @@ export class TavrnSocket {
     const set = this.listeners.get(type) ?? new Set();
     set.add(handler as (data: never) => void);
     this.listeners.set(type, set);
-    return () => set.delete(handler as (data: never) => void);
+    return () => {
+      set.delete(handler as (data: never) => void);
+      if (!set.size && this.listeners.get(type) === set) this.listeners.delete(type);
+    };
   }
 
   send(op: Record<string, unknown>): boolean {
@@ -109,8 +129,18 @@ export class TavrnSocket {
     this.opts.onStatus?.(status);
   }
 
-  private async open() {
+  /** One connection attempt; a failure before the socket exists (token provider, constructor) retries with backoff. */
+  private async open(): Promise<void> {
     const generation = this.generation;
+    try {
+      await this.openInner(generation);
+    } catch {
+      if (generation !== this.generation || this.closedByUser) return;
+      this.scheduleReconnect();
+    }
+  }
+
+  private async openInner(generation: number): Promise<void> {
     const token = await this.opts.getToken();
     // close() or a newer connect() happened during the token fetch: this attempt is obsolete.
     if (generation !== this.generation || this.closedByUser) return;
@@ -129,19 +159,24 @@ export class TavrnSocket {
     }
     const ws = new Impl(this.opts.url);
     this.ws = ws;
+    this.armWatchdog(ws);
     ws.onopen = () => {
       if (this.ws !== ws) {
         ws.close(1000, "client");
         return;
       }
+      this.armWatchdog(ws);
       ws.send(JSON.stringify({ op: "hello", token, capabilities: this.opts.capabilities ?? ["content.v1"], last_event_id: null }));
     };
     ws.onmessage = (m: MessageEvent) => {
-      if (this.ws === ws) this.handle(String(m.data));
+      if (this.ws !== ws) return;
+      this.armWatchdog(ws);
+      this.handle(String(m.data));
     };
     ws.onclose = (ev: CloseEvent) => {
       if (this.ws !== ws) return;
       this.ws = null;
+      this.stopWatchdog();
       if (!this.closedByUser) this.opts.onClose?.(ev.code, String((ev as { reason?: unknown }).reason ?? ""));
       if (ev.code === CLOSE_REPLACED) {
         this.closedByUser = true;
@@ -158,6 +193,33 @@ export class TavrnSocket {
     ws.onerror = () => {
       /* onclose always follows */
     };
+  }
+
+  /** (Re)starts the liveness timer of `ws`: any frame proves the connection alive. */
+  private armWatchdog(ws: WebSocket) {
+    const ms = this.opts.livenessMs ?? DEFAULT_LIVENESS_MS;
+    this.stopWatchdog();
+    if (ms <= 0) return;
+    this.watchdog = setTimeout(() => this.silent(ws), ms);
+  }
+
+  private stopWatchdog() {
+    if (this.watchdog) clearTimeout(this.watchdog);
+    this.watchdog = null;
+  }
+
+  /** No frame for the liveness interval: a half-open connection (NAT timeout, sleep). Replace it. */
+  private silent(ws: WebSocket) {
+    this.watchdog = null;
+    if (this.ws !== ws || this.closedByUser) return;
+    this.ws = null;
+    try {
+      ws.close(CLOSE_RESTART, "liveness");
+    } catch {
+      /* already closing */
+    }
+    this.opts.onClose?.(CLOSE_RESTART, "liveness");
+    this.scheduleReconnect();
   }
 
   /** 4001: refresh once and reconnect; the session is over when that is not possible. */
@@ -215,9 +277,18 @@ export class TavrnSocket {
         break;
       case "event": {
         const event = { id: String(frame.id), type: String(frame.type), data: frame.data } as TavrnEvent;
-        this.opts.onEvent?.(event);
-        this.listeners.get(event.type)?.forEach((h) => h(event.data as never));
-        this.listeners.get("*")?.forEach((h) => h(event as never));
+        // Every listener gets the event, whatever another one does (a throw would also escape the socket callback).
+        const call = (fn: () => void) => {
+          try {
+            fn();
+          } catch (e) {
+            if (this.opts.onListenerError) this.opts.onListenerError(e, event);
+            else console.error("tavrn socket: event listener failed", event.type, e);
+          }
+        };
+        if (this.opts.onEvent) call(() => this.opts.onEvent!(event));
+        for (const h of [...(this.listeners.get(event.type) ?? [])]) call(() => h(event.data as never));
+        for (const h of [...(this.listeners.get("*") ?? [])]) call(() => h(event as never));
         break;
       }
       default:
