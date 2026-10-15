@@ -48,9 +48,16 @@ publish-check:
 bot-example: install
     pnpm --filter @tavrn/bot example
 
-# Check out the protocol submodule (openapi.json, test vectors) if it is missing
+# Check out the protocol submodule (openapi.json, test vectors) at the pinned commit: when it is missing, and when a
+# checkout is stale (the pin moved, e.g. after a pull). Stage a new pin (`git add protocol`) before running checks.
 protocol:
-    @[ -f protocol/openapi.json ] || git submodule update --init protocol
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "$(git submodule status protocol | cut -c1)" in
+      -) git submodule update --init protocol ;;
+      +) echo "protocol/ is not at the pinned commit: checking out the pin" >&2
+         git submodule update --init protocol ;;
+    esac
 
 [private]
 install:
