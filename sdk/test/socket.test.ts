@@ -11,7 +11,11 @@ class FakeWebSocket {
   onmessage: ((m: { data: string }) => void) | null = null;
   onclose: ((ev: { code: number }) => void) | null = null;
   onerror: (() => void) | null = null;
-  constructor(public url: string) {
+  constructor(
+    public url: string,
+    public protocols?: unknown,
+    public options?: unknown,
+  ) {
     FakeWebSocket.instances.push(this);
   }
   send(data: string) {
@@ -331,6 +335,14 @@ describe("TavrnSocket", () => {
     socket.close();
   });
 
+  it("hands the default frame cap to the WebSocket implementation as maxPayload", async () => {
+    const { socket } = make();
+    socket.connect();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(FakeWebSocket.instances[0]!.options).toEqual({ maxPayload: 16 * 1024 * 1024 });
+    socket.close();
+  });
+
   it("does not parse a frame above the length cap: the connection is replaced", async () => {
     const closes: [number, string][] = [];
     const { socket, events } = make({ onClose: (code, reason) => closes.push([code, reason]), maxFrameLength: 1024 });
@@ -345,6 +357,9 @@ describe("TavrnSocket", () => {
     expect(events).toHaveLength(1);
     expect(ws.readyState).toBe(3);
     expect(closes).toEqual([[4000, "frame_too_large"]]);
+    // The same cap as `maxPayload` for implementations that refuse a frame while receiving it (`ws`).
+    expect(ws.options).toEqual({ maxPayload: 1024 });
+    expect(ws.protocols).toBeUndefined();
     await vi.advanceTimersByTimeAsync(1_000);
     expect(FakeWebSocket.instances).toHaveLength(2);
     socket.close();

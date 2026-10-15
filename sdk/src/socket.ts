@@ -49,7 +49,9 @@ export interface SocketOptions {
   /**
    * Largest text frame accepted, in characters (default {@link DEFAULT_MAX_FRAME_LENGTH}): a longer one is not parsed;
    * the connection is closed (code 4000, reason `frame_too_large`, reported to {@link SocketOptions.onClose}) and
-   * replaced, and the new connection resyncs.
+   * replaced, and the new connection resyncs. The same value goes to the WebSocket implementation as `maxPayload`
+   * (bytes, the option of the Node.js package `ws`, which then refuses a larger frame before buffering it; browsers
+   * and the built-in WebSocket of Node.js ignore it, there the check runs after the frame arrived).
    */
   maxFrameLength?: number;
 }
@@ -166,7 +168,8 @@ export class TavrnSocket {
       this.ws = null;
       previous.close(1000, "client");
     }
-    const ws = new Impl(this.opts.url);
+    // The third argument is the options of `ws` (maxPayload: refused while receiving); other implementations ignore it.
+    const ws = new (Impl as unknown as new (url: string, protocols: undefined, options: { maxPayload: number }) => WebSocket)(this.opts.url, undefined, { maxPayload: this.maxFrameLength });
     this.ws = ws;
     this.armWatchdog(ws);
     ws.onopen = () => {
@@ -179,7 +182,7 @@ export class TavrnSocket {
     };
     ws.onmessage = (m: MessageEvent) => {
       if (this.ws !== ws) return;
-      if (typeof m.data === "string" && m.data.length > (this.opts.maxFrameLength ?? DEFAULT_MAX_FRAME_LENGTH)) {
+      if (typeof m.data === "string" && m.data.length > this.maxFrameLength) {
         this.replace(ws, "frame_too_large");
         return;
       }
@@ -214,6 +217,10 @@ export class TavrnSocket {
     this.stopWatchdog();
     if (ms <= 0) return;
     this.watchdog = setTimeout(() => this.silent(ws), ms);
+  }
+
+  private get maxFrameLength(): number {
+    return this.opts.maxFrameLength ?? DEFAULT_MAX_FRAME_LENGTH;
   }
 
   private stopWatchdog() {

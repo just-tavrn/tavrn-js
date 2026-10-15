@@ -59,7 +59,9 @@ development node with `just bot-example`. [`examples/proposals/`](examples/propo
 presence (`pnpm --filter @tavrn/bot example:proposals`).
 
 Node.js 22 and newer have a global `WebSocket`. On Node.js 20 start with `--experimental-websocket` or pass
-`WebSocketImpl` (e.g. `import WebSocket from "ws"`).
+`WebSocketImpl` (e.g. `import WebSocket from "ws"`). With `ws` the runtime also sets `maxPayload` (16 MiB), so a
+node cannot make the bot buffer a larger frame; the built-in `WebSocket` has no such option and refuses an oversized
+frame only after receiving it, so pass `ws` when the bot's memory must be bounded strictly.
 
 ## Configuration
 
@@ -370,9 +372,12 @@ A bot is an ordinary participant of tavrn's encryption ([`ENCRYPTION.md`](https:
 - **Never plaintext where it must be encrypted.** DMs and group DMs are always end-to-end encrypted. The runtime never
   writes them in plaintext, nor a channel whose encryption group it holds or that it saw encrypted in the session,
   whatever the node reports: such a write (send, edit, poll vote, thread, files-channel upload) fails with
-  `BotError("encryption_downgrade")` and nothing is sent. Edits follow the conversation, not the edited message. A
-  channel whose encryption an operator really switched off stays closed to the bot's plaintext until the bot no
-  longer holds its encryption group (restart with a fresh state directory or remove the bot from the channel's group).
+  `BotError("encryption_downgrade")` and nothing is sent. Edits follow the conversation, not the edited message.
+  **By design**, a channel that an admin switched from encrypted to plaintext stays write-blocked for a bot that
+  holds its encryption group (the runtime cannot tell a real switch from a node that lies about it): the bot can
+  write there again only once it no longer holds the group (removed from the channel's group, or started with a fresh
+  state directory). A channel the bot only saw encrypted, without holding its group, is writable again after a
+  restart.
 - **Local state.** The MLS state lives in `stateDir/state.json`, encrypted with a key derived from the master secret:
   the directory alone is useless to a thief, the key file is the secret. Keep the directory on a persistent volume:
   without a history backup (the default) it is the only place the epoch keys of past messages live.
