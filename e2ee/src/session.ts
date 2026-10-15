@@ -108,9 +108,19 @@ export async function openMlsManager(store: KeyStore, opts: OpenMlsOptions): Pro
     resolveManager(null);
     return null;
   }
-  const pins = await readJsonSecret<Record<string, Pin>>(store, PINS, {});
-  const meta = await readJsonSecret<MlsMeta>(store, META, { convs: {} });
-  const verified = await readJsonSecret<Record<string, VerifiedContact>>(store, VERIFIED, {});
+  let pins: Record<string, Pin>;
+  let meta: MlsMeta;
+  let verified: Record<string, VerifiedContact>;
+  try {
+    // Pins and verified contacts must not reset silently (every changed key would be trusted again, TOFU).
+    pins = await readJsonSecret<Record<string, Pin>>(store, PINS, {}, { strict: true });
+    meta = await readJsonSecret<MlsMeta>(store, META, { convs: {} });
+    verified = await readJsonSecret<Record<string, VerifiedContact>>(store, VERIFIED, {}, { strict: true });
+  } catch (e) {
+    tabs?.close();
+    resolveManager(null);
+    throw e;
+  }
   const own = { key: await ownIdentityPublicKey(store) };
   const link: MlsTabLink | undefined = tabs
     ? {

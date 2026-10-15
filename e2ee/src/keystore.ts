@@ -13,6 +13,7 @@
  * throw while the store is locked.
  */
 import { MasterSecret } from "@tavrn/crypto";
+import { E2eeError } from "./errors";
 import { ensureCrypto } from "./wasm";
 
 export type CryptoStatus = "none" | "locked" | "unlocked";
@@ -100,13 +101,18 @@ export function withBackupKey<T>(store: KeyStore, fn: (key: Uint8Array) => T): T
   }
 }
 
-/** Reads a named secret holding JSON; `fallback` if it is missing or unreadable. */
-export async function readJsonSecret<T>(store: KeyStore, name: string, fallback: T): Promise<T> {
+/**
+ * Reads a named secret holding JSON; `fallback` if it is missing or unreadable. With `strict`, a secret that exists
+ * but does not parse throws `E2eeError("state_unreadable")` instead (and stays stored): for data whose loss must not
+ * go unnoticed, such as the key pins (a silent reset would trust every changed key again).
+ */
+export async function readJsonSecret<T>(store: KeyStore, name: string, fallback: T, opts: { strict?: boolean } = {}): Promise<T> {
   const bytes = await store.getSecret(name);
   if (!bytes) return fallback;
   try {
     return JSON.parse(new TextDecoder().decode(bytes)) as T;
   } catch {
+    if (opts.strict) throw new E2eeError("state_unreadable");
     return fallback;
   } finally {
     bytes.fill(0);
