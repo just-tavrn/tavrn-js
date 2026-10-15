@@ -343,6 +343,28 @@ describe("TavrnSocket", () => {
     socket.close();
   });
 
+  it("constructs the platform's own WebSocket with the URL only (a browser rejects the options of `ws`)", async () => {
+    const calls: unknown[][] = [];
+    class BrowserLike extends FakeWebSocket {
+      constructor(...args: unknown[]) {
+        // Chromium: "The subprotocol '[object Object]' is invalid."
+        if (args.length > 2 || args.some((a) => typeof a === "object" && a !== null && !Array.isArray(a))) throw new SyntaxError("The subprotocol '[object Object]' is invalid.");
+        super(args[0] as string);
+        calls.push(args);
+      }
+    }
+    vi.stubGlobal("WebSocket", BrowserLike);
+    try {
+      const socket = new TavrnSocket({ url: "wss://n.example/api/v1/ws", getToken: () => "t" });
+      socket.connect();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(calls).toEqual([["wss://n.example/api/v1/ws"]]);
+      socket.close();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("does not parse a frame above the length cap: the connection is replaced", async () => {
     const closes: [number, string][] = [];
     const { socket, events } = make({ onClose: (code, reason) => closes.push([code, reason]), maxFrameLength: 1024 });

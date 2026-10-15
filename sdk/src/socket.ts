@@ -49,9 +49,9 @@ export interface SocketOptions {
   /**
    * Largest text frame accepted, in characters (default {@link DEFAULT_MAX_FRAME_LENGTH}): a longer one is not parsed;
    * the connection is closed (code 4000, reason `frame_too_large`, reported to {@link SocketOptions.onClose}) and
-   * replaced, and the new connection resyncs. The same value goes to the WebSocket implementation as `maxPayload`
-   * (bytes, the option of the Node.js package `ws`, which then refuses a larger frame before buffering it; browsers
-   * and the built-in WebSocket of Node.js ignore it, there the check runs after the frame arrived).
+   * replaced, and the new connection resyncs. The same value goes to a given `WebSocketImpl` as `maxPayload` (bytes,
+   * the option of the Node.js package `ws`, which then refuses a larger frame before buffering it); the platform's own
+   * WebSocket is constructed with the URL only, there the check runs after the frame arrived.
    */
   maxFrameLength?: number;
 }
@@ -168,8 +168,12 @@ export class TavrnSocket {
       this.ws = null;
       previous.close(1000, "client");
     }
-    // The third argument is the options of `ws` (maxPayload: refused while receiving); other implementations ignore it.
-    const ws = new (Impl as unknown as new (url: string, protocols: undefined, options: { maxPayload: number }) => WebSocket)(this.opts.url, undefined, { maxPayload: this.maxFrameLength });
+    // A given implementation (Node.js: `ws`) gets its options as the third argument (maxPayload: refused while
+    // receiving). The platform's own WebSocket gets the URL only: a browser's constructor does not ignore a third
+    // argument (Chromium takes the object as the subprotocol list and throws), the frame check below covers it.
+    const ws = this.opts.WebSocketImpl
+      ? new (Impl as unknown as new (url: string, protocols: undefined, options: { maxPayload: number }) => WebSocket)(this.opts.url, undefined, { maxPayload: this.maxFrameLength })
+      : new Impl(this.opts.url);
     this.ws = ws;
     this.armWatchdog(ws);
     ws.onopen = () => {
