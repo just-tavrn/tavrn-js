@@ -4,6 +4,7 @@
  * §8), the base URLs of a node and PKCE for the connect flow (§8, RFC 7636).
  */
 import { TavrnApiError } from "./errors";
+import { deadline, readText } from "./http";
 import type { PeerResolution, WellKnown } from "./generated/types.gen";
 import { b64urlEncode } from "./webauthn";
 
@@ -11,6 +12,8 @@ import { b64urlEncode } from "./webauthn";
 export const FEDERATION_CAPABILITY = "federation.v1";
 /** Largest discovery document a client accepts (§1.3). */
 export const MAX_DISCOVERY_BYTES = 64 * 1024;
+/** Default deadline of a discovery request (the document of another domain). */
+export const DISCOVERY_TIMEOUT_MS = 15_000;
 
 const USERNAME = /^[a-z0-9][a-z0-9_.-]{1,31}$/;
 const LABEL = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
@@ -116,24 +119,40 @@ export function fallbackEndpoints(domain: string): NodeEndpoints {
 
 type WellKnownFetch = { kind: "doc"; doc: WellKnown } | { kind: "missing" } | { kind: "status"; status: number } | { kind: "unreachable" };
 
-/** `https://<domain>/.well-known/tavrn` straight from the browser (CORS-open), classified. */
-async function fetchWellKnown(domain: string, doFetch: typeof fetch): Promise<WellKnownFetch> {
-  let resp: Response;
+/** Deadline and abort signal of discovery requests. */
+export interface DiscoveryTimeouts {
+  /** Deadline of the request in milliseconds (default {@link DISCOVERY_TIMEOUT_MS}; 0 = none). */
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+/**
+ * `https://<domain>/.well-known/tavrn` straight from the browser (CORS-open), classified. The body is read up to
+ * {@link MAX_DISCOVERY_BYTES} (a larger one counts as unreadable) within the deadline.
+ */
+async function fetchWellKnown(domain: string, doFetch: typeof fetch, opts: DiscoveryTimeouts = {}): Promise<WellKnownFetch> {
+  const d = deadline(opts.timeoutMs ?? DISCOVERY_TIMEOUT_MS, opts.signal);
   try {
-    resp = await doFetch(`https://${domain}/.well-known/tavrn`, { headers: { Accept: "application/json" }, credentials: "omit", redirect: "error" });
-  } catch {
-    // CORS, TLS, DNS or a development peer: the browser cannot tell which.
+    let resp: Response;
+    try {
+      resp = await doFetch(`https://${domain}/.well-known/tavrn`, { headers: { Accept: "application/json" }, credentials: "omit", redirect: "error", signal: d.signal });
+    } catch {
+      // CORS, TLS, DNS, a timeout or a development peer: the browser cannot tell which.
+      return { kind: "unreachable" };
+    }
+    if (resp.status === 404 || !resp.ok) {
+      void resp.body?.cancel().catch(() => undefined);
+      return resp.status === 404 ? { kind: "missing" } : { kind: "status", status: resp.status };
+    }
+    try {
+      return { kind: "doc", doc: JSON.parse(await readText(resp, MAX_DISCOVERY_BYTES)) as WellKnown };
+    } catch {
+      /* unreadable, too large or too slow: like unreachable */
+    }
     return { kind: "unreachable" };
+  } finally {
+    d.done();
   }
-  if (resp.status === 404) return { kind: "missing" };
-  if (!resp.ok) return { kind: "status", status: resp.status };
-  try {
-    const text = await resp.text();
-    if (text.length <= MAX_DISCOVERY_BYTES) return { kind: "doc", doc: JSON.parse(text) as WellKnown };
-  } catch {
-    /* unreadable: like unreachable */
-  }
-  return { kind: "unreachable" };
 }
 
 function unreachable(domain: string): TavrnApiError {
@@ -144,15 +163,15 @@ function unreachable(domain: string): TavrnApiError {
  * Discovery document of `domain`: first straight from `https://<domain>/.well-known/tavrn` (CORS-open),
  * otherwise through `proxy` (the node the client was loaded from, `GET /federation/peer/{domain}`).
  */
-export async function discoverNode(domain: string, opts: { fetchImpl?: typeof fetch; proxy?: (domain: string) => Promise<WellKnown> } = {}): Promise<WellKnown> {
-  const fetched = await fetchWellKnown(domain, opts.fetchImpl ?? fetch);
+export async function discoverNode(domain: string, opts: DiscoveryTimeouts & { fetchImpl?: typeof fetch; proxy?: (domain: string) => Promise<WellKnown> } = {}): Promise<WellKnown> {
+  const fetched = await fetchWellKnown(domain, opts.fetchImpl ?? fetch, opts);
   if (fetched.kind === "doc") return fetched.doc;
   if (!opts.proxy) throw unreachable(domain);
   return opts.proxy(domain);
 }
 
 /** How {@link resolveNode} asks for help: the node this client was loaded from. */
-export interface ResolveNodeOptions {
+export interface ResolveNodeOptions extends DiscoveryTimeouts {
   fetchImpl?: typeof fetch;
   /**
    * The resolution of the own node (`GET /federation/resolve/{domain}`): well-known, `_tavrn._tcp` SRV record,
@@ -180,7 +199,7 @@ export interface ResolveNodeOptions {
  * claiming another domain) stays an error.
  */
 export async function resolveNode(domain: string, opts: ResolveNodeOptions = {}): Promise<NodeEndpoints> {
-  const fetched = await fetchWellKnown(domain, opts.fetchImpl ?? fetch);
+  const fetched = await fetchWellKnown(domain, opts.fetchImpl ?? fetch, opts);
   switch (fetched.kind) {
     case "doc":
       return nodeEndpoints(fetched.doc, domain, opts);
@@ -208,8 +227,8 @@ export async function resolveNode(domain: string, opts: ResolveNodeOptions = {})
  * `api` is on `host`, otherwise null. The caller then resolves that domain through its own well-known, so
  * the host can only name a domain that delegates to it.
  */
-export async function identityOfHost(host: string, opts: { fetchImpl?: typeof fetch } = {}): Promise<string | null> {
-  const fetched = await fetchWellKnown(host, opts.fetchImpl ?? fetch);
+export async function identityOfHost(host: string, opts: DiscoveryTimeouts & { fetchImpl?: typeof fetch } = {}): Promise<string | null> {
+  const fetched = await fetchWellKnown(host, opts.fetchImpl ?? fetch, opts);
   if (fetched.kind !== "doc") return null;
   const doc = fetched.doc;
   if (typeof doc?.domain !== "string" || !isNodeDomain(doc.domain)) return null;

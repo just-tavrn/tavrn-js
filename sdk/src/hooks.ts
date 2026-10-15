@@ -19,7 +19,9 @@
  * if (result.event.type === "ping") return Response.json({ challenge: result.event.challenge });
  * ```
  */
+import { DISCOVERY_TIMEOUT_MS, MAX_DISCOVERY_BYTES } from "./federation";
 import type { PublicKeyInfo } from "./generated/types.gen";
+import { deadline, discard, readText } from "./http";
 import { b64urlDecode, b64urlEncode } from "./webauthn";
 
 export const HOOK_TYPE = "hook";
@@ -97,6 +99,8 @@ export interface HookVerifierOptions {
   keyCacheSecs?: number;
   /** `fetch` implementation (tests). */
   fetch?: typeof fetch;
+  /** Deadline of the key fetch in milliseconds (default 15 s). */
+  timeoutMs?: number;
   /** Current time in seconds (tests). */
   now?: () => number;
   /** WebCrypto implementation (tests); defaults to `globalThis.crypto.subtle`. */
@@ -122,6 +126,7 @@ function bytesOf(body: HookRequest["body"]): Uint8Array<ArrayBuffer> {
   if (body instanceof ArrayBuffer) return new Uint8Array(body);
   return new Uint8Array(body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength) as ArrayBuffer);
 }
+
 
 /** UTF-8 bytes → string, without TextDecoder (whose typed-array realm checks differ between runtimes). */
 function utf8(bytes: Uint8Array): string {
@@ -159,15 +164,21 @@ export class HookVerifier {
 
   private async fetchKeys(): Promise<KeySet | null> {
     const doFetch = this.opts.fetch ?? fetch;
+    const d = deadline(this.opts.timeoutMs ?? DISCOVERY_TIMEOUT_MS);
     try {
-      const resp = await doFetch(`${this.origin}/.well-known/tavrn`, { headers: { Accept: "application/json" }, redirect: "error" });
-      if (!resp.ok) return null;
-      const doc = (await resp.json()) as { domain?: unknown; keys?: unknown };
+      const resp = await doFetch(`${this.origin}/.well-known/tavrn`, { headers: { Accept: "application/json" }, redirect: "error", signal: d.signal });
+      if (!resp.ok) {
+        discard(resp);
+        return null;
+      }
+      const doc = JSON.parse(await readText(resp, MAX_DISCOVERY_BYTES)) as { domain?: unknown; keys?: unknown };
       if (typeof doc.domain !== "string" || !Array.isArray(doc.keys)) return null;
       const keys = (doc.keys as PublicKeyInfo[]).filter((k) => k && typeof k.kid === "string" && typeof k.x === "string");
       return { domain: doc.domain, keys, fetchedAt: this.now() };
     } catch {
       return null;
+    } finally {
+      d.done();
     }
   }
 
