@@ -141,22 +141,6 @@ export interface ModalSubmitData extends Omit<ComponentInvokeData, "message_id" 
   values: Record<string, string> | null;
 }
 
-/** `POST /conversations/{id}/messages/{message_id}/interactions` (until the generated type exists). */
-export interface ComponentInvokeRequest {
-  custom_id: string;
-  values?: string[] | null;
-  values_ciphertext?: string | null;
-  epoch?: number | null;
-  thread_id?: null;
-}
-
-/** `POST /interactions/{id}/submit` (until the generated type exists). */
-export interface ModalSubmitRequest {
-  values?: Record<string, string> | null;
-  values_ciphertext?: string | null;
-  epoch?: number | null;
-}
-
 /** A refused component, modal or value: the node's error code and `meta.path`. */
 export interface ComponentIssue {
   code: "message.components_invalid" | "interaction.modal_invalid" | "component.values_invalid" | "interaction.values_invalid";

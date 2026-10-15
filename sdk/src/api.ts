@@ -198,8 +198,8 @@ import type { PeerResolution } from "./generated/types.gen";
 import type { PushRegistration, PushSubscriptionRequest, VapidInfo } from "./generated/types.gen";
 import type { AdminRoom, AutomodRule, AutomodSettings, CreateReportRequest, ModerationReport, ReportActionRequest, ReportActionResult, ReportCreated, ReportList, UpdateReportRequest } from "./generated/types.gen";
 import type { AcceptTermsRequest, AccountDeletion, CounterDecision, CounterNoticeRequest, DataSummary, DeleteAccountRequest, DeletionStarted, LegalContact, LegalDocument, LegalTemplate, Notice, NoticeAction, NoticeActionResult, NoticeCreated, NoticeDetail, NoticeRequest, NoticeStatus, TermsStatus, UploaderNotice } from "./generated/types.gen";
-import type { ComponentInvokeRequest, Modal, ModalSubmitRequest } from "./components";
-import type { Callback, CommandApproval, CommandApprovalRequest, CommandApprovalSettings, CommandDefinition, CommandSet, FollowUp, FollowUpResponse, InvokeRequest, InvokeResponse, PaletteCommand, PutCommandSettings, RoomCommand, RoomCommands } from "./generated/types.gen";
+import type { Modal } from "./components";
+import type { Callback, ComponentInvokeRequest, ModalSubmitRequest, CommandApproval, CommandApprovalRequest, CommandApprovalSettings, CommandDefinition, CommandSet, FollowUp, FollowUpResponse, InvokeRequest, InvokeResponse, PaletteCommand, PutCommandSettings, RoomCommand, RoomCommands } from "./generated/types.gen";
 
 /**
  * The conversation index of the home node (FEDERATION.md §4) with its version (`ETag`). Entries may carry

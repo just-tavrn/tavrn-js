@@ -709,7 +709,7 @@ export type CallState = {
  */
 export type Callback = {
     /**
-     * `reply`: a content object, or ciphertext in encrypted conversations.
+     * `reply` and `update`: a content object, or ciphertext in encrypted conversations.
      */
     content?: unknown;
     /**
@@ -727,11 +727,17 @@ export type Callback = {
      */
     message?: string | null;
     /**
+     * `modal`: the form (APPLICATIONS.md §5.10.3).
+     */
+    modal?: {
+        [key: string]: unknown;
+    } | null;
+    /**
      * `reply`: a thread of the conversation to answer in; defaults to the interaction's thread.
      */
     thread_id?: string | null;
     /**
-     * `reply`, `defer` or `error`.
+     * `reply`, `defer`, `error`, `update` (component interactions) or `modal`.
      */
     type: string;
 };
@@ -1015,6 +1021,32 @@ export type CommitRequest = {
      * Welcome for added devices, base64url; required when the commit adds devices.
      */
     welcome?: string | null;
+};
+
+/**
+ * `POST /conversations/{conversation_id}/messages/{message_id}/interactions` (APPLICATIONS.md §5.10.2).
+ */
+export type ComponentInvokeRequest = {
+    /**
+     * The button or select (1–100 characters).
+     */
+    custom_id: string;
+    /**
+     * The epoch of `values_ciphertext`.
+     */
+    epoch?: number | null;
+    /**
+     * Must be null: the thread is the message's.
+     */
+    thread_id?: string | null;
+    /**
+     * Unencrypted conversations: null for buttons, the selected option values for selects.
+     */
+    values?: Array<unknown> | null;
+    /**
+     * Encrypted conversations: the `component.values` content object encrypted like a message (base64url).
+     */
+    values_ciphertext?: string | null;
 };
 
 export type ConformanceRoom = {
@@ -2174,6 +2206,10 @@ export type EphemeralReply = {
     epoch?: number | null;
     interaction_id: string;
     /**
+     * The message whose component started the interaction (APPLICATIONS.md §5.10.3); null for commands.
+     */
+    message_id?: string | null;
+    /**
      * The thread the reply belongs to (null in the conversation itself).
      */
     thread_id?: string | null;
@@ -2995,7 +3031,7 @@ export type InstalledApplication = {
 };
 
 /**
- * The node-set envelope field of a command answer (APPLICATIONS.md §5.7).
+ * The node-set envelope field of an application's answer to an interaction (APPLICATIONS.md §5.7, §5.10.3).
  */
 export type InteractionRef = {
     /**
@@ -3003,13 +3039,21 @@ export type InteractionRef = {
      */
     application: string;
     /**
-     * The command's name.
+     * The command's name; null for components and for modals opened by a component.
      */
-    command: string;
+    command?: string | null;
     /**
      * The interaction id.
      */
     id: string;
+    /**
+     * `command`, `component` or `modal` (APPLICATIONS.md §5.10).
+     */
+    kind?: string;
+    /**
+     * The message whose component started the interaction; null for commands.
+     */
+    message_id?: string | null;
     /**
      * The invoker's address.
      */
@@ -3081,7 +3125,13 @@ export type InvokeResponse = {
     interaction_id: string;
     message?: null | Message;
     /**
-     * `reply`, `defer` or `error`.
+     * `modal`: the form to show on the invoking device (APPLICATIONS.md §5.10.3); returned only here.
+     */
+    modal?: {
+        [key: string]: unknown;
+    } | null;
+    /**
+     * `reply`, `defer`, `error`, `update` or `modal`.
      */
     outcome: string;
 };
@@ -3334,6 +3384,23 @@ export type MineList = {
     files: number;
     folders: number;
     next_after?: string | null;
+};
+
+/**
+ * `POST /interactions/{interaction_id}/submit` (APPLICATIONS.md §5.10.4).
+ */
+export type ModalSubmitRequest = {
+    epoch?: number | null;
+    /**
+     * Unencrypted conversations: input `custom_id` → text.
+     */
+    values?: {
+        [key: string]: unknown;
+    } | null;
+    /**
+     * Encrypted conversations: the `modal.values` content object encrypted like a message (base64url).
+     */
+    values_ciphertext?: string | null;
 };
 
 export type Mode = 'all' | 'mentions' | 'nothing';
@@ -10300,6 +10367,35 @@ export type EditConversationMessageResponses = {
 
 export type EditConversationMessageResponse = EditConversationMessageResponses[keyof EditConversationMessageResponses];
 
+export type InvokeComponentData = {
+    body: ComponentInvokeRequest;
+    path: {
+        conversation_id: string;
+        message_id: string;
+    };
+    query?: never;
+    url: '/api/v1/conversations/{conversation_id}/messages/{message_id}/interactions';
+};
+
+export type InvokeComponentErrors = {
+    400: ProblemDetails;
+    403: ProblemDetails;
+    404: ProblemDetails;
+    409: ProblemDetails;
+    410: ProblemDetails;
+    429: ProblemDetails;
+    503: ProblemDetails;
+    504: ProblemDetails;
+};
+
+export type InvokeComponentError = InvokeComponentErrors[keyof InvokeComponentErrors];
+
+export type InvokeComponentResponses = {
+    200: InvokeResponse;
+};
+
+export type InvokeComponentResponse = InvokeComponentResponses[keyof InvokeComponentResponses];
+
 export type DeletePollVoteData = {
     body?: never;
     path: {
@@ -11107,6 +11203,34 @@ export type FollowUpResponses = {
 };
 
 export type FollowUpResponse2 = FollowUpResponses[keyof FollowUpResponses];
+
+export type SubmitInteractionData = {
+    body: ModalSubmitRequest;
+    path: {
+        interaction_id: string;
+    };
+    query?: never;
+    url: '/api/v1/interactions/{interaction_id}/submit';
+};
+
+export type SubmitInteractionErrors = {
+    400: ProblemDetails;
+    403: ProblemDetails;
+    404: ProblemDetails;
+    409: ProblemDetails;
+    410: ProblemDetails;
+    429: ProblemDetails;
+    503: ProblemDetails;
+    504: ProblemDetails;
+};
+
+export type SubmitInteractionError = SubmitInteractionErrors[keyof SubmitInteractionErrors];
+
+export type SubmitInteractionResponses = {
+    200: InvokeResponse;
+};
+
+export type SubmitInteractionResponse = SubmitInteractionResponses[keyof SubmitInteractionResponses];
 
 export type GetInviteData = {
     body?: never;
