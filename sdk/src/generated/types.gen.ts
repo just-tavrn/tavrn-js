@@ -237,6 +237,74 @@ export type AgeStatus = {
 };
 
 /**
+ * A report as a moderation bot sees it (MODERATION.md §1.4a): metadata only, the reporter as a pseudonym.
+ */
+export type AppReport = {
+    /**
+     * How many action shortcuts were taken.
+     */
+    action_count: number;
+    category: string;
+    conversation_id?: string | null;
+    /**
+     * `channel` (null when unknown here).
+     */
+    conversation_kind?: string | null;
+    created_at: string;
+    /**
+     * How many messages the reporter released (never the messages).
+     */
+    evidence_count: number;
+    id: string;
+    /**
+     * `message`, `user` or `room`.
+     */
+    kind: string;
+    /**
+     * The reported message still exists on this node.
+     */
+    message_exists: boolean;
+    /**
+     * The reported message (its content is not part of the report for bots).
+     */
+    message_id?: string | null;
+    /**
+     * A pseudonym of the reporter (MODERATION.md §1.6 format), stable per reporter, bot and room, never the address;
+     * null for automod entries.
+     */
+    reporter?: string | null;
+    resolved_at?: string | null;
+    room_id?: string | null;
+    room_name?: string | null;
+    /**
+     * Always `room`: bots see the room's reports only.
+     */
+    scope: string;
+    /**
+     * `user` or `automod`.
+     */
+    source: string;
+    /**
+     * `open`, `resolved` or `dismissed`.
+     */
+    status: string;
+    target?: null | User;
+    target_address: string;
+    updated_at: string;
+};
+
+/**
+ * A page of the inbox for a moderation bot.
+ */
+export type AppReportList = {
+    /**
+     * Open reports of the room the bot may see (badges), whatever the filters.
+     */
+    open: number;
+    reports: Array<AppReport>;
+};
+
+/**
  * An app token without its secret.
  */
 export type AppToken = {
@@ -5047,6 +5115,11 @@ export type ReportList = {
 };
 
 /**
+ * A page of the inbox: `ReportList` for people, `AppReportList` for app tokens (MODERATION.md §1.4a).
+ */
+export type ReportListView = ReportList | AppReportList;
+
+/**
  * The node a forwarded report comes from (`source: forward`, MODERATION.md §1.6).
  */
 export type ReportOrigin = {
@@ -5127,6 +5200,11 @@ export type ReportSummary = {
      */
     reports: number;
 };
+
+/**
+ * One report: the full `ModerationReport` for people, the reduced `AppReport` for app tokens (MODERATION.md §1.4a).
+ */
+export type ReportView = ModerationReport | AppReport;
 
 export type ResendVerificationRequest = {
     /**
@@ -11637,13 +11715,17 @@ export type GetReportData = {
 };
 
 export type GetReportErrors = {
+    403: ProblemDetails;
     404: ProblemDetails;
 };
 
 export type GetReportError = GetReportErrors[keyof GetReportErrors];
 
 export type GetReportResponses = {
-    200: ModerationReport;
+    /**
+     * `ModerationReport`, or `AppReport` for app tokens
+     */
+    200: ReportView;
 };
 
 export type GetReportResponse = GetReportResponses[keyof GetReportResponses];
@@ -13852,7 +13934,10 @@ export type RoomReportsErrors = {
 export type RoomReportsError = RoomReportsErrors[keyof RoomReportsErrors];
 
 export type RoomReportsResponses = {
-    200: ReportList;
+    /**
+     * `ReportList`, or `AppReportList` for app tokens
+     */
+    200: ReportListView;
 };
 
 export type RoomReportsResponse = RoomReportsResponses[keyof RoomReportsResponses];

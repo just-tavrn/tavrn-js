@@ -34,7 +34,8 @@ against a real node.
 | Member join / leave events | PROTOCOL.md §6 | `members:read` | raw `event` only | typed: `memberJoin`, `memberLeave` |
 | Moderation: timeout, kick, ban, unban, ban list, audit log | MODERATION.md, APPLICATIONS.md §2.4 | `moderation` | missing | typed: `timeout()`, `kick()`, `ban()`, `unban()`, `bans()`, `auditLog()` |
 | Moderation: purge, nickname moderation | MODERATION.md | `moderation` | missing | raw: `bot.api(node).rooms.purge`, `.members.moderateProfile` |
-| Reports (read or act) | MODERATION.md §1 | — | closed (`report.bot_forbidden`) | closed; proposal tavrn-protocol#45 |
+| Reports: the room's inbox (read-only, metadata only; reporter as a pseudonym), report events | MODERATION.md §1.4a, §1.5 | `moderation` + `moderate_members` in the room | closed (`report.bot_forbidden`) | typed: `reports()`, `report()`, `report` / `onReport()` (tavrn-protocol#45) |
+| Reports: create, triage, action shortcuts, forward, delete | MODERATION.md §1 | — | closed (`report.bot_forbidden`) | closed by design: acting on reports stays with people |
 | Auto-moderation rules | MODERATION.md §2 | — | closed (not in the route table) | closed |
 | Presence: status, custom status, activity | APPLICATIONS.md §7.1, PROTOCOL.md §6a | `presence` | missing | typed: `setPresence()`, `setActivity()`, `clearActivity()` (every connected node) |
 | Presence of others | PROTOCOL.md §6a | `members:read` | missing | raw: `bot.api(node).presence.list()` |

@@ -19,7 +19,7 @@
  */
 import { LocalKeyMismatchError, MlsError, checkPollVote, contentAttachments, decryptAttachment, encryptAttachment, encryptPollVote, ensureDevice, localStatus, mlsApiOf, openMlsManager, parsePoll, pollContent, pollHash, pollVoteContent, qualify, signPlainPollVote, signedAttachments, splitQualified, tallyPoll, verifyPlainAttachment, type ContentAttachment, type Decrypted, type MlsManager, type PlainStatus, type Poll, type PollInput, type PollSelection, type PollTally, type VoteCheck } from "@tavrn/e2ee";
 import { FileKeyStore, StateDirInUseError } from "@tavrn/e2ee/node";
-import { TavrnApi, TavrnApiError, b64urlEncode, newUlid, resolveNode, type Attachment, type AuditEntry, type Ban, type Channel, type CommandDefinition, type CommandSet, type ConversationRequest, type CreateMessageRequest, type Member, type Message, type MyPresence, type NodeEndpoints, type PollVote, type Profile, type Room, type RoomDetail, type SearchQuery, type SearchResponse, type TavrnEvent, type Thread, type ThreadListQuery, type User, type UserKeys, type UserPrivate, type WellKnown } from "@tavrn/sdk";
+import { TavrnApi, TavrnApiError, b64urlEncode, newUlid, resolveNode, type AppReport, type AppReportList, type Attachment, type AuditEntry, type Ban, type Channel, type CommandDefinition, type CommandSet, type ConversationRequest, type CreateMessageRequest, type Member, type Message, type MyPresence, type NodeEndpoints, type PollVote, type Profile, type Room, type RoomDetail, type SearchQuery, type SearchResponse, type TavrnEvent, type Thread, type ThreadListQuery, type User, type UserKeys, type UserPrivate, type WellKnown } from "@tavrn/sdk";
 import { threadTitle } from "./threads";
 import { BotFiles, type FilesEvent } from "./files";
 import { CommandRouter, type CommandCrypto, type CommandHandler, type InvokeContext, type ReplyContent } from "./commands";
@@ -33,8 +33,8 @@ import { sealUnderPolicy, type GhostPolicy } from "./ghosts";
 import { NodeLink } from "./node-link";
 import { retryingFetch, type RetryOptions } from "./ratelimit";
 import { MessageTracker, validReaction } from "./reactions";
-import { MAX_ATTACHMENTS, asFile, type BotFile, type DownloadedFile } from "./uploads";
-import { activityRequest, banSubject, checkContent, mentionList, normalizeContent, presenceRequest, reason as checkReason, timeoutMinutes, ulid, voiceStatus, type ActivityInput, type PresenceInput } from "./validate";
+import { MAX_ATTACHMENTS, asFile, type BotFile, type DownloadedFile, uploadCategory } from "./uploads";
+import { activityRequest, banSubject, checkContent, mentionList, normalizeContent, presenceRequest, reason as checkReason, timeoutMinutes, ulid, voiceStatus, type ActivityInput, type PresenceInput, reportQuery, type ReportStatus } from "./validate";
 import { appTokenClaims, type AppTokenClaims } from "./token";
 
 /** Failed background writes of the encryption bookkeeping in a row after which the bot stops (`state_unwritable`). */
@@ -206,6 +206,28 @@ export interface ReactionEvent {
   encrypted: boolean;
   /** The message envelope after the change (content not decrypted; use {@link Bot.messages} for it). */
   message: Message;
+}
+
+/**
+ * `report.create` / `report.update` (MODERATION.md §1.4a, §1.5; scope `moderation` and `moderate_members` in the room):
+ * a report of a room the bot moderates was made or changed. The node tells no reason, evidence or reporter here; read
+ * the metadata with {@link Bot.report}.
+ */
+export interface ReportEvent {
+  node: string;
+  /** `create`: a new report; `update`: triaged, acted on or deleted. */
+  action: "create" | "update";
+  reportId: string;
+  roomId: string | null;
+  /** `open` for a new report; after an update `open`, `resolved`, `dismissed` or `deleted`. */
+  status: string;
+  /** `message`, `user` or `room` (`create` only, null for `update`). */
+  kind: string | null;
+  /** The category (`create` only, null for `update`). */
+  category: string | null;
+  /** `user` or `automod` (`create` only, null for `update`). */
+  source: string | null;
+  createdAt: string | null;
 }
 
 /** `message.delete`: a message was deleted (by its author or a moderator). */
@@ -383,6 +405,8 @@ export interface BotEvents {
   memberLeave: [MemberEvent];
   /** A thread was started, changed (title, archive, lock, counters) or deleted. */
   thread: [ThreadEvent];
+  /** A report of a room the bot moderates was made or changed (`moderation`, `moderate_members`; metadata only). */
+  report: [ReportEvent];
   /** A message request (somebody who is not the owner opened a DM with the bot): answer it with `acceptDm`/`declineDm`. */
   dmRequest: [DmRequestEvent];
   /** The content of a folder of a files channel changed (`files.update`, `messages:read`): list it again with `bot.files`. */
@@ -1048,6 +1072,23 @@ export class Bot {
         if (typeof data.room_id !== "string" || typeof data.channel_id !== "string") break;
         const folderId = typeof data.parent_id === "string" ? data.parent_id : null;
         this.emit("files", { node: link.domain, conversation: qualify(link.domain, data.channel_id), roomId: data.room_id, channelId: data.channel_id, folderId });
+      case "report.create":
+      case "report.update": {
+        const created = event.type === "report.create";
+        const r = (created ? data.report : data) as Record<string, unknown> | undefined;
+        if (!r || typeof r.id !== "string") break;
+        const str = (v: unknown) => (typeof v === "string" ? v : null);
+        this.emit("report", {
+          node: link.domain,
+          action: created ? "create" : "update",
+          reportId: r.id,
+          roomId: str(r.room_id),
+          status: created ? "open" : (str(r.status) ?? ""),
+          kind: str(r.kind),
+          category: str(r.category),
+          source: str(r.source),
+          createdAt: str(r.created_at),
+        });
         break;
       }
       case "conversation.request": {
@@ -1884,6 +1925,35 @@ export class Bot {
   async auditLog(room: RoomRef, query: { limit?: number; before?: string } = {}): Promise<AuditEntry[]> {
     const { link, roomId } = this.roomTarget(room);
     return link.api.rooms.auditLog(roomId, query);
+  }
+
+  /**
+   * The room's reports, newest first (MODERATION.md §1.4a; scope `moderation` and `moderate_members` in the room).
+   * Metadata only: kind, category, the reported user, status, counts, times and the reported message's id; the
+   * reporter is a pseudonym (the same for the same reporter in this room), never the address, and the reason, a
+   * snapshot or released messages are never part of it. `before` = the last report id of the previous page. Bots only
+   * read reports: creating, triage and the action shortcuts stay with people.
+   */
+  async reports(room: RoomRef, query: { status?: ReportStatus; limit?: number; before?: string } = {}): Promise<AppReportList> {
+    const { link, roomId } = this.roomTarget(room);
+    return link.api.reports.roomForApp(roomId, reportQuery(query));
+  }
+
+  /**
+   * One report of a room the bot moderates, in the shape of {@link Bot.reports}. `id` is the report id on `node`
+   * (default: the home node) or qualified as `"<node>/<id>"`, e.g. from a {@link ReportEvent}.
+   */
+  async report(id: string, node?: string): Promise<AppReport> {
+    this.running();
+    const slash = typeof id === "string" ? id.indexOf("/") : -1;
+    const domain = slash > 0 ? id.slice(0, slash) : (node ?? this.claims!.iss);
+    const reportId = ulid("reportId", slash > 0 ? id.slice(slash + 1) : id);
+    return this.linkFor(domain).api.reports.getForApp(reportId);
+  }
+
+  /** Adds a listener for {@link ReportEvent}s (see {@link Bot.reports}); returns a function that removes it. */
+  onReport(listener: (event: ReportEvent) => void | Promise<void>): () => void {
+    return this.on("report", listener);
   }
 
   /**

@@ -157,6 +157,25 @@ export function voiceStatus(status: string): string {
   return text("status", status, MAX_VOICE_STATUS, { empty: true });
 }
 
+/** The states of a report (MODERATION.md §1.4). */
+export const REPORT_STATUSES = ["open", "resolved", "dismissed"] as const;
+export type ReportStatus = (typeof REPORT_STATUSES)[number];
+
+/** The inbox query of `Bot.reports` (MODERATION.md §1.4): a status, `limit` 1–100, `before` a report id. */
+export function reportQuery(q: { status?: string; limit?: number; before?: string }): { status?: ReportStatus; limit?: number; before?: string } {
+  const out: { status?: ReportStatus; limit?: number; before?: string } = {};
+  if (q.status !== undefined) {
+    if (!REPORT_STATUSES.includes(q.status as ReportStatus)) throw new RangeError(`status: one of ${REPORT_STATUSES.join(", ")}`);
+    out.status = q.status as ReportStatus;
+  }
+  if (q.limit !== undefined) {
+    if (!Number.isInteger(q.limit) || q.limit < 1 || q.limit > 100) throw new RangeError("limit: an integer from 1 to 100");
+    out.limit = q.limit;
+  }
+  if (q.before !== undefined) out.before = ulid("before", q.before);
+  return out;
+}
+
 /** A ULID in canonical form (ids of messages, users, rooms, threads). */
 export function ulid(name: string, id: string): string {
   if (typeof id !== "string" || !isUlid(id)) throw new RangeError(`${name} must be an id (ULID)`);

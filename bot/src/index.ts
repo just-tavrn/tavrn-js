@@ -4,7 +4,7 @@
  * key file, the token's bot device, end-to-end encryption as an MLS member, messages, commands and remote
  * installations over federated sessions. See README.md.
  */
-export { BOT_VERSION, Bot, DEFAULT_STATE_DIR, JOINABLE_KINDS, createBot, threadTitle, type BotAttachment, type BotEvents, type BotInfo, type BotMessage, type BotOptions, type BotThread, type CreateThreadOptions, type DmRequestEvent, type InstallEvent, type MemberEvent, type MessageDeleteEvent, type PollOptions, type PollResults, type PollVoteEvent, type ReactionEvent, type RoomRef, type SendOptions, type ThreadEvent, type TokenExpiringEvent, type UndecryptableEvent, type UninstallEvent } from "./bot";
+export { BOT_VERSION, Bot, DEFAULT_STATE_DIR, JOINABLE_KINDS, createBot, threadTitle, type BotAttachment, type BotEvents, type BotInfo, type BotMessage, type BotOptions, type BotThread, type CreateThreadOptions, type DmRequestEvent, type InstallEvent, type MemberEvent, type MessageDeleteEvent, type PollOptions, type PollResults, type PollVoteEvent, type ReactionEvent, type ReportEvent, type RoomRef, type SendOptions, type ThreadEvent, type TokenExpiringEvent, type UndecryptableEvent, type UninstallEvent } from "./bot";
 export { ComponentInteraction, ComponentRouter, button, modal, row, select, textInput, withComponents, type ComponentEventData, type ComponentHandler, type Matcher } from "./components";
 // The shapes and checks of components (APPLICATIONS.md §5.10) are the SDK's; the encrypted values' checks are @tavrn/e2ee's.
 export { validateComponents, validateComponentValues, validateModal, validateModalValues, type Button, type Component, type Modal, type ModalInput, type Row, type Select, type SelectOption } from "@tavrn/sdk";
@@ -30,6 +30,7 @@ export {
   MAX_TIMEOUT_MINUTES,
   MAX_VOICE_STATUS,
   PRESENCE_STATUSES,
+  REPORT_STATUSES,
   activityRequest,
   checkContent,
   presenceRequest,
@@ -37,6 +38,7 @@ export {
   type ActivityType,
   type PresenceInput,
   type PresenceStatus,
+  type ReportStatus,
 } from "./validate";
 // Embeds (APPLICATIONS.md §6.4) are checked with the shared rules of @tavrn/e2ee.
 export { EmbedsInvalidError, MAX_EMBEDS, embedsProblem, type EmbedField, type MessageEmbed } from "@tavrn/e2ee";
