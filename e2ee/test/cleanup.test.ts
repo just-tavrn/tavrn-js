@@ -130,6 +130,41 @@ describe("LeafCleaner", () => {
     expect(mls.removeLeaves).toHaveBeenCalledTimes(1);
   });
 
+  it("noWait (a voice join): postponed at once when another device is elected, nothing committed", async () => {
+    const { cleaner, mls, sleeps } = fake([early, me, bobGone], { [bobGone]: "unattested" });
+    const r = await cleaner.clean({ q: Q, members, mayManage: false, noWait: true });
+    expect(r.outcome).toBe("postponed");
+    expect(r.ghosts.map((g) => g.identity)).toEqual([bobGone]);
+    expect(sleeps).toEqual([]);
+    expect(mls.removeLeaves).not.toHaveBeenCalled();
+    // The postponed cleanup runs again later without noWait (in the background) and waits as usual.
+    const later = await cleaner.clean({ q: Q, members, mayManage: false });
+    expect(sleeps).toEqual([CLEANUP_WAIT_MS]);
+    expect(later.outcome).toBe("removed");
+  });
+
+  it("noWait: an elected device removes at once", async () => {
+    const { cleaner, mls, sleeps } = fake([me, bobGone, carol], { [bobGone]: "unattested" });
+    const r = await cleaner.clean({ q: Q, members, mayManage: false, noWait: true });
+    expect(r.outcome).toBe("removed");
+    expect(mls.removeLeaves).toHaveBeenCalledWith(Q, [bobGone]);
+    expect(sleeps).toEqual([]);
+  });
+
+  it("noWait joins a running cleanup and cuts its election wait short", async () => {
+    const { cleaner, mls, sleeps } = fake([early, me, carol], {}, { sleepForever: true });
+    const req = { q: Q, members: ["alice@t.local", "dave@t.local"], mayManage: true };
+    const waiting = cleaner.clean(req);
+    await vi.waitFor(() => expect(sleeps).toEqual([CLEANUP_WAIT_MS]));
+    expect(cleaner.isRunning(Q)).toBe(true);
+    const join = cleaner.clean({ q: Q, members: null, mayManage: false, noWait: true });
+    const [a, b] = await Promise.all([waiting, join]);
+    expect(a).toBe(b);
+    expect(a.outcome).toBe("removed");
+    expect(mls.removeLeaves).toHaveBeenCalledTimes(1);
+    expect(cleaner.isRunning(Q)).toBe(false);
+  });
+
   it("runs once per conversation at a time", async () => {
     const { cleaner, mls } = fake([me, myOld], { [myOld]: "unattested" });
     const [a, b] = await Promise.all([cleaner.clean({ q: Q, members, mayManage: false }), cleaner.clean({ q: Q, members, mayManage: false })]);
@@ -236,5 +271,83 @@ describe("labelGhosts", () => {
     ];
     expect(labelGhosts(ghosts, [{ identity: myOld, reason: "deleted" }, { identity: carol, reason: "deleted" }]).map((g) => g.reason)).toEqual(["removed", "unattested", "not_member"]);
     expect(labelGhosts(ghosts, null)).toBe(ghosts);
+  });
+});
+
+describe("the election counts only devices that may do the removal (§4.7)", () => {
+  it("a lower device id that is offline (voice participants) does not hold this device back", async () => {
+    const { cleaner, mls, sleeps } = fake([early, me, bobGone], { [bobGone]: "unattested" });
+    const r = await cleaner.clean({ q: Q, members, mayManage: false, online: [me] });
+    expect(sleeps).toEqual([]);
+    expect(r.outcome).toBe("removed");
+    expect(mls.removeLeaves).toHaveBeenCalledWith(Q, [bobGone]);
+  });
+
+  it("a lower device id of a user who is offline (presence) does not hold this device back", async () => {
+    const { cleaner, sleeps } = fake([early, me, bobGone], { [bobGone]: "unattested" });
+    const r = await cleaner.clean({ q: Q, members, mayManage: false, onlineUsers: ["alice@t.local", "bob@t.local"] });
+    expect(sleeps).toEqual([]);
+    expect(r.outcome).toBe("removed");
+  });
+
+  it("a lower device id of a user who may not remove departed members does not hold a manager back", async () => {
+    // carol left; dave (lowest device id) is a plain member, alice manages.
+    const { cleaner, mls, sleeps } = fake([early, me, carol], {});
+    const r = await cleaner.clean({ q: Q, members: ["alice@t.local", "dave@t.local"], mayManage: true, managers: ["alice@t.local"] });
+    expect(sleeps).toEqual([]);
+    expect(r.outcome).toBe("removed");
+    expect(mls.removeLeaves).toHaveBeenCalledWith(Q, [carol]);
+  });
+
+  it("removals any member may do (deleted devices) still wait for a lower device id of a non-manager", async () => {
+    const { cleaner, sleeps } = fake([early, me, bobGone], { [bobGone]: "unattested" });
+    await cleaner.clean({ q: Q, members, mayManage: true, managers: ["alice@t.local"] });
+    expect(sleeps).toEqual([CLEANUP_WAIT_MS]);
+  });
+
+  it("a lower device id that is allowed and online: waits as before", async () => {
+    const { cleaner, sleeps } = fake([early, me, carol], {});
+    await cleaner.clean({ q: Q, members: ["alice@t.local", "dave@t.local"], mayManage: true, managers: ["alice@t.local", "dave@t.local"], onlineUsers: ["alice@t.local", "dave@t.local"] });
+    expect(sleeps).toEqual([CLEANUP_WAIT_MS]);
+    // Unknown managers and presence: every valid leaf counts (the behaviour without the lists).
+    const unknown = fake([early, me, carol], {});
+    await unknown.cleaner.clean({ q: Q, members: ["alice@t.local", "dave@t.local"], mayManage: true });
+    expect(unknown.sleeps).toEqual([CLEANUP_WAIT_MS]);
+  });
+
+  it("electedFirst with users known to be online", () => {
+    expect(electedFirst(me, [me, early], null, ["alice@t.local"])).toBe(true);
+    expect(electedFirst(me, [me, early], null, ["alice@t.local", "dave@t.local"])).toBe(false);
+    // Both lists: a device must be in both.
+    expect(electedFirst(me, [me, early], [early], ["alice@t.local"])).toBe(true);
+  });
+});
+
+describe("fresh device lookups (§4.6) only when the group changed", () => {
+  const freshFlags = (calls: unknown[][]) => calls.map((c) => !!(c[2] as { fresh?: boolean } | undefined)?.fresh);
+
+  it("a second cleanup of an unchanged roster uses the cached device lists", async () => {
+    const { cleaner, mls, state } = fake([me, bob], {});
+    expect((await cleaner.clean({ q: Q, members, mayManage: false })).outcome).toBe("clean");
+    expect((await cleaner.clean({ q: Q, members, mayManage: false })).outcome).toBe("clean");
+    expect(freshFlags(mls.ghostCheck.mock.calls)).toEqual([true, false]);
+    // Another leaf: fresh again.
+    state.roster = [me, bob, carol];
+    await cleaner.clean({ q: Q, members, mayManage: false });
+    expect(freshFlags(mls.ghostCheck.mock.calls)).toEqual([true, false, true]);
+  });
+
+  it("looks up again when the node lists a pending removal of a leaf in the group", async () => {
+    const { cleaner, mls } = fake([me, bob], {});
+    await cleaner.clean({ q: Q, members, mayManage: false });
+    await cleaner.clean({ q: Q, members, mayManage: false, pending: [{ identity: bob, reason: "deleted" }] });
+    expect(freshFlags(mls.ghostCheck.mock.calls)).toEqual([true, true]);
+  });
+
+  it("looks up again when a ghost was found last time", async () => {
+    const { cleaner, mls } = fake([me, bob], { [bob]: "unattested" }, { refuse: true });
+    await cleaner.clean({ q: Q, members, mayManage: false });
+    await cleaner.clean({ q: Q, members, mayManage: false });
+    expect(freshFlags(mls.ghostCheck.mock.calls)[2]).toBe(true);
   });
 });

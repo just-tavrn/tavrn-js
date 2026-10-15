@@ -121,6 +121,136 @@ describe("MlsManager", () => {
     expect(Object.keys(bob.pins)).toEqual([alice.address]);
   });
 
+  it("a self update right after the join does not fetch the handshake log a second time (voice join)", async () => {
+    const { node, device } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    await bob.mls.ensureJoined(CONV, { canCreate: true });
+    await alice.mls.catchUp(CONV);
+    const before = node.logCalls;
+    expect(await alice.mls.ensureJoined(CONV, { canCreate: true })).toBe("joined");
+    expect(node.logCalls).toBe(before + 1);
+    expect(await alice.mls.selfUpdate(CONV)).toBe(true);
+    expect(node.logCalls).toBe(before + 1);
+    expect(alice.mls.epoch(CONV)).toBe(2);
+    // A commit of another device in between: the epoch conflict brings the missing commit, the update still lands.
+    await alice.mls.catchUp(CONV);
+    await bob.mls.selfUpdate(CONV);
+    expect(await alice.mls.selfUpdate(CONV)).toBe(true);
+    expect(alice.mls.epoch(CONV)).toBe(node.groups.get(ID)!.epoch);
+    await bob.mls.catchUp(CONV);
+    const m = await send(alice, CONV, "after both updates", "m1");
+    expect(await bob.mls.decrypt(CONV, m)).toEqual({ ok: true, content: { type: "text", body: "after both updates" } });
+  });
+
+  it("a voice join's operations (priority) run before queued background work", async () => {
+    const { node, device } = setup();
+    const alice = device("alice", DEV.a);
+    const other = qualify(DOMAIN, "01J9ZK3G5M8Q2W4E6R8T0Y2V02");
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    await alice.mls.ensureJoined(other, { canCreate: true });
+    const order: string[] = [];
+    let open!: () => void;
+    const gate = new Promise<void>((r) => (open = r));
+    const ds = node.ds.bind(node);
+    node.ds = ((address: string, deviceId: string) => {
+      const api = ds(address, deviceId);
+      return {
+        ...api,
+        welcomes: async () => {
+          order.push("welcomes");
+          await gate;
+          return api.welcomes();
+        },
+        log: async (c: string, since: number) => {
+          order.push(`log ${c === ID ? "voice" : c === "01J9ZK3G5M8Q2W4E6R8T0Y2V02" ? "other" : c}`);
+          return api.log(c, since);
+        },
+        postCommit: async (c: string, req: Parameters<typeof api.postCommit>[1]) => {
+          order.push("commit");
+          return api.postCommit(c, req);
+        },
+      };
+    }) as typeof node.ds;
+    // A background probe of a channel without a group holds the queue (its Welcomes request hangs) ...
+    const probe = alice.mls.ensureJoined(CONV2, { canCreate: false });
+    await vi.waitFor(() => expect(order).toEqual(["welcomes"]));
+    // ... a background catch-up waits behind it, then the voice join's operations come.
+    const background = alice.mls.catchUp(other);
+    const join = alice.mls.ensureJoined(CONV, { canCreate: true, priority: true });
+    const update = alice.mls.selfUpdate(CONV, { priority: true });
+    await new Promise((r) => setTimeout(r, 5));
+    expect(order).toEqual(["welcomes"]);
+    open();
+    await Promise.all([probe, background, join, update]);
+    // The voice join's catch-up and commit come before the queued background catch-up.
+    expect(order).toEqual(["welcomes", "log voice", "commit", "log other"]);
+  });
+
+  it("joining a conversation without a local group asks for the Welcomes and the GroupInfo at once", async () => {
+    const { node, device } = setup();
+    const alice = device("alice", DEV.a);
+    const bob = device("bob", DEV.b);
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    let open!: () => void;
+    const gate = new Promise<void>((r) => (open = r));
+    const seen: string[] = [];
+    const ds = node.ds.bind(node);
+    node.ds = ((address: string, deviceId: string) => {
+      const api = ds(address, deviceId);
+      return {
+        ...api,
+        welcomes: async () => {
+          seen.push("welcomes");
+          await gate;
+          return api.welcomes();
+        },
+        groupInfo: async (c: string) => {
+          seen.push("groupInfo");
+          return api.groupInfo(c);
+        },
+      };
+    }) as typeof node.ds;
+    const joined = bob.mls.ensureJoined(CONV, { canCreate: true });
+    await new Promise((r) => setTimeout(r, 5));
+    // Both requests are out while the Welcomes are still on their way.
+    expect([...seen].sort()).toEqual(["groupInfo", "welcomes"]);
+    open();
+    expect(await joined).toBe("joined");
+    expect(node.groups.get(ID)!.epoch).toBe(1);
+    // A brand-new conversation: Welcomes and GroupInfo (404) at once, then the group is created.
+    seen.length = 0;
+    const fresh = bob.mls.ensureJoined(CONV2, { canCreate: true });
+    expect(await fresh).toBe("joined");
+    expect([...seen].sort()).toEqual(["groupInfo", "welcomes"]);
+    expect(node.groups.get(ID2)!.epoch).toBe(0);
+  });
+
+  it("a ghost check looks the members' devices up in parallel", async () => {
+    const { node, device } = setup();
+    const alice = device("alice", DEV.a);
+    const others = [device("bob", DEV.b), device("carol", DEV.c), device("dave", DEV.d)];
+    await alice.mls.ensureJoined(CONV, { canCreate: true });
+    for (const o of others) {
+      await o.mls.ensureJoined(CONV, { canCreate: true });
+      await alice.mls.catchUp(CONV);
+    }
+    let inFlight = 0;
+    let most = 0;
+    const keysOf = node.keysOf.bind(node);
+    node.keysOf = ((address: string) => {
+      inFlight++;
+      most = Math.max(most, inFlight);
+      return new Promise((r) => setTimeout(r, 5)).then(() => {
+        inFlight--;
+        return keysOf(address);
+      });
+    }) as unknown as typeof node.keysOf;
+    expect(await alice.mls.ghostCheck(CONV, [alice.address, ...others.map((o) => o.address)], { fresh: true })).toEqual([]);
+    expect(most).toBeGreaterThan(1);
+  });
+
   it("encrypts ephemeral events like messages, verifies the sender and rejects replays", async () => {
     const { node, device } = setup();
     const alice = device("alice", DEV.a);

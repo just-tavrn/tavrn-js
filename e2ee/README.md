@@ -67,9 +67,11 @@ adapts `@tavrn/sdk` clients) and persistence injected (`persist`, `savePins`, `s
 `KeyStore` (secrets `PINS`, `META`, `VERIFIED`) and returns null when the device has no MLS client yet.
 Conversation ids are qualified (`qualify(domain, ulid)`, `splitQualified`). Methods:
 
-- joining: `ensureJoined(q, { canCreate })`, `processWelcomes(domain)`, `catchUp(q)`, `addMissingDevices(q, members)`,
-  `removeLeaves(q, identities, keys?)` (with `keys`, exactly the leaves with those signature keys), `selfUpdate(q)`,
-  `hasGroup`, `epoch`. `addMissingDevices` adds a claimed KeyPackage only when its leaf carries the identity and the
+- joining: `ensureJoined(q, { canCreate, priority? })`, `processWelcomes(domain)`, `catchUp(q)`,
+  `addMissingDevices(q, members)`, `removeLeaves(q, identities, keys?)` (with `keys`, exactly the leaves with those
+  signature keys), `selfUpdate(q, { priority? })`, `hasGroup`, `epoch`. Operations that change the client run one at a
+  time; `priority` (a voice join, somebody waits) runs before the waiting background work, not before the running
+  operation. Without a local group `ensureJoined` requests the Welcomes and the GroupInfo at once. `addMissingDevices` adds a claimed KeyPackage only when its leaf carries the identity and the
   attested key of the device it was claimed for (`keyPackageLeaf`);
 - content: `encrypt(q, content, opts?)`, `decrypt(q, envelope)` → `Decrypted`, `peek`, `encryptEphemeral`,
   `decryptEphemeral` (replay window), `voiceKey(q)`, `contentHeader(content)`. `opts.ctx` is the message's **signed
@@ -202,7 +204,16 @@ const tally = tallyPoll(poll, checked, { closesAt: message.poll_closes_at });
   decrypting, `readEmbeds` for renderers; APPLICATIONS.md §6.4).
 - `cleanup.ts`: `LeafCleaner` removes ghost leaves the node allows and the client verified (ENCRYPTION.md §4.7), with an
   election among the devices that may do it; `urgent` (content waits for the removal) skips the election wait and ends
-  the wait of a running cleanup.
+  the wait of a running cleanup; `noWait` (a voice join: nothing waits for the removal) ends the wait of a running
+  cleanup too, runs at once when this device is elected and otherwise returns `postponed` without committing (the
+  caller repeats the cleanup without `noWait` later); `isRunning(q)` tells whether a cleanup of a conversation runs.
+  The election counts only valid leaves of devices that may commit every removal of the run (own ghost leaves: the
+  same user; departed members: the users in `managers`, when given; deleted or unattested devices: any member) and,
+  when the caller knows it, only online ones (`online`: device identities such as the voice participants;
+  `onlineUsers`: user addresses such as the presence list). Without these lists every valid leaf counts. A cleanup
+  looks the members' devices up again only when the roster (identities and signature keys) changed since the last
+  check without findings, that check is older than `FRESH_REUSE_MS` or the node lists a pending removal of a leaf in
+  the group.
 - `identity.ts`: the current identity key and its rotation with continuity (`rotateIdentity`, `syncIdentity`,
   `resolveIdentity`; ENCRYPTION.md §9a).
 - `search/`: the local encrypted search index (`SearchIndex` over a `SearchBackend`, `MemorySearchBackend` for tests;

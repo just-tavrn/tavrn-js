@@ -465,10 +465,18 @@ export class MlsError extends Error {
   }
 }
 
+/** A GroupInfo request started ahead of time (`ensureJoined`): its answer or its error. */
+type GroupInfoAnswer = { ok: GroupInfoResponse } | { error: unknown };
+
 const ROTATE_AFTER_MS = 7 * 24 * 3600 * 1000;
 /** Most KeyPackages {@link MlsManager.createKeyPackages} creates at once. */
 export const MAX_KEY_PACKAGES = 100;
 const MAX_TRIES = 3;
+/**
+ * A self update right after a complete catch-up (a voice join: `ensureJoined`, then `selfUpdate`) does not fetch the
+ * handshake log again within this time; a commit that missed one still lands after its epoch conflict.
+ */
+export const CAUGHT_UP_REUSE_MS = 3_000;
 /** A forced lookup of a user's devices reuses a result younger than this. */
 const KEY_REFETCH_MS = 2_000;
 /** Device lists are looked up again after this (the key cache TTL of nodes, FEDERATION.md §3.5). */
@@ -533,7 +541,12 @@ function encryptOptions(v: unknown): EncryptOptions {
 
 export class MlsManager {
   private client: Client;
-  private queue: Promise<unknown> = Promise.resolve();
+  /**
+   * Operations waiting for the client, in two lanes: `priority` (a voice join, somebody waits for it) runs before the
+   * others; within a lane in order. One operation runs at a time ({@link run}).
+   */
+  private readonly lanes: { priority: Array<() => void>; normal: Array<() => void> } = { priority: [], normal: [] };
+  private busy = false;
   private readonly dirty = new Set<string>();
   private backupTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly keyCache = new Map<string, { at: number; pending: boolean; devices: Promise<Map<string, Uint8Array> | null> }>();
@@ -552,6 +565,8 @@ export class MlsManager {
   private readonly acknowledged = new Map<string, Set<string>>();
   /** The violations of the last check per conversation and the epoch it ran in (ephemeral events reuse it). */
   private readonly ghostCache = new Map<string, { epoch: number; found: GhostViolation[] }>();
+  /** The epoch each group was last known to be current at (a complete catch-up or an own commit), and when. */
+  private readonly caughtUp = new Map<string, { epoch: number; at: number }>();
   private readonly nonces = new Map<string, string>();
   private readonly backupTried = new Set<string>();
   private readonly plainChecked = new Map<string, PlainStatus>();
@@ -613,13 +628,13 @@ export class MlsManager {
       const [a, b] = args;
       switch (operation as ForwardedOperation) {
         case "ensureJoined":
-          return this.ensureJoined(str(a), { canCreate: obj(b).canCreate === true });
+          return this.ensureJoined(str(a), { canCreate: obj(b).canCreate === true, priority: obj(b).priority === true });
         case "processWelcomes":
           return this.processWelcomes(str(a));
         case "catchUp":
           return this.catchUp(str(a));
         case "selfUpdate":
-          return this.selfUpdate(str(a));
+          return this.selfUpdate(str(a), { priority: b !== undefined && obj(b).priority === true });
         case "removeLeaves": {
           const keys = args[2];
           if (keys === undefined) return this.removeLeaves(str(a), strs(b));
@@ -685,6 +700,7 @@ export class MlsManager {
         const old = this.client;
         this.client = next.client;
         old.free();
+        this.caughtUp.clear();
         const meta = this.deps.meta as unknown as Record<string, unknown>;
         for (const k of Object.keys(meta)) delete meta[k];
         Object.assign(meta, normalizeMeta(next.meta, this.deps.homeDomain));
@@ -697,11 +713,34 @@ export class MlsManager {
     });
   }
 
-  /** Runs `fn` after every earlier operation: the client is mutated by one operation at a time. */
-  private run<T>(fn: () => Promise<T>): Promise<T> {
-    const next = this.queue.then(fn, fn);
-    this.queue = next.catch(() => undefined);
-    return next;
+  /**
+   * Runs `fn` after every earlier operation of its lane (a `priority` one also before the waiting normal ones, not
+   * before the one running): the client is mutated by one operation at a time.
+   */
+  private run<T>(fn: () => Promise<T>, priority = false): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      (priority ? this.lanes.priority : this.lanes.normal).push(() => {
+        let done: Promise<T>;
+        try {
+          done = fn();
+        } catch (e) {
+          done = Promise.reject(e);
+        }
+        done.then(resolve, reject).finally(() => {
+          this.busy = false;
+          this.pump();
+        });
+      });
+      this.pump();
+    });
+  }
+
+  private pump(): void {
+    if (this.busy) return;
+    const next = this.lanes.priority.shift() ?? this.lanes.normal.shift();
+    if (!next) return;
+    this.busy = true;
+    next();
   }
 
   private async persist(): Promise<void> {
@@ -738,21 +777,33 @@ export class MlsManager {
    * then catch-up of an existing local group, otherwise an external join, or the group creation if none
    * exists and `canCreate` (the user may post). Returns `no_group` when there is nothing to join yet.
    */
-  ensureJoined(q: string, opts: { canCreate: boolean }): Promise<"joined" | "no_group"> {
-    const remote = this.forwarded<"joined" | "no_group">("ensureJoined", [q, { canCreate: opts.canCreate }]);
+  ensureJoined(q: string, opts: { canCreate: boolean; priority?: boolean }): Promise<"joined" | "no_group"> {
+    const remote = this.forwarded<"joined" | "no_group">("ensureJoined", [q, { canCreate: opts.canCreate, priority: !!opts.priority }]);
     if (remote) return remote;
     return this.run(async () => {
       const { domain } = splitQualified(q);
-      if (!this.client.hasGroup(q)) await this.processWelcomesInner(domain);
+      let info: Promise<GroupInfoAnswer> | undefined;
+      if (!this.client.hasGroup(q)) {
+        // The Welcomes and the group's GroupInfo at once (one round trip instead of two); the GroupInfo is used only
+        // when no Welcome brought the group (a stale one ends in an epoch conflict and is fetched again).
+        const ds = this.ds(q);
+        info = ds.api.groupInfo(ds.id).then(
+          (ok) => ({ ok }),
+          (error: unknown) => ({ error }),
+        );
+        await this.processWelcomesInner(domain);
+      }
       if (this.client.hasGroup(q)) {
         await this.catchUpInner(q);
         if (this.client.hasGroup(q)) return "joined";
+        info = undefined;
       }
-      return this.joinInner(q, opts.canCreate);
-    });
+      return this.joinInner(q, opts.canCreate, info);
+    }, !!opts.priority);
   }
 
   private noteJoined(q: string) {
+    this.caughtUp.set(q, { epoch: this.client.currentEpoch(q), at: this.now() });
     const meta = this.deps.meta;
     meta.convs[q] = { rotatedAt: this.now() };
     void this.deps.saveMeta(meta);
@@ -761,12 +812,14 @@ export class MlsManager {
     this.afterOwnCommit(q);
   }
 
-  private async joinInner(q: string, canCreate: boolean): Promise<"joined" | "no_group"> {
+  private async joinInner(q: string, canCreate: boolean, first?: Promise<GroupInfoAnswer>): Promise<"joined" | "no_group"> {
     const ds = this.ds(q);
     for (let attempt = 0; attempt < MAX_TRIES; attempt++) {
       let info: GroupInfoResponse;
       try {
-        info = await ds.api.groupInfo(ds.id);
+        const answer = attempt === 0 && first ? await first : null;
+        if (answer && "error" in answer) throw answer.error;
+        info = answer ? answer.ok : await ds.api.groupInfo(ds.id);
       } catch (e) {
         if (apiCode(e) !== "mls.no_group") throw e;
         if (!canCreate) return "no_group";
@@ -908,7 +961,10 @@ export class MlsManager {
         this.markDirty(q);
         this.deps.onEvent?.({ type: "epoch", conversationId: q });
       }
-      if (log.next == null || !progressed) return changed;
+      if (log.next == null || !progressed) {
+        if (log.next == null && this.client.hasGroup(q)) this.caughtUp.set(q, { epoch: this.client.currentEpoch(q), at: this.now() });
+        return changed;
+      }
     }
     return changed;
   }
@@ -938,6 +994,7 @@ export class MlsManager {
       }
       this.client.mergePendingCommit(q);
       await this.persist();
+      this.caughtUp.set(q, { epoch: this.client.currentEpoch(q), at: this.now() });
       const meta = this.deps.meta;
       meta.convs[q] = { rotatedAt: this.now() };
       void this.deps.saveMeta(meta);
@@ -1006,14 +1063,16 @@ export class MlsManager {
    * Commits a self update (fresh leaf key, new epoch). Voice joins do this so that every voice session
    * starts on a fresh frame key (ENCRYPTION.md §5a). `false` without a local group.
    */
-  selfUpdate(q: string): Promise<boolean> {
-    const remote = this.forwarded<boolean>("selfUpdate", [q]);
+  selfUpdate(q: string, opts: { priority?: boolean } = {}): Promise<boolean> {
+    const remote = this.forwarded<boolean>("selfUpdate", [q, { priority: !!opts.priority }]);
     if (remote) return remote;
     return this.run(async () => {
       if (!this.client.hasGroup(q)) return false;
-      await this.catchUpInner(q);
+      // Right after a catch-up (a voice join's `ensureJoined`) the log is not fetched again (CAUGHT_UP_REUSE_MS).
+      const known = this.caughtUp.get(q);
+      if (!known || known.epoch !== this.client.currentEpoch(q) || this.now() - known.at > CAUGHT_UP_REUSE_MS) await this.catchUpInner(q);
       return this.commitInner(q, () => (this.client.hasGroup(q) ? this.client.selfUpdate(q) : null));
-    });
+    }, !!opts.priority);
   }
 
   /**
@@ -1868,13 +1927,33 @@ export class MlsManager {
     const allowed = new Set(members);
     /** Identities whose attested leaf was seen: a second leaf with the attested key is a duplicate. */
     const matched = new Set<string>();
-    const refreshed = new Set<string>();
     const out: GhostViolation[] = [];
     const ownKey = this.client.devicePublicKey;
+    const isOwnLeaf = (e: { identity: string; key: Uint8Array }) => e.identity === this.client.identity && sameBytes(e.key, ownKey);
+    // Every member's devices are looked up at once (one round trip instead of one per user), then a second time, also
+    // at once, for the users whose leaf names a device the first answer did not list (a device added since).
+    const lookups = new Map<string, Promise<Map<string, Uint8Array> | null | undefined>>();
+    for (const e of entries) {
+      const { address } = splitIdentity(e.identity);
+      if (isOwnLeaf(e) || !allowed.has(address) || lookups.has(address)) continue;
+      // Before acting on a violation: look the user's devices up again.
+      if (opts.fresh && !this.keyCache.get(address)?.pending) this.keyCache.delete(address);
+      lookups.set(address, this.verifiedDevices(address).catch(() => undefined));
+    }
+    const refreshes = new Map<string, Promise<Map<string, Uint8Array> | null | undefined>>();
+    for (const e of entries) {
+      const { address, deviceId } = splitIdentity(e.identity);
+      const first = lookups.get(address);
+      if (!first || refreshes.has(address)) continue;
+      const devices = await first;
+      // A failed lookup is not repeated (the leaf counts as unattested, as before).
+      if (devices === undefined || devices?.get(deviceId)) continue;
+      refreshes.set(address, this.verifiedDevices(address, true).catch(() => undefined));
+    }
     for (const e of entries) {
       const { address, deviceId } = splitIdentity(e.identity);
       // This device's own leaf is never a ghost (another leaf under its name is judged like any other).
-      if (e.identity === this.client.identity && sameBytes(e.key, ownKey) && !matched.has(e.identity)) {
+      if (isOwnLeaf(e) && !matched.has(e.identity)) {
         matched.add(e.identity);
         continue;
       }
@@ -1883,16 +1962,8 @@ export class MlsManager {
         continue;
       }
       let key: Uint8Array | undefined;
-      try {
-        if (opts.fresh && !refreshed.has(address)) {
-          // Before acting on a violation: look the user's devices up again.
-          refreshed.add(address);
-          if (!this.keyCache.get(address)?.pending) this.keyCache.delete(address);
-        }
-        key = (await this.verifiedDevices(address))?.get(deviceId) ?? (await this.verifiedDevices(address, true))?.get(deviceId);
-      } catch {
-        key = undefined;
-      }
+      const first = await (lookups.get(address) ?? this.verifiedDevices(address).catch(() => undefined));
+      if (first !== undefined) key = first?.get(deviceId) ?? (await (refreshes.get(address) ?? this.verifiedDevices(address, true).catch(() => undefined)))?.get(deviceId);
       if (opts.noBots && isBotKind(this.kinds.get(address))) {
         out.push({ identity: e.identity, reason: "bot", key: b64urlEncode(e.key) });
         continue;
@@ -2352,7 +2423,7 @@ export class MlsManager {
     this.decrypted.clear();
     this.plainChecked.clear();
     this.ephemeralNonces.clear();
-    void this.queue.then(() => this.client.free());
+    void this.run(async () => this.client.free());
   }
 }
 
