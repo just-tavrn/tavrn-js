@@ -494,7 +494,8 @@ export type BackendInfo = {
      */
     has_files: boolean;
     /**
-     * The node's own storage may be chosen (`TAVRN_FILES_INTERNAL`); `false`: only external stores.
+     * The node's own storage may be chosen: the room's `files_channels.internal` (node default
+     * `TAVRN_FILES_INTERNAL`); `false`: only external stores.
      */
     internal_allowed: boolean;
     /**
@@ -2413,8 +2414,8 @@ export type FilesInfo = {
      */
     allowed_categories: Array<string>;
     /**
-     * `internal`, `webdav` or `s3`; `none` on a node without internal storage (`TAVRN_FILES_INTERNAL=off`) while
-     * the channel has no external store: no uploads or folders until one is set (FILES.md §5).
+     * `internal`, `webdav` or `s3`; `none` while the room may not use the node's own storage (`internal_allowed`
+     * false) and the channel has no external store: no uploads or folders until one is set (FILES.md §5).
      */
     backend: string;
     /**
@@ -2453,6 +2454,11 @@ export type FilesInfo = {
     executables_allowed: boolean;
     files: number;
     folders: number;
+    /**
+     * The node's own storage may hold this channel's files: the room's `files_channels.internal` (the room owner's
+     * plan or override, or a room grant, over the node default `TAVRN_FILES_INTERNAL`, FILES.md §5).
+     */
+    internal_allowed: boolean;
     /**
      * The channel's limit (0 = unlimited): on the node's storage `files_channels.max_bytes` of the room, on an
      * external store the store's own `max_bytes` (FILES.md §4/§5).
@@ -3106,7 +3112,8 @@ export type KeyInfo = {
      */
     node_default: number;
     /**
-     * `max` (highest wins, 0 = unlimited), `flag` (0/1) or `shortest_non_zero` (retention).
+     * `max` (highest wins, 0 = unlimited), `flag` (0/1), `shortest_non_zero` (retention) or `setting` (0/1, a value
+     * set by a grant wins over the node default in both directions).
      */
     rule: string;
     /**
@@ -3540,7 +3547,8 @@ export type NodeInfo = {
     domain: string;
     /**
      * Files channels may keep their files on this node (`TAVRN_FILES_INTERNAL`, FILES.md §5); `false`: a files
-     * channel takes uploads only once it has an external store.
+     * channel takes uploads only once it has an external store. The node default: the entitlement
+     * `files_channels.internal` may decide otherwise per room (`internal_allowed` in a channel's files usage).
      */
     files_internal: boolean;
     /**
@@ -4160,7 +4168,8 @@ export type Policies = {
     camera: ScreensharePolicy;
     /**
      * Files channels may keep their files on the node (`TAVRN_FILES_INTERNAL`); `false`: a files channel takes
-     * uploads only once it has an external store (FILES.md §5).
+     * uploads only once it has an external store (FILES.md §5). The node default; the entitlement
+     * `files_channels.internal` may decide otherwise per room.
      */
     files_internal: boolean;
     /**
