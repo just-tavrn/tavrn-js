@@ -28,9 +28,16 @@ export function newUlid(now: number = Date.now(), random: (bytes: Uint8Array<Arr
   return time + rest;
 }
 
+const CANONICAL = /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/;
+
+/** A ULID in canonical form: 26 characters of Crockford's base32, uppercase, at most 2^48 - 1 milliseconds. */
+export function isUlid(id: unknown): id is string {
+  return typeof id === "string" && CANONICAL.test(id);
+}
+
 /** The time of a ULID in milliseconds, or null for anything that is not a canonical ULID. */
 export function ulidTime(id: string): number | null {
-  if (!/^[0-7][0-9A-HJKMNP-TV-Z]{25}$/.test(id)) return null;
+  if (!isUlid(id)) return null;
   let t = 0;
   for (const c of id.slice(0, 10)) t = t * 32 + ALPHABET.indexOf(c);
   return t;

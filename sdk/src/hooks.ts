@@ -22,6 +22,7 @@
 import { DISCOVERY_TIMEOUT_MS, MAX_DISCOVERY_BYTES } from "./federation";
 import type { PublicKeyInfo } from "./generated/types.gen";
 import { deadline, discard, readText } from "./http";
+import { decodeJsonPart as decodeJson, utf8 } from "./jwt";
 import { b64urlDecode, b64urlEncode } from "./webauthn";
 
 export const HOOK_TYPE = "hook";
@@ -127,22 +128,6 @@ function bytesOf(body: HookRequest["body"]): Uint8Array<ArrayBuffer> {
   return new Uint8Array(body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength) as ArrayBuffer);
 }
 
-
-/** UTF-8 bytes → string, without TextDecoder (whose typed-array realm checks differ between runtimes). */
-function utf8(bytes: Uint8Array): string {
-  let escaped = "";
-  for (const b of bytes) escaped += `%${b.toString(16).padStart(2, "0")}`;
-  return decodeURIComponent(escaped);
-}
-
-function decodeJson(part: string): Record<string, unknown> | null {
-  try {
-    const value: unknown = JSON.parse(utf8(b64urlDecode(part)));
-    return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
-  } catch {
-    return null;
-  }
-}
 
 /**
  * Verifies hook requests of one node for one application. Keep one instance per application: it caches the node's
