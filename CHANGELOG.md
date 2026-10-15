@@ -198,7 +198,9 @@ package instead of a git dependency.
   the conversation, not the edited message's flag.
 - `@tavrn/sdk`: binary downloads are capped (`ApiOptions.maxDownloadBytes`, default 2 GiB, and a per-call `maxBytes` on
   `attachments.download` and `files.download`); WebSocket text frames above `SocketOptions.maxFrameLength` (default
-  16 Mi characters) are not parsed and the connection is replaced. `@tavrn/bot` downloads at most
+  16 Mi characters) are not parsed and the connection is replaced (the cap goes to a given `WebSocketImpl` such as
+  `ws` as `maxPayload`; the platform's own WebSocket is constructed with the URL only, since a browser's constructor
+  rejects that third argument). `@tavrn/bot` downloads at most
   `maxDownloadBytes` (default 256 MiB) and never more than a file's declared size; files-channel decryption refuses
   bytes after the last chunk at once.
 - `@tavrn/e2ee`: keys documents with more than 100 devices, 1000 retired devices or 100 continuity statements are
