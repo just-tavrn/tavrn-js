@@ -31,7 +31,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@tavrn/crypto": "file:/home/baton/tavrn-split/tavrn-crypto/.claude/worktrees/cryptoperf/pkg",
+    "@tavrn/crypto": "github:just-tavrn/tavrn-crypto#6db3f27100ff49c646c4f0327aaf9c534605586f&path:pkg",
     "@tavrn/sdk": "workspace:*"
   },
   "devDependencies": {

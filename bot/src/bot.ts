@@ -1072,6 +1072,8 @@ export class Bot {
         if (typeof data.room_id !== "string" || typeof data.channel_id !== "string") break;
         const folderId = typeof data.parent_id === "string" ? data.parent_id : null;
         this.emit("files", { node: link.domain, conversation: qualify(link.domain, data.channel_id), roomId: data.room_id, channelId: data.channel_id, folderId });
+        break;
+      }
       case "report.create":
       case "report.update": {
         const created = event.type === "report.create";
