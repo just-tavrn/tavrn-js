@@ -209,3 +209,59 @@ describe("response size", () => {
     expect(pulled).toBeLessThan(10);
   });
 });
+
+describe("download size", () => {
+  /** A binary body that is far longer than any cap here (1 KiB per pull, 1000 pulls); counts the pulls. */
+  const endless = () => {
+    const state = { pulled: 0, cancelled: false };
+    const body = new ReadableStream<Uint8Array>({
+      pull(c) {
+        state.pulled += 1;
+        if (state.pulled > 1000) c.close();
+        else c.enqueue(new Uint8Array(1024));
+      },
+      cancel() {
+        state.cancelled = true;
+      },
+    });
+    return { body, state };
+  };
+
+  it("stops an endless file download at the client's cap and cancels the body", async () => {
+    const { body, state } = endless();
+    const { impl } = scripted(() => new Response(body, { status: 200, headers: { "Content-Type": "application/octet-stream" } }));
+    const api = new TavrnApi({ fetchImpl: impl, maxDownloadBytes: 8192 });
+    await expect(api.attachments.download("B1")).rejects.toMatchObject({ code: "response.too_large" });
+    expect(state.pulled).toBeLessThan(20);
+    expect(state.cancelled).toBe(true);
+  });
+
+  it("lowers the cap to the size the caller expects, per download", async () => {
+    const { body } = endless();
+    const { impl } = scripted(() => new Response(body, { status: 200 }));
+    const api = new TavrnApi({ fetchImpl: impl });
+    await expect(api.attachments.download("B1", { maxBytes: 2048 })).rejects.toMatchObject({ code: "response.too_large" });
+    const files = scripted(() => new Response(new Uint8Array(5000), { status: 200 }));
+    const api2 = new TavrnApi({ fetchImpl: files.impl });
+    await expect(api2.files.download("R1", "C1", "E1", { maxBytes: 4999 })).rejects.toMatchObject({ code: "response.too_large" });
+    const blob = await api2.files.download("R1", "C1", "E1", { maxBytes: 5000 });
+    expect(blob.size).toBe(5000);
+  });
+
+  it("refuses a download whose Content-Length is above the cap before reading it", async () => {
+    const { body, state } = endless();
+    const { impl } = scripted(() => new Response(body, { status: 200, headers: { "Content-Length": String(1 << 30) } }));
+    const api = new TavrnApi({ fetchImpl: impl, maxDownloadBytes: 1 << 20 });
+    await expect(api.attachments.download("B1")).rejects.toMatchObject({ code: "response.too_large" });
+    expect(state.pulled).toBeLessThanOrEqual(2);
+  });
+
+  it("keeps the content type and bytes of downloads within the cap, also for binary routes without a stream", async () => {
+    const { impl } = scripted(() => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "Content-Type": "image/png" } }));
+    const api = new TavrnApi({ fetchImpl: impl, maxDownloadBytes: 3 });
+    const blob = await api.attachments.download("B1");
+    expect(blob.type).toBe("image/png");
+    expect([...new Uint8Array(await blob.arrayBuffer())]).toEqual([1, 2, 3]);
+    expect(await api.whiteboards.get("S1")).toEqual(new Uint8Array([1, 2, 3]));
+  });
+});

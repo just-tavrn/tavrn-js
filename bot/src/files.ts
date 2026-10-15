@@ -91,6 +91,8 @@ export interface FilesHost {
   seal<T>(q: string, fn: () => Promise<T>): Promise<T>;
   /** Runs an encrypted write once more after catching up when the node answers `mls.epoch_stale`. */
   freshEpoch<T>(q: string, fn: () => Promise<T>): Promise<T>;
+  /** The bot's download cap in bytes (`maxDownloadBytes`). */
+  maxDownloadBytes(): number;
 }
 
 const PAGE = 200;
@@ -207,8 +209,11 @@ export class BotFiles {
     const e = await this.resolve(entry);
     if (e.kind !== "file") throw new RangeError("folders cannot be downloaded");
     const { api } = this.host.target(e.conversation);
+    // Downloads are held in memory: at most the bot's cap, and never more than the entry's stored size.
+    const max = this.host.maxDownloadBytes();
+    if (e.raw.size > max) throw new TavrnApiError({ type: "about:blank", title: "Response too large", status: 0, detail: `${e.raw.size} bytes, at most ${max} accepted`, code: "response.too_large" });
     if (!e.encrypted) {
-      const blob = await api.files.download(e.roomId, e.channelId, e.id);
+      const blob = await api.files.download(e.roomId, e.channelId, e.id, { maxBytes: e.raw.size });
       return { id: e.id, name: e.name, mime: e.mime, size: blob.size, data: new Uint8Array(await blob.arrayBuffer()) };
     }
     const record = this.records.get(e);

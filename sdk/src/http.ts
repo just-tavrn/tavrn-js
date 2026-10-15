@@ -18,6 +18,8 @@ export const DEFAULT_TIMEOUT_MS = 30_000;
 export const DEFAULT_TRANSFER_TIMEOUT_MS = 10 * 60_000;
 /** Largest JSON answer the API client reads by default. */
 export const DEFAULT_MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
+/** Largest binary answer (file download, backup, image) the API client reads by default: 2 GiB. */
+export const DEFAULT_MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024;
 
 export function transportError(code: "network.error" | "network.timeout" | "request.aborted" | "response.too_large" | "request.invalid_path", detail: string): TavrnApiError {
   const titles = {
@@ -133,6 +135,48 @@ export async function readBytes(resp: Response, maxBytes: number): Promise<Uint8
     at += c.byteLength;
   }
   return out;
+}
+
+/**
+ * Reads the body of `resp` with `read` (`blob()`, `arrayBuffer()`: the platform keeps the bytes, a browser may keep a
+ * large Blob on disk), at most `maxBytes`: a larger `Content-Length` is refused before reading, a body that grows past
+ * the cap is cancelled there (`response.too_large`).
+ */
+export async function readLimited<T extends Blob | ArrayBuffer>(resp: Response, maxBytes: number, read: (resp: Response) => Promise<T>): Promise<T> {
+  const tooLarge = () => transportError("response.too_large", `more than ${maxBytes} bytes`);
+  const declared = Number(resp.headers?.get?.("Content-Length") ?? NaN);
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    discard(resp);
+    throw transportError("response.too_large", `${declared} bytes, at most ${maxBytes} accepted`);
+  }
+  const body = resp.body;
+  if (!body || typeof body.pipeThrough !== "function" || typeof TransformStream === "undefined") {
+    // Response-like objects without a stream (tests, polyfills): read as a whole, then check.
+    const out = await read(resp);
+    if ((out instanceof ArrayBuffer ? out.byteLength : (out as Blob).size) > maxBytes) throw tooLarge();
+    return out;
+  }
+  let total = 0;
+  let exceeded = false;
+  const limited = body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        total += chunk.byteLength;
+        if (total > maxBytes) {
+          exceeded = true;
+          controller.error(tooLarge());
+          return;
+        }
+        controller.enqueue(chunk);
+      },
+    }),
+  );
+  try {
+    return await read(new Response(limited, { status: resp.status, statusText: resp.statusText, headers: resp.headers }));
+  } catch (e) {
+    if (exceeded) throw tooLarge();
+    throw e;
+  }
 }
 
 /** The body of `resp` as UTF-8 text, at most `maxBytes` (see {@link readBytes}). */

@@ -49,6 +49,10 @@ export const DEFAULT_STATE_DIR = ".tavrn-state";
 export const JOINABLE_KINDS = new Set(["text", "announcement", "forum", "files"]);
 const READY_TIMEOUT_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 30_000;
+/** Default of {@link BotOptions.maxDownloadBytes}. */
+const MAX_DOWNLOAD_BYTES = 256 * 1024 * 1024;
+/** The AES-GCM tag after an encrypted attachment's ciphertext (ENCRYPTION.md §6). */
+const ATTACHMENT_TAG_BYTES = 16;
 const STOP_TIMEOUT_MS = 30_000;
 /** Largest keys document read from a node the bot has no session on (FEDERATION.md §3.5). */
 const KEYS_MAX_BYTES = 1024 * 1024;
@@ -108,6 +112,12 @@ export interface BotOptions {
   requestTimeoutMs?: number;
   /** How long `stop()` waits for running handlers and background work (default 30 s); then it stops anyway. */
   stopTimeoutMs?: number;
+  /**
+   * Largest file the bot downloads, in bytes (attachments, files channels; default 256 MiB): downloads are held in
+   * memory, so a larger file fails with `TavrnApiError` `response.too_large` instead of exhausting it. A download also
+   * stops at the file's declared size.
+   */
+  maxDownloadBytes?: number;
   /** WebSocket implementation (Node.js 20 without `--experimental-websocket`: `import WebSocket from "ws"`). */
   WebSocketImpl?: typeof WebSocket;
   fetchImpl?: typeof fetch;
@@ -469,6 +479,7 @@ export class Bot {
   private allowInsecure: boolean;
   /** Deadline of API requests: the request itself plus the longest rate-limit waits. */
   private readonly requestTimeoutMs: number;
+  private readonly maxDownloadBytes: number;
   /** Files channels (FILES.md §3 "Bots"): list, download, upload, folders, delete; encrypted where the channel is. */
   readonly files: BotFiles;
 
@@ -483,6 +494,8 @@ export class Bot {
     this.fetchImpl = opts.rateLimit === false ? opts.fetchImpl : retryingFetch(opts.fetchImpl ?? ((input, init) => fetch(input, init)), { logger: this.logger, ...opts.rateLimit });
     const waits = opts.rateLimit === false ? 0 : (opts.rateLimit?.retries ?? 3) * (opts.rateLimit?.maxWaitMs ?? 30_000);
     this.requestTimeoutMs = (opts.requestTimeoutMs ?? REQUEST_TIMEOUT_MS) + waits;
+    this.maxDownloadBytes = opts.maxDownloadBytes ?? MAX_DOWNLOAD_BYTES;
+    if (!Number.isSafeInteger(this.maxDownloadBytes) || this.maxDownloadBytes < 1) throw new RangeError("maxDownloadBytes: a positive integer");
     this.files = new BotFiles({
       target: (c) => {
         const t = this.target(c);
@@ -498,6 +511,7 @@ export class Bot {
       mls: () => this.mls!,
       seal: (q, fn) => this.seal(q, fn),
       freshEpoch: (q, fn) => this.freshEpoch(q, fn),
+      maxDownloadBytes: () => this.maxDownloadBytes,
     });
   }
 
@@ -648,6 +662,7 @@ export class Bot {
       fetchImpl: this.fetchImpl,
       WebSocketImpl: this.opts.WebSocketImpl,
       timeoutMs: this.requestTimeoutMs,
+      maxDownloadBytes: this.maxDownloadBytes,
       handlers: {
         onEvent: (link: NodeLink, event: TavrnEvent) => this.onEvent(link, event),
         onReady: (link: NodeLink, first: boolean) => {
@@ -1211,7 +1226,9 @@ export class Bot {
     const download = async (attachmentId?: string): Promise<DownloadedFile> => {
       const f = attachmentId ? files.find((a) => a.id === attachmentId) : files[0];
       if (!f) throw new BotError("not_found", attachmentId ? `Message ${m.id} has no attachment ${attachmentId}` : `Message ${m.id} has no attachments`);
-      const bytes = new Uint8Array(await (await link.api.attachments.download(f.id)).arrayBuffer());
+      // At most the declared size (plaintext plus the 16-byte tag for encrypted files): a node cannot stream more.
+      const declared = typeof f.size === "number" && Number.isSafeInteger(f.size) && f.size >= 0 ? f.size + (f.crypto ? ATTACHMENT_TAG_BYTES : 0) : undefined;
+      const bytes = new Uint8Array(await (await link.api.attachments.download(f.id, { maxBytes: declared })).arrayBuffer());
       let data: Uint8Array;
       if (f.crypto) data = await decryptAttachment(bytes, f.crypto);
       else {

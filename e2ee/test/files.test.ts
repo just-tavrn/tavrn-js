@@ -154,6 +154,21 @@ describe("chunked file encryption (test vectors)", () => {
     await expect(decryptFileBytes(key, "content", new Uint8Array([...ct, 0]))).rejects.toBeInstanceOf(FileDecryptError);
   });
 
+  it("refuses a stream that goes on after the last chunk at once, without buffering it", async () => {
+    const ct = await encryptFileBytes(key, "content", new Uint8Array(100));
+    let pulled = 0;
+    // 64 MiB after the file (1024 pulls of 64 KiB); the decryption must stop at the first of them.
+    const endless = new ReadableStream<Uint8Array>({
+      pull(c) {
+        pulled += 1;
+        if (pulled > 1025) c.close();
+        else c.enqueue(pulled === 1 ? ct : new Uint8Array(64 * 1024));
+      },
+    });
+    await expect(readAll(endless.pipeThrough(decryptFileChunks(key, "content", ct.length)))).rejects.toBeInstanceOf(FileDecryptError);
+    expect(pulled).toBeLessThan(10);
+  });
+
   it("computes sizes and ciphertext ranges", async () => {
     expect([0, 1, FILE_CHUNK, FILE_CHUNK + 1].map(encryptedSize)).toEqual([16, 17, FILE_CHUNK + 16, FILE_CHUNK + 33]);
     for (const n of [0, 1, 23, FILE_CHUNK - 1, FILE_CHUNK, FILE_CHUNK + 1, 2 * FILE_CHUNK, 5 * FILE_CHUNK + 7]) expect(plaintextSize(encryptedSize(n))).toBe(n);

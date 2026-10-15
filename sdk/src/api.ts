@@ -4,7 +4,7 @@
  * (`src/generated`, from the protocol's `openapi.json` via `just generate`). Errors always arrive as `TavrnApiError` with Problem Details.
  */
 import { TavrnApiError, toProblem } from "./errors";
-import { DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_TIMEOUT_MS, DEFAULT_TRANSFER_TIMEOUT_MS, deadline, discard, readText, safePath, transportError, type Deadline } from "./http";
+import { DEFAULT_MAX_DOWNLOAD_BYTES, DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_TIMEOUT_MS, DEFAULT_TRANSFER_TIMEOUT_MS, deadline, discard, readLimited, readText, safePath, transportError, type Deadline } from "./http";
 import type {
   AccountInvite,
   Application,
@@ -286,6 +286,11 @@ export interface ApiOptions {
   transferTimeoutMs?: number;
   /** Largest JSON answer read (default 32 MiB): a larger one fails with `response.too_large` before it is buffered. */
   maxResponseBytes?: number;
+  /**
+   * Largest binary answer read (file downloads, backups, images; default 2 GiB): a larger one fails with
+   * `response.too_large` as soon as it is announced or received. Downloads can lower it per call (`maxBytes`).
+   */
+  maxDownloadBytes?: number;
   /** Aborts every request of this client (`request.aborted`); {@link TavrnApi.withSignal} scopes one to a task. */
   signal?: AbortSignal;
 }
@@ -432,6 +437,12 @@ export class TavrnApi {
     return this.opts.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
   }
 
+  /** The cap of a binary answer: the client's, lowered by the caller's `maxBytes`. */
+  private downloadCap(maxBytes?: number): number {
+    const cap = this.opts.maxDownloadBytes ?? DEFAULT_MAX_DOWNLOAD_BYTES;
+    return maxBytes !== undefined && maxBytes >= 0 ? Math.min(cap, maxBytes) : cap;
+  }
+
   /**
    * The request layer every route goes through: URL and path check, credentials, client and reauth headers, the
    * deadline, one refresh on `401`, one re-authentication on `403 auth.reauth_required`, Problem Details as
@@ -531,13 +542,15 @@ export class TavrnApi {
   }
 
   /** A binary answer as bytes (and its headers); null for `404` when `allow404`. */
-  private async bytes(path: string, opts: { allow404?: boolean; transfer?: boolean; headers?: Record<string, string> } = {}): Promise<{ bytes: Uint8Array; headers: Headers } | null> {
-    return this.receive("GET", path, opts, async (resp) => ({ bytes: new Uint8Array(await resp.arrayBuffer()), headers: resp.headers }));
+  private async bytes(path: string, opts: { allow404?: boolean; transfer?: boolean; headers?: Record<string, string>; maxBytes?: number } = {}): Promise<{ bytes: Uint8Array; headers: Headers } | null> {
+    const max = this.downloadCap(opts.maxBytes);
+    return this.receive("GET", path, opts, async (resp) => ({ bytes: new Uint8Array(await readLimited(resp, max, (r) => r.arrayBuffer())), headers: resp.headers }));
   }
 
-  /** A binary answer as a Blob. */
-  private async blob(method: string, path: string, opts: { raw?: BodyInit; headers?: Record<string, string>; transfer?: boolean } = {}): Promise<Blob> {
-    return (await this.receive(method, path, opts, (resp) => resp.blob()))!;
+  /** A binary answer as a Blob, at most {@link ApiOptions.maxDownloadBytes} (or `maxBytes`, when lower). */
+  private async blob(method: string, path: string, opts: { raw?: BodyInit; headers?: Record<string, string>; transfer?: boolean; maxBytes?: number } = {}): Promise<Blob> {
+    const max = this.downloadCap(opts.maxBytes);
+    return (await this.receive(method, path, opts, (resp) => readLimited(resp, max, (r) => r.blob())))!;
   }
 
   private clipHeaders(name: string, file: Blob, durationMs: number, emoji?: string): Record<string, string> {
@@ -1366,8 +1379,11 @@ export class TavrnApi {
       this.uploadTo(`/conversations/${encodeURIComponent(conversationId)}/uploads`, file, name, onProgress, category),
     /** What the requester may upload in a conversation (upload categories, PROTOCOL.md §7a). */
     policy: (conversationId: string) => this.get<UploadPolicy>(`/conversations/${encodeURIComponent(conversationId)}/upload-policy`),
-    /** Loads a file as a Blob (with the token); for <img>, use URL.createObjectURL. */
-    download: (blobId: string): Promise<Blob> => this.blob("GET", `/blobs/${encodeURIComponent(blobId)}`, { transfer: true }),
+    /**
+     * Loads a file as a Blob (with the token); for <img>, use URL.createObjectURL. `maxBytes` lowers the client's
+     * download cap for this file (its declared size: a longer body fails with `response.too_large`).
+     */
+    download: (blobId: string, opts: { maxBytes?: number } = {}): Promise<Blob> => this.blob("GET", `/blobs/${encodeURIComponent(blobId)}`, { transfer: true, maxBytes: opts.maxBytes }),
   };
 
   reactions = {
@@ -1451,9 +1467,12 @@ export class TavrnApi {
     thumbnail: async (roomId: string, channelId: string, entryId: string): Promise<Uint8Array | null> => {
       return (await this.bytes(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/files/${encodeURIComponent(entryId)}/thumbnail`, { allow404: true }))?.bytes ?? null;
     },
-    /** The file's content (with the token); ranges are for streaming players and are not needed here. */
-    download: async (roomId: string, channelId: string, entryId: string): Promise<Blob> => {
-      return this.blob("GET", `/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/files/${encodeURIComponent(entryId)}/download`, { transfer: true });
+    /**
+     * The file's content (with the token); ranges are for streaming players and are not needed here. `maxBytes` lowers
+     * the client's download cap for this file.
+     */
+    download: async (roomId: string, channelId: string, entryId: string, opts: { maxBytes?: number } = {}): Promise<Blob> => {
+      return this.blob("GET", `/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/files/${encodeURIComponent(entryId)}/download`, { transfer: true, maxBytes: opts.maxBytes });
     },
     /** Rename (`name`) and/or move (`parent_id`, `null` = top level). */
     update: (roomId: string, channelId: string, entryId: string, req: UpdateEntryRequest) => this.patch<FileEntry>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/files/${encodeURIComponent(entryId)}`, req),

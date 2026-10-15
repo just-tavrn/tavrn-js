@@ -220,6 +220,21 @@ describe("sending: embeds and files", () => {
     await expect(got[1]!.download()).rejects.toThrow();
     await expect(got[0]!.download("01J9ZK3G5M8Q2W4E6R8T0Y2F09")).rejects.toMatchObject({ code: "not_found" });
   });
+
+  it("reads no more of an attachment than its declared size and the bot's download cap", async () => {
+    await startBot({ maxDownloadBytes: 1000 });
+    // The node streams far more than the 5 declared bytes, then a file above the cap.
+    node.route("GET", /\/blobs\/01J9ZK3G5M8Q2W4E6R8T0Y2F01$/, () => new Response(new Uint8Array(64 * 1024)));
+    node.route("GET", /\/blobs\/01J9ZK3G5M8Q2W4E6R8T0Y2F02$/, () => new Response(new Uint8Array(1001)));
+    const got: BotMessage[] = [];
+    bot.on("message", (m) => void got.push(m));
+    node.emit("message.create", message({ attachments: [{ id: "01J9ZK3G5M8Q2W4E6R8T0Y2F01", name: "a.txt", mime: "text/plain", size: 5, sha256: "x" }] }));
+    node.emit("message.create", message({ id: "01J9ZK3G5M8Q2W4E6R8T0Y2M02", attachments: [{ id: "01J9ZK3G5M8Q2W4E6R8T0Y2F02", name: "b.bin", mime: "application/octet-stream", size: 5000, sha256: "x" }] }));
+    await settle();
+    await expect(got[0]!.download()).rejects.toMatchObject({ code: "response.too_large" });
+    await expect(got[1]!.download()).rejects.toMatchObject({ code: "response.too_large" });
+    expect(() => createBot({ node: BASE, token: TOKEN, maxDownloadBytes: 0 })).toThrow(RangeError);
+  });
 });
 
 describe("threads (PROTOCOL.md §7e)", () => {

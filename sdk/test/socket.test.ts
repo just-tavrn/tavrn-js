@@ -331,6 +331,25 @@ describe("TavrnSocket", () => {
     socket.close();
   });
 
+  it("does not parse a frame above the length cap: the connection is replaced", async () => {
+    const closes: [number, string][] = [];
+    const { socket, events } = make({ onClose: (code, reason) => closes.push([code, reason]), maxFrameLength: 1024 });
+    socket.connect();
+    await vi.advanceTimersByTimeAsync(0);
+    const ws = FakeWebSocket.instances[0]!;
+    ws.serverOpen();
+    ws.serverSend({ op: "ready", session_id: "s1" });
+    ws.serverSend({ op: "event", id: "e1", type: "message.create", data: { body: "x".repeat(900) } });
+    expect(events).toHaveLength(1);
+    ws.serverSend({ op: "event", id: "e2", type: "message.create", data: { body: "x".repeat(2000) } });
+    expect(events).toHaveLength(1);
+    expect(ws.readyState).toBe(3);
+    expect(closes).toEqual([[4000, "frame_too_large"]]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    socket.close();
+  });
+
   it("the liveness interval is configurable and 0 turns the watchdog off", async () => {
     const quick = make({ livenessMs: 5_000 });
     quick.socket.connect();

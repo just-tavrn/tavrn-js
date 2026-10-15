@@ -49,6 +49,8 @@ export interface LinkOptions {
   WebSocketImpl?: typeof WebSocket;
   /** Deadline of an API request including the rate-limit waits (TavrnApi `timeoutMs`). */
   timeoutMs?: number;
+  /** Largest file download (TavrnApi `maxDownloadBytes`). */
+  maxDownloadBytes?: number;
   now?: () => number;
 }
 
@@ -80,6 +82,7 @@ export class NodeLink {
       clientHeader: opts.clientHeader,
       fetchImpl: opts.fetchImpl,
       timeoutMs: opts.timeoutMs,
+      ...(opts.maxDownloadBytes !== undefined ? { maxDownloadBytes: opts.maxDownloadBytes } : {}),
       getToken: () => this.token(),
       refreshToken: () => this.refresh(),
     });
