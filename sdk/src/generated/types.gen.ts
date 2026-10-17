@@ -3151,10 +3151,8 @@ export type Invite = {
     uses: number;
 };
 
-export type InvitePreview = {
+export type InvitePreview = RoomPreview & {
     code: string;
-    room: PublicRoom;
-    rules: string;
 };
 
 /**
@@ -5329,6 +5327,10 @@ export type Room = {
      */
     join_mode: string;
     /**
+     * Time of the last change of the room's legal notice, null while it has none.
+     */
+    legal_notice_updated_at?: string | null;
+    /**
      * Messages of the room's channels are deleted after this many days (null = the node's value; a room can only
      * shorten it; pinned messages and the welcome channel are exempt, PROTOCOL.md §7f).
      */
@@ -5339,6 +5341,11 @@ export type Room = {
      */
     no_bots: boolean;
     owner_id: string;
+    /**
+     * Time of the last change of the room's privacy notice, null while it has none (PROTOCOL.md §6b "Room privacy
+     * notice and legal notice"; the text itself comes with `GET /rooms/{id}/preview` and the invite preview).
+     */
+    privacy_notice_updated_at?: string | null;
     rules: string;
 };
 
@@ -5404,6 +5411,34 @@ export type RoomPresenceSetting = {
      * Hide my presence from the members of this room (friends and other shared rooms still see it).
      */
     hidden: boolean;
+};
+
+/**
+ * What a room shows before joining (PROTOCOL.md §6b "Room preview"): the public room, its rules and its legal
+ * documents. Empty strings mean none.
+ */
+export type RoomPreview = {
+    /**
+     * The room's legal notice (Markdown subset), information only.
+     */
+    legal_notice: string;
+    /**
+     * Time of the legal notice's last change, null without one.
+     */
+    legal_notice_updated_at?: string | null;
+    /**
+     * The room's privacy notice (Markdown subset), information only.
+     */
+    privacy_notice: string;
+    /**
+     * Time of the privacy notice's last change, null without one.
+     */
+    privacy_notice_updated_at?: string | null;
+    room: PublicRoom;
+    /**
+     * Markdown subset; joining needs `accept_rules: true` while it is not empty.
+     */
+    rules: string;
 };
 
 /**
@@ -6255,6 +6290,11 @@ export type UpdateRoomRequest = {
     history_restore?: string | null;
     join_mode?: string | null;
     /**
+     * The room's legal notice (who runs the room and how to reach them; Markdown subset, at most 5,000 characters,
+     * `""` removes it). Audited as `room.legal`.
+     */
+    legal_notice?: string | null;
+    /**
      * Delete messages after this many days (1–36500; 0 = use the node's value, PROTOCOL.md §7f). Effective is the
      * shorter non-zero of this and the node's `TAVRN_RETENTION_DAYS`: a room can only shorten.
      */
@@ -6265,6 +6305,12 @@ export type UpdateRoomRequest = {
      * ones. Owner or `manage_room`.
      */
     no_bots?: boolean | null;
+    /**
+     * The room's privacy notice (Markdown subset like `rules`, at most 20,000 characters, `""` removes it; PROTOCOL.md
+     * §6b "Room privacy notice and legal notice"). Information for members and people about to join, never a
+     * condition of joining. Audited as `room.legal`.
+     */
+    privacy_notice?: string | null;
     rules?: string | null;
 };
 
@@ -13938,6 +13984,28 @@ export type PutRoomSettingResponses = {
 };
 
 export type PutRoomSettingResponse = PutRoomSettingResponses[keyof PutRoomSettingResponses];
+
+export type PreviewRoomData = {
+    body?: never;
+    path: {
+        room_id: string;
+    };
+    query?: never;
+    url: '/api/v1/rooms/{room_id}/preview';
+};
+
+export type PreviewRoomErrors = {
+    404: ProblemDetails;
+    429: ProblemDetails;
+};
+
+export type PreviewRoomError = PreviewRoomErrors[keyof PreviewRoomErrors];
+
+export type PreviewRoomResponses = {
+    200: RoomPreview;
+};
+
+export type PreviewRoomResponse = PreviewRoomResponses[keyof PreviewRoomResponses];
 
 export type RoomReportsData = {
     body?: never;

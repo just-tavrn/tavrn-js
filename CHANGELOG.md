@@ -9,6 +9,9 @@ tags of this repository are `vX.Y.Z`. The protocol they implement is versioned s
 First public release, published to npm (with provenance). `@tavrn/crypto` becomes a version range of the published
 package instead of a git dependency.
 
+- **`@tavrn/sdk`**: `rooms.preview(roomId)` (`GET /rooms/{room_id}/preview`: room, rules, privacy notice and legal
+  notice before joining) and the room's `privacy_notice` / `legal_notice` in `rooms.update` (protocol PROTOCOL.md
+  §6b); `InvitePreview` carries the documents too.
 - **`@tavrn/sdk`**: typed HTTP client generated from the protocol's `openapi.json` with hand-written wrappers
   (threads and forum posts, moderation and reports, web push, age assurance, files channels, history restore,
   layered permissions, voice moves and `/users/me/voice`), the WebSocket client with reconnection, permission

@@ -109,6 +109,7 @@ import type {
   PurgeUserResponse,
   PermissionOverride,
   PublicRoom,
+  RoomPreview,
   PurgeRequest,
   PurgeResponse,
   RegisterRequest,
@@ -1266,6 +1267,12 @@ export class TavrnApi {
     /** Deletes the room; `keepExternal` keeps the objects of its unencrypted external files channels (FILES.md §9). */
     delete: (roomId: string, opts: { keepExternal?: boolean } = {}) => this.del(`/rooms/${encodeURIComponent(roomId)}${opts.keepExternal ? "?keep_external=true" : ""}`),
     join: (roomId: string, req: JoinRequest = {}) => this.post<RoomDetail>(`/rooms/${encodeURIComponent(roomId)}/join`, req),
+    /**
+     * What a room shows before joining (PROTOCOL.md §6b "Room preview"): the public room, its rules, privacy notice
+     * and legal notice (empty strings = none). Public rooms answer everyone (also without a session), other rooms
+     * only their members and node admins (`404 room.not_found`). Members read the room's documents here too.
+     */
+    preview: (roomId: string) => this.get<RoomPreview>(`/rooms/${encodeURIComponent(roomId)}/preview`),
     leave: (roomId: string) => this.post<void>(`/rooms/${encodeURIComponent(roomId)}/leave`),
     /** Room icon (`manage_room`; PNG, JPEG, GIF, WebP, MP4, WebM; converted by the node). */
     uploadIcon: (roomId: string, file: Blob) => this.rawUpload<Room>(`/rooms/${encodeURIComponent(roomId)}/icon`, file),
