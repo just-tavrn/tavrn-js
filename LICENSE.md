@@ -19,7 +19,7 @@ in `sdk/src/generated/` are generated from its `openapi.json` and carry the lice
 Why two licenses: `@tavrn/sdk` and `@tavrn/bot` are what every client and bot builds on, so they are permissive
 (Apache-2.0, with its patent grant): your client or bot may use any license, open or proprietary. `@tavrn/e2ee`,
 like the encryption core [`@tavrn/crypto`](https://github.com/just-tavrn/tavrn-crypto) it builds on, is MPL-2.0: a
-file-level copyleft, so changes to its files are shared back, while the application that embeds it keeps its own
+file-level copyleft, so distributed modifications to its files must be available in source form, while the application that embeds it keeps its own
 license. None of the packages depends on (A)GPL or LGPL code (`scripts/check-js-licenses.mjs` refuses it).
 
 The name "tavrn" and the logo are not covered by these licenses: see [TRADEMARK.md](TRADEMARK.md). Contributions
