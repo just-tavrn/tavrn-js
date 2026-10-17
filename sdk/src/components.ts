@@ -76,7 +76,7 @@ export interface Row {
   components: Component[];
 }
 
-export interface ModalInput {
+export interface TextModalInput {
   custom_id: string;
   /** 1–45 characters. */
   label: string;
@@ -91,6 +91,23 @@ export interface ModalInput {
   /** Prefilled text, at most `max_length` characters. */
   value?: string | null;
 }
+
+/** A private single-choice modal input (`components.modal_select.v1`). */
+export interface SelectModalInput {
+  custom_id: string;
+  /** 1–45 characters. */
+  label: string;
+  style: "select";
+  placeholder?: string | null;
+  /** 1–25 choices; preselection uses `value`, never option defaults. */
+  options: Omit<SelectOption, "default">[];
+  /** Default `true`. */
+  required?: boolean | null;
+  /** A preselected option value, or absent. */
+  value?: string | null;
+}
+
+export type ModalInput = TextModalInput | SelectModalInput;
 
 /** A modal (a form on the invoking device), the `modal` of a `modal` response. */
 export interface Modal {
@@ -199,6 +216,7 @@ const SELECT_KEYS = ["type", "custom_id", "placeholder", "options", "min", "max"
 const OPTION_KEYS = ["label", "value", "description", "emoji", "default"] as const;
 const MODAL_KEYS = ["custom_id", "title", "inputs"] as const;
 const INPUT_KEYS = ["custom_id", "label", "style", "placeholder", "min_length", "max_length", "required", "value"] as const;
+const SELECT_INPUT_KEYS = ["custom_id", "label", "style", "placeholder", "options", "required", "value"] as const;
 
 class Refused {
   constructor(readonly path: string, readonly message: string) {}
@@ -224,12 +242,8 @@ function checkButton(b: Obj, p: string): void {
   check(absent(b.disabled) || typeof b.disabled === "boolean", `${p}.disabled`, "disabled: a boolean");
 }
 
-function checkSelect(s: Obj, p: string): void {
-  const k = unknownKey(s, SELECT_KEYS);
-  check(k === undefined, `${p}.${k}`, "Unknown field");
-  check(validCustomId(s.custom_id), `${p}.custom_id`, `custom_id: 1 to ${MAX_CUSTOM_ID} characters`);
-  check(absent(s.placeholder) || text(s.placeholder, 0, MAX_PLACEHOLDER), `${p}.placeholder`, `placeholder: at most ${MAX_PLACEHOLDER} characters`);
-  const options = s.options;
+function checkOptions(source: unknown, p: string, allowDefault: boolean): void {
+  const options = source;
   check(Array.isArray(options) && options.length >= 1 && options.length <= MAX_OPTIONS, `${p}.options`, `options: 1 to ${MAX_OPTIONS}`);
   const list = options as unknown[];
   const values = new Set<string>();
@@ -237,15 +251,24 @@ function checkSelect(s: Obj, p: string): void {
     const q = `${p}.options[${i}]`;
     check(isObj(o), q, "An option is an object");
     const opt = o as Obj;
-    const k2 = unknownKey(opt, OPTION_KEYS);
+    const k2 = unknownKey(opt, allowDefault ? OPTION_KEYS : OPTION_KEYS.filter((key) => key !== "default"));
     check(k2 === undefined, `${q}.${k2}`, "Unknown field");
     check(text(opt.label, 1, MAX_OPTION_LABEL), `${q}.label`, `label: 1 to ${MAX_OPTION_LABEL} characters`);
     check(text(opt.value, 1, MAX_OPTION_VALUE) && !values.has(opt.value as string), `${q}.value`, `value: 1 to ${MAX_OPTION_VALUE} characters, unique`);
     values.add(opt.value as string);
     check(absent(opt.description) || text(opt.description, 0, MAX_OPTION_DESCRIPTION), `${q}.description`, `description: at most ${MAX_OPTION_DESCRIPTION} characters`);
     check(absent(opt.emoji) || validComponentEmoji(opt.emoji), `${q}.emoji`, "emoji: one Unicode emoji or :shortcode:");
-    check(absent(opt.default) || typeof opt.default === "boolean", `${q}.default`, "default: a boolean");
+    if (allowDefault) check(absent(opt.default) || typeof opt.default === "boolean", `${q}.default`, "default: a boolean");
   });
+}
+
+function checkSelect(s: Obj, p: string): void {
+  const k = unknownKey(s, SELECT_KEYS);
+  check(k === undefined, `${p}.${k}`, "Unknown field");
+  check(validCustomId(s.custom_id), `${p}.custom_id`, `custom_id: 1 to ${MAX_CUSTOM_ID} characters`);
+  check(absent(s.placeholder) || text(s.placeholder, 0, MAX_PLACEHOLDER), `${p}.placeholder`, `placeholder: at most ${MAX_PLACEHOLDER} characters`);
+  checkOptions(s.options, p, true);
+  const list = s.options as unknown[];
   const min = absent(s.min) ? 1 : s.min;
   check(int(min, 0, MAX_OPTIONS) && min <= list.length, `${p}.min`, "min: 0 to 25, at most the number of options");
   const max = absent(s.max) ? 1 : s.max;
@@ -321,18 +344,25 @@ export function validateModal(modal: unknown): ComponentIssue | null {
       const p = `inputs[${i}]`;
       check(isObj(x), p, "An input is an object");
       const input = x as Obj;
-      const k2 = unknownKey(input, INPUT_KEYS);
+      const isSelect = input.style === "select";
+      const k2 = unknownKey(input, isSelect ? SELECT_INPUT_KEYS : INPUT_KEYS);
       check(k2 === undefined, `${p}.${k2}`, "Unknown field");
       check(validCustomId(input.custom_id), `${p}.custom_id`, `custom_id: 1 to ${MAX_CUSTOM_ID} characters`);
       check(text(input.label, 1, MAX_INPUT_LABEL), `${p}.label`, `label: 1 to ${MAX_INPUT_LABEL} characters`);
-      check(typeof input.style === "string" && (INPUT_STYLES as readonly string[]).includes(input.style), `${p}.style`, "style: short or paragraph");
+      check(isSelect || (typeof input.style === "string" && (INPUT_STYLES as readonly string[]).includes(input.style)), `${p}.style`, "style: short, paragraph or select");
       check(absent(input.placeholder) || text(input.placeholder, 0, MAX_INPUT_PLACEHOLDER), `${p}.placeholder`, `placeholder: at most ${MAX_INPUT_PLACEHOLDER} characters`);
-      const min = absent(input.min_length) ? 0 : input.min_length;
-      check(int(min, 0, MAX_INPUT_LENGTH), `${p}.min_length`, `min_length: 0 to ${MAX_INPUT_LENGTH}`);
-      const max = absent(input.max_length) ? MAX_INPUT_LENGTH : input.max_length;
-      check(int(max, 1, MAX_INPUT_LENGTH) && max >= (min as number), `${p}.max_length`, `max_length: 1 to ${MAX_INPUT_LENGTH}, at least min_length`);
-      check(absent(input.required) || typeof input.required === "boolean", `${p}.required`, "required: a boolean");
-      check(absent(input.value) || (typeof input.value === "string" && chars(input.value) <= (max as number)), `${p}.value`, "value: at most max_length characters");
+      if (isSelect) {
+        checkOptions(input.options, p, false);
+        check(absent(input.required) || typeof input.required === "boolean", `${p}.required`, "required: a boolean");
+        check(absent(input.value) || (input.options as SelectOption[]).some((option) => option.value === input.value), `${p}.value`, "value: one option value");
+      } else {
+        const min = absent(input.min_length) ? 0 : input.min_length;
+        check(int(min, 0, MAX_INPUT_LENGTH), `${p}.min_length`, `min_length: 0 to ${MAX_INPUT_LENGTH}`);
+        const max = absent(input.max_length) ? MAX_INPUT_LENGTH : input.max_length;
+        check(int(max, 1, MAX_INPUT_LENGTH) && max >= (min as number), `${p}.max_length`, `max_length: 1 to ${MAX_INPUT_LENGTH}, at least min_length`);
+        check(absent(input.required) || typeof input.required === "boolean", `${p}.required`, "required: a boolean");
+        check(absent(input.value) || (typeof input.value === "string" && chars(input.value) <= (max as number)), `${p}.value`, "value: at most max_length characters");
+      }
       check(!ids.has(input.custom_id as string), `${p}.custom_id`, "custom_id is unique within the modal");
       ids.add(input.custom_id as string);
     });
@@ -377,7 +407,7 @@ export function validateComponentValues(rows: readonly Row[] | null | undefined,
 
 /**
  * The node's check of a plaintext modal submit (§5.10.4): an object of input `custom_id` → text, every required
- * input filled, lengths within `min_length`–`max_length` (optional inputs may be absent or empty).
+ * input filled, text lengths within `min_length`–`max_length` or an exact select option value (optional inputs may be absent or empty).
  */
 export function validateModalValues(modal: Modal, values: unknown): ComponentIssue | null {
   return run("interaction.values_invalid", () => {
@@ -388,6 +418,11 @@ export function validateModalValues(modal: Modal, values: unknown): ComponentIss
     }
     for (const input of modal.inputs) {
       const value = (v[input.custom_id] as string | undefined) ?? "";
+      if (input.style === "select") {
+        if (value === "") check(!(input.required ?? true), `values.${input.custom_id}`, "This input is required");
+        else check(input.options.some((option) => option.value === value), `values.${input.custom_id}`, "An option value of the select");
+        continue;
+      }
       const n = chars(value);
       const required = input.required ?? true;
       // Whitespace only counts as empty: a required input needs real text (the node checks the same).

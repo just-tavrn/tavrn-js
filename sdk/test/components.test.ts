@@ -106,3 +106,28 @@ describe("readComponents", () => {
     expect(validComponentEmoji("")).toBe(false);
   });
 });
+
+describe("private single-choice modal inputs", () => {
+  const modal: Modal = { custom_id: "spec", title: "Choose your spec", inputs: [
+    { custom_id: "spec", label: "Spec", style: "select", options: [{ label: "Holy", value: "holy" }, { label: "Protection", value: "protection" }] },
+    { custom_id: "backup", label: "Backup spec", style: "select", options: [{ label: "Holy", value: "holy" }], required: false },
+  ] };
+  it("validates select definitions and prefilled choices", () => {
+    expect(validateModal(modal)).toBeNull();
+    expect(validateModal({ ...modal, inputs: [{ ...modal.inputs[0], value: "holy" }] })).toBeNull();
+    expect(validateModal({ ...modal, inputs: [{ ...modal.inputs[0], value: "nope" }] })?.path).toBe("inputs[0].value");
+  });
+  it("accepts exactly one option value and absent or empty optional selections", () => {
+    expect(validateModalValues(modal, { spec: "holy" })).toBeNull();
+    expect(validateModalValues(modal, { spec: "protection", backup: "" })).toBeNull();
+    expect(validateModalValues(modal, { spec: "holy", backup: "holy" })).toBeNull();
+    for (const values of [{}, { spec: "" }, { spec: "nope" }, { spec: " holy" }, { spec: ["holy"] }, { spec: "holy", backup: "nope" }]) {
+      expect(validateModalValues(modal, values)?.code).toBe("interaction.values_invalid");
+    }
+  });
+  it("treats select values as opaque tokens and validates duplicate input ids", () => {
+    const spaced: Modal = { ...modal, inputs: [{ custom_id: "spec", label: "Spec", style: "select", options: [{ label: "A", value: " " }] }] };
+    expect(validateModalValues(spaced, { spec: " " })).toBeNull();
+    expect(validateModal({ ...modal, inputs: [modal.inputs[0], modal.inputs[0]] })?.path).toBe("inputs[1].custom_id");
+  });
+});

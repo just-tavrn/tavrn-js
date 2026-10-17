@@ -6,11 +6,11 @@
  * `reply`, `ephemeral`, `defer`, `error`, `update` (edit the message) or `modal` (open a form, components only). In
  * encrypted conversations the values arrive as ciphertext and are decrypted and checked like command arguments.
  *
- * The builders (`row`, `button`, `select`, `modal`, `textInput`) produce the shapes of `@tavrn/sdk`'s `components.ts`
+ * The builders (`row`, `button`, `select`, `modal`, `textInput`, `selectInput`) produce the shapes of `@tavrn/sdk`'s `components.ts`
  * and check them with the node's rules, so a mistake throws here instead of failing at the node.
  */
 import { ComponentValuesVerifier, qualify } from "@tavrn/e2ee";
-import { validateComponents, validateModal, type Button, type ButtonStyle, type Component, type InputStyle, type Modal, type ModalInput, type Row, type Select, type SelectOption } from "@tavrn/sdk";
+import { validateComponents, validateModal, type Button, type ButtonStyle, type Component, type InputStyle, type Modal, type ModalInput, type SelectModalInput, type TextModalInput, type Row, type Select, type SelectOption } from "@tavrn/sdk";
 import { Interaction, answerError, runInteraction, type CommandInvokeData, type InteractionResult, type InvokeContext } from "./commands";
 import type { BotLogger } from "./logger";
 
@@ -205,14 +205,23 @@ export function select(customId: string, options: (SelectOption | string)[], opt
 }
 
 /** A text input of a modal (`short` by default, required by default). */
-export function textInput(customId: string, label: string, opts: { style?: InputStyle; placeholder?: string; minLength?: number; maxLength?: number; required?: boolean; value?: string } = {}): ModalInput {
-  const i: ModalInput = { custom_id: customId, label, style: opts.style ?? "short" };
+export function textInput(customId: string, label: string, opts: { style?: InputStyle; placeholder?: string; minLength?: number; maxLength?: number; required?: boolean; value?: string } = {}): TextModalInput {
+  const i: TextModalInput = { custom_id: customId, label, style: opts.style ?? "short" };
   if (opts.placeholder !== undefined) i.placeholder = opts.placeholder;
   if (opts.minLength !== undefined) i.min_length = opts.minLength;
   if (opts.maxLength !== undefined) i.max_length = opts.maxLength;
   if (opts.required !== undefined) i.required = opts.required;
   if (opts.value !== undefined) i.value = opts.value;
   return i;
+}
+
+/** A personal single-choice modal select; requires the node's `components.modal_select.v1` capability. */
+export function selectInput(customId: string, label: string, options: (Omit<SelectOption, "default"> | string)[], opts: { placeholder?: string; required?: boolean; value?: string } = {}): SelectModalInput {
+  const input: SelectModalInput = { custom_id: customId, label, style: "select", options: options.map((option) => typeof option === "string" ? { label: option, value: option } : option) };
+  if (opts.placeholder !== undefined) input.placeholder = opts.placeholder;
+  if (opts.required !== undefined) input.required = opts.required;
+  if (opts.value !== undefined) input.value = opts.value;
+  return input;
 }
 
 /** A modal (checked; throws `TypeError` naming the offending field). */

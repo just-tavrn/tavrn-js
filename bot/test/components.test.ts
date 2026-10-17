@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 import { componentValuesContent, modalValuesContent, type Decrypted, type EncryptedEnvelope } from "@tavrn/e2ee";
 import type { CommandCrypto, InvokeContext } from "../src/commands";
-import { ComponentRouter, button, modal, row, select, textInput, withComponents, type ComponentInteraction } from "../src/components";
+import { ComponentRouter, button, modal, row, select, selectInput, textInput, withComponents, type ComponentInteraction } from "../src/components";
 import { silentLogger } from "../src/logger";
 
 const CONV = "01J9ZK3G5M8Q2W4E6R8T0Y2CV1";
@@ -146,6 +146,14 @@ describe("ComponentRouter", () => {
 });
 
 describe("builders", () => {
+  it("builds personal select forms without text-only limits or shared option defaults", () => {
+    const input = selectInput("spec", "Paladin spec", [{ label: "Holy", value: "holy", description: "Healer", emoji: "💚" }, "Protection"], { placeholder: "Choose your spec", required: false, value: "holy" });
+    expect(input).toEqual({ custom_id: "spec", label: "Paladin spec", style: "select", options: [{ label: "Holy", value: "holy", description: "Healer", emoji: "💚" }, { label: "Protection", value: "Protection" }], placeholder: "Choose your spec", required: false, value: "holy" });
+    expect(modal("raid:spec", "Choose your spec", input).inputs).toEqual([input]);
+    expect(() => modal("x", "Title", selectInput("spec", "Spec", []))).toThrow(/options/);
+    expect(() => modal("x", "Title", selectInput("spec", "Spec", ["Holy"], { value: "nope" }))).toThrow(/value/);
+  });
+
   it("build valid components and refuse invalid ones", () => {
     const content = withComponents(
       "Raid on Friday",
