@@ -69,6 +69,27 @@ describe("TavrnApi", () => {
     await expect(cancel.users.deleteDevice("D3")).rejects.toMatchObject({ code: "auth.reauth_required" });
   });
 
+  it("reads a room preview with rules and legal documents, without a session too, and sends the documents on update", async () => {
+    const preview = {
+      room: { id: "R1", name: "Hall", description: "", icon_animated: false, member_count: 3, age_gate: "none" },
+      rules: "Be kind.",
+      privacy_notice: "# Privacy",
+      privacy_notice_updated_at: "2026-10-17T10:00:00Z",
+      legal_notice: "",
+      legal_notice_updated_at: null,
+    };
+    const { impl, calls } = fetchMock([{ status: 200, body: preview }, { status: 200, body: { id: "R1" } }]);
+    const anonymous = new TavrnApi({ baseUrl: "https://b.example", fetchImpl: impl });
+    const got = await anonymous.rooms.preview("R1/../x");
+    expect(calls[0]!.url).toBe("https://b.example/api/v1/rooms/R1%2F..%2Fx/preview");
+    expect((calls[0]!.init.headers as Record<string, string>).Authorization).toBeUndefined();
+    expect(got.privacy_notice).toBe("# Privacy");
+    expect(got.legal_notice_updated_at).toBeNull();
+    await anonymous.rooms.update("R1", { privacy_notice: "", legal_notice: "Run by Alice" });
+    expect(calls[1]!.init.method).toBe("PATCH");
+    expect(JSON.parse(String(calls[1]!.init.body))).toEqual({ privacy_notice: "", legal_notice: "Run by Alice" });
+  });
+
   it("sends a direct invite for a user of any node and claims KeyPackages by address", async () => {
     const { impl, calls } = fetchMock([{ status: 202, body: { invite: { code: "abc" } } }, { status: 200, body: { key_packages: [] } }]);
     const api = new TavrnApi({ baseUrl: "https://b.example", getToken: () => "tok", fetchImpl: impl });
