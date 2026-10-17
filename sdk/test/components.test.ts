@@ -106,3 +106,46 @@ describe("readComponents", () => {
     expect(validComponentEmoji("")).toBe(false);
   });
 });
+
+describe("private single-choice modal inputs", () => {
+  const modal: Modal = { custom_id: "spec", title: "Choose your spec", inputs: [
+    { custom_id: "spec", label: "Spec", style: "select", options: [{ label: "Holy", value: "holy" }, { label: "Protection", value: "protection" }] },
+    { custom_id: "backup", label: "Backup spec", style: "select", options: [{ label: "Holy", value: "holy" }], required: false },
+  ] };
+  it("validates select definitions and prefilled choices", () => {
+    expect(validateModal(modal)).toBeNull();
+    expect(validateModal({ ...modal, inputs: [{ ...modal.inputs[0], value: "holy" }] })).toBeNull();
+    expect(validateModal({ ...modal, inputs: [{ ...modal.inputs[0], value: "nope" }] })?.path).toBe("inputs[0].value");
+  });
+  it("accepts exactly one option value and absent or empty optional selections", () => {
+    expect(validateModalValues(modal, { spec: "holy" })).toBeNull();
+    expect(validateModalValues(modal, { spec: "protection", backup: "" })).toBeNull();
+    expect(validateModalValues(modal, { spec: "holy", backup: "holy" })).toBeNull();
+    for (const values of [{}, { spec: "" }, { spec: "nope" }, { spec: " holy" }, { spec: ["holy"] }, { spec: "holy", backup: "nope" }]) {
+      expect(validateModalValues(modal, values)?.code).toBe("interaction.values_invalid");
+    }
+  });
+  it("treats select values as opaque tokens and validates duplicate input ids", () => {
+    const spaced: Modal = { ...modal, inputs: [{ custom_id: "spec", label: "Spec", style: "select", options: [{ label: "A", value: " " }] }] };
+    expect(validateModalValues(spaced, { spec: " " })).toBeNull();
+    expect(validateModal({ ...modal, inputs: [modal.inputs[0], modal.inputs[0]] })?.path).toBe("inputs[1].custom_id");
+  });
+});
+
+describe("modal inputs whose ids match object prototype keys", () => {
+  it.each(["constructor", "toString", "__proto__"])("reads only own submitted values for %s", (id) => {
+    for (const input of [
+      { custom_id: id, label: "Text", style: "short" as const },
+      { custom_id: id, label: "Select", style: "select" as const, options: [{ label: "Holy", value: "holy" }] },
+    ]) {
+      const optional: Modal = { custom_id: "form", title: "Title", inputs: [{ ...input, required: false }] };
+      const required: Modal = { ...optional, inputs: [input] };
+      expect(validateModalValues(optional, {})).toBeNull();
+      expect(validateModalValues(optional, Object.create({ [id]: "nope" }))).toBeNull();
+      expect(validateModalValues(required, {})?.path).toBe(`values.${id}`);
+      expect(validateModalValues(required, Object.create({ [id]: "holy" }))?.path).toBe(`values.${id}`);
+      expect(validateModalValues(required, Object.fromEntries([[id, "holy"]]))).toBeNull();
+      expect(validateModalValues(required, Object.fromEntries([[id, 7]]))?.path).toBe(`values.${id}`);
+    }
+  });
+});

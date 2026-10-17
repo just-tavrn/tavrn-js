@@ -308,6 +308,12 @@ menu. The client draws them from its own palette; the bot chooses only the texts
 `bot.modal(customId | RegExp, handler)` the forms the bot opened. The handler gets the command `Interaction` with
 `messageId`, `customId`, `values` (a select's choices) or `fields` (a form's input), and two more answers:
 `update(content)` edits the message that carries the component, `modal(form)` opens a form on the invoker's device.
+A modal can contain a personal single-choice dropdown built with `selectInput(id, label, options, opts)` when the
+node advertises `components.modal_select.v1` (check `await bot.api(node).node.info()`). Options use `label`, `value`,
+`description` and `emoji`; `value` in the input options preselects one choice. Modal submits keep the same
+`i.fields` string map. Validate selected values with `validateModalValues` after decryption, and bind application
+state to the invoker and current context; opening one person's form must not change another person's choice.
+
 A raid planner:
 
 ```ts
