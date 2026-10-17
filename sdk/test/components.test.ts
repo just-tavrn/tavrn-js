@@ -131,3 +131,21 @@ describe("private single-choice modal inputs", () => {
     expect(validateModal({ ...modal, inputs: [modal.inputs[0], modal.inputs[0]] })?.path).toBe("inputs[1].custom_id");
   });
 });
+
+describe("modal inputs whose ids match object prototype keys", () => {
+  it.each(["constructor", "toString", "__proto__"])("reads only own submitted values for %s", (id) => {
+    for (const input of [
+      { custom_id: id, label: "Text", style: "short" as const },
+      { custom_id: id, label: "Select", style: "select" as const, options: [{ label: "Holy", value: "holy" }] },
+    ]) {
+      const optional: Modal = { custom_id: "form", title: "Title", inputs: [{ ...input, required: false }] };
+      const required: Modal = { ...optional, inputs: [input] };
+      expect(validateModalValues(optional, {})).toBeNull();
+      expect(validateModalValues(optional, Object.create({ [id]: "nope" }))).toBeNull();
+      expect(validateModalValues(required, {})?.path).toBe(`values.${id}`);
+      expect(validateModalValues(required, Object.create({ [id]: "holy" }))?.path).toBe(`values.${id}`);
+      expect(validateModalValues(required, Object.fromEntries([[id, "holy"]]))).toBeNull();
+      expect(validateModalValues(required, Object.fromEntries([[id, 7]]))?.path).toBe(`values.${id}`);
+    }
+  });
+});

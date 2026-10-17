@@ -417,7 +417,7 @@ export function validateModalValues(modal: Modal, values: unknown): ComponentIss
       check(modal.inputs.some((i) => i.custom_id === key) && typeof value === "string", `values.${key}`, "An input of the modal, as text");
     }
     for (const input of modal.inputs) {
-      const value = (v[input.custom_id] as string | undefined) ?? "";
+      const value = Object.hasOwn(v, input.custom_id) ? v[input.custom_id] as string : "";
       if (input.style === "select") {
         if (value === "") check(!(input.required ?? true), `values.${input.custom_id}`, "This input is required");
         else check(input.options.some((option) => option.value === value), `values.${input.custom_id}`, "An option value of the select");
