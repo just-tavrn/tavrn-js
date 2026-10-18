@@ -7074,7 +7074,7 @@ export type WellKnown = {
 
 export type WhisperReceipt = {
     /**
-     * Active playback authorization expiry (30 seconds from start), never the reply deadline.
+     * Active playback authorization expiry, separate from the latest-received reply deadline.
      */
     expires_at: string;
     id: string;
@@ -13247,6 +13247,7 @@ export type WhisperEndData = {
 
 export type WhisperEndErrors = {
     403: ProblemDetails;
+    409: ProblemDetails;
 };
 
 export type WhisperEndError = WhisperEndErrors[keyof WhisperEndErrors];
