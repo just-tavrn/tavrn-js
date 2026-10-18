@@ -41,6 +41,14 @@ describe("computePermissions", () => {
     expect(computePermissions(v.input).toString()).toBe(v.expected);
   });
 
+  it("defines whisper initiation independently in Voice channel/category overrides", () => {
+    expect(Permission.WHISPER).toBe(1n << 41n);
+    expect(CHANNEL_SCOPED & Permission.WHISPER).toBe(Permission.WHISPER);
+    expect(EVERYONE_RESTRICTED & Permission.WHISPER).toBe(0n);
+    expect(CHANNEL_SCOPED_GROUPS.find(g => g.group === "voice")?.permissions).toContain("WHISPER");
+    expect(PERMISSION_LABELS.find(p => p.name === "WHISPER")?.group).toBe("Voice");
+  });
+
   it("ALL contains every permission and fits in i64", () => {
     for (const bit of Object.values(Permission)) expect(hasPermission(ALL_PERMISSIONS, bit)).toBe(true);
     expect(ALL_PERMISSIONS < 1n << 63n).toBe(true);
@@ -108,7 +116,7 @@ describe("use_components (bit 40)", () => {
   it("is channel-scoped, grantable to @everyone, in DMs, covered by no scope and allowed in system channels", () => {
     expect(Permission.USE_COMPONENTS).toBe(1n << 40n);
     expect(isChannelScoped("USE_COMPONENTS")).toBe(true);
-    expect(CHANNEL_SCOPED).toBe(2027195138559n);
+    expect(CHANNEL_SCOPED).toBe(4226218394111n);
     expect(isEveryoneRestricted("USE_COMPONENTS")).toBe(false);
     expect(hasPermission(scopeMask(SCOPE_NAMES), Permission.USE_COMPONENTS)).toBe(false);
     expect(hasPermission(DIRECT_PERMISSIONS, Permission.USE_COMPONENTS)).toBe(true);
@@ -160,7 +168,7 @@ describe("CHANNEL_SCOPED (layered overrides)", () => {
     const bits = [...section.matchAll(/^\| (\d+) \| `/gm)].map((m) => BigInt(m[1]!));
     expect(bits.reduce((acc, b) => acc | (1n << b), 0n)).toBe(CHANNEL_SCOPED);
     // Same value as permissions::CHANNEL_SCOPED of the node.
-    expect(CHANNEL_SCOPED.toString()).toBe("2027195138559");
+    expect(CHANNEL_SCOPED.toString()).toBe("4226218394111");
     expect(isChannelScoped("VIEW_CHANNEL")).toBe(true);
     expect(isChannelScoped("MANAGE_ROLES")).toBe(true);
     for (const room of ["ADMINISTRATOR", "MANAGE_ROOM", "KICK_MEMBERS", "PURGE", "CHANGE_NICKNAME", "MANAGE_APPLICATIONS"] as const) expect(isChannelScoped(room)).toBe(false);

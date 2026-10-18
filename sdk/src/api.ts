@@ -25,6 +25,9 @@ import type {
   CallJoin,
   CallState,
   ConnectionTest,
+  WhisperSession,
+  WhisperReceipt,
+  WhisperRequest,
   MoveAllResult,
   BackupList,
   ClaimedKeyPackages,
@@ -1527,6 +1530,15 @@ export class TavrnApi {
 
   /** Voice channels (VOICE.md §3–§7). Moderation targets are user addresses of room members. */
   voice = {
+    /** Authorize a 30-second whisper. Publish E2EE track `whisper:<id>` only after this succeeds. */
+    startWhisper: (roomId: string, channelId: string, request: WhisperRequest) =>
+      this.post<WhisperSession>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/voice/whisper`, request),
+    /** Validate a received published whisper BEFORE attaching audio; grants bounded reply to its actual sender only. */
+    receiveWhisper: (roomId: string, channelId: string, id: string) =>
+      this.post<WhisperReceipt>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/voice/whisper/${encodeURIComponent(id)}/receive`),
+    /** Stop/unpublish the whisper track and await SFU confirmation before ending this authorization. */
+    endWhisper: (roomId: string, channelId: string, id: string) =>
+      this.del<void>(`/rooms/${encodeURIComponent(roomId)}/channels/${encodeURIComponent(channelId)}/voice/whisper/${encodeURIComponent(id)}`),
     /**
      * LiveKit token, limits, MLS epoch and the participants already connected (§3). `role: "screen"`: the token of
      * this device's screen publisher instead, which only publishes its screen share (§4b; the device must be there).

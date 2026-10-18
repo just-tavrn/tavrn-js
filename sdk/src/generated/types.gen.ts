@@ -7072,6 +7072,34 @@ export type WellKnown = {
     ws: string;
 };
 
+export type WhisperReceipt = {
+    /**
+     * Active playback authorization expiry (30 seconds from start), never the reply deadline.
+     */
+    expires_at: string;
+    id: string;
+    reply_expires_at: string;
+    sender: string;
+};
+
+/**
+ * Either initiate to explicit devices or reply to the last server-confirmed received session.
+ */
+export type WhisperRequest = {
+    recipients?: Array<string>;
+    reply_to?: string | null;
+};
+
+export type WhisperSession = {
+    expires_at: string;
+    id: string;
+    /**
+     * Only the sender sees the complete recipient list.
+     */
+    recipients: Array<string>;
+    sender: string;
+};
+
 /**
  * The whiteboard session of a conversation as the node knows it.
  */
@@ -13183,6 +13211,74 @@ export type UpdateState2Responses = {
 };
 
 export type UpdateState2Response = UpdateState2Responses[keyof UpdateState2Responses];
+
+export type WhisperStartData = {
+    body: WhisperRequest;
+    path: {
+        room_id: string;
+        channel_id: string;
+    };
+    query?: never;
+    url: '/api/v1/rooms/{room_id}/channels/{channel_id}/voice/whisper';
+};
+
+export type WhisperStartErrors = {
+    403: ProblemDetails;
+};
+
+export type WhisperStartError = WhisperStartErrors[keyof WhisperStartErrors];
+
+export type WhisperStartResponses = {
+    200: WhisperSession;
+};
+
+export type WhisperStartResponse = WhisperStartResponses[keyof WhisperStartResponses];
+
+export type WhisperEndData = {
+    body?: never;
+    path: {
+        room_id: string;
+        channel_id: string;
+        id: string;
+    };
+    query?: never;
+    url: '/api/v1/rooms/{room_id}/channels/{channel_id}/voice/whisper/{id}';
+};
+
+export type WhisperEndErrors = {
+    403: ProblemDetails;
+};
+
+export type WhisperEndError = WhisperEndErrors[keyof WhisperEndErrors];
+
+export type WhisperEndResponses = {
+    204: void;
+};
+
+export type WhisperEndResponse = WhisperEndResponses[keyof WhisperEndResponses];
+
+export type WhisperReceiveData = {
+    body?: never;
+    path: {
+        room_id: string;
+        channel_id: string;
+        id: string;
+    };
+    query?: never;
+    url: '/api/v1/rooms/{room_id}/channels/{channel_id}/voice/whisper/{id}/receive';
+};
+
+export type WhisperReceiveErrors = {
+    403: ProblemDetails;
+};
+
+export type WhisperReceiveError = WhisperReceiveErrors[keyof WhisperReceiveErrors];
+
+export type WhisperReceiveResponses = {
+    200: WhisperReceipt;
+};
+
+export type WhisperReceiveResponse = WhisperReceiveResponses[keyof WhisperReceiveResponses];
 
 export type ListChannelData = {
     body?: never;
