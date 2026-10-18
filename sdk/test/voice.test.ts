@@ -17,6 +17,29 @@ function fetchMock(responses: Array<{ status: number; body?: unknown; raw?: Body
 const headersOf = (init: RequestInit) => init.headers as Record<string, string>;
 
 describe("voice API (VOICE.md)", () => {
+  it("authorizes initiation or actual reply and keeps playback expiry distinct from reply expiry", async () => {
+    const { impl, calls } = fetchMock([
+      { status: 200, body: { id: "W", sender: "alice/D", recipients: ["bob/D"], expires_at: "active" } },
+      { status: 200, body: { id: "W", sender: "alice/D", expires_at: "active", reply_expires_at: "reply" } },
+      { status: 200, body: { id: "REPLY", recipients: ["alice/D"] } },
+      { status: 204 },
+    ]);
+    const api = new TavrnApi({ baseUrl: "https://n.example", getToken: () => "tok", fetchImpl: impl });
+    expect((await api.voice.startWhisper("R", "C", { recipients: ["bob/D"] })).id).toBe("W");
+    const receipt = await api.voice.receiveWhisper("R", "C", "W");
+    expect(receipt.expires_at).toBe("active");
+    expect(receipt.reply_expires_at).toBe("reply");
+    await api.voice.startWhisper("R", "C", { reply_to: receipt.id });
+    await api.voice.endWhisper("R", "C", "W");
+    expect(JSON.parse(calls[2]!.init.body as string)).toEqual({ reply_to: "W" });
+    expect(calls.map(c => [c.init.method, new URL(c.url).pathname])).toEqual([
+      ["POST", "/api/v1/rooms/R/channels/C/voice/whisper"],
+      ["POST", "/api/v1/rooms/R/channels/C/voice/whisper/W/receive"],
+      ["POST", "/api/v1/rooms/R/channels/C/voice/whisper"],
+      ["DELETE", "/api/v1/rooms/R/channels/C/voice/whisper/W"],
+    ]);
+  });
+
   it("joins, reports the own state, leaves and lists the room's voice channels", async () => {
     const { impl, calls } = fetchMock([{ status: 200, body: { token: "lk", epoch: 3 } }, { status: 200, body: { participants: [] } }, { status: 204 }, { status: 200, body: { items: [] } }]);
     const api = new TavrnApi({ baseUrl: "https://n.example", getToken: () => "tok", fetchImpl: impl });

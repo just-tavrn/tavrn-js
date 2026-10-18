@@ -55,6 +55,7 @@ export const Permission = {
    * default of `@everyone`, independent of SEND_MESSAGES; no app-token scope covers it (bots never click).
    */
   USE_COMPONENTS: 1n << 40n,
+  WHISPER: 1n << 41n,
   ADMINISTRATOR: 1n << 62n,
 } as const;
 
@@ -125,6 +126,7 @@ export const CHANNEL_SCOPED: bigint = [
   Permission.VOICE_STATUS,
   Permission.CREATE_POLLS,
   Permission.USE_COMPONENTS,
+  Permission.WHISPER,
 ].reduce((a, b) => a | b, 0n);
 
 /** Is this permission (a bit or its name) one that overrides may carry? */
@@ -137,7 +139,7 @@ export function isChannelScoped(permission: bigint | PermissionName): boolean {
 export const CHANNEL_SCOPED_GROUPS: readonly { group: "general" | "text" | "voice" | "files" | "management"; permissions: readonly PermissionName[] }[] = [
   { group: "general", permissions: ["VIEW_CHANNEL", "READ_HISTORY", "ADD_REACTIONS", "USE_EXTERNAL_EMOJIS", "MENTION_EVERYONE"] },
   { group: "text", permissions: ["SEND_MESSAGES", "CREATE_THREADS", "CREATE_POLLS", "USE_COMPONENTS", "PIN_MESSAGES", "MANAGE_MESSAGES", "MANAGE_THREADS"] },
-  { group: "voice", permissions: ["CONNECT", "SPEAK", "STREAM", "USE_CAMERA", "USE_SOUNDBOARD", "USE_EXTERNAL_SOUNDS", "PRIORITY_SPEAKER", "VOICE_STATUS", "MUTE_MEMBERS", "MOVE_MEMBERS", "USE_WHITEBOARD", "MANAGE_WHITEBOARD"] },
+  { group: "voice", permissions: ["CONNECT", "SPEAK", "WHISPER", "STREAM", "USE_CAMERA", "USE_SOUNDBOARD", "USE_EXTERNAL_SOUNDS", "PRIORITY_SPEAKER", "VOICE_STATUS", "MUTE_MEMBERS", "MOVE_MEMBERS", "USE_WHITEBOARD", "MANAGE_WHITEBOARD"] },
   { group: "files", permissions: ["ATTACH_FILES", "MANAGE_FILES"] },
   { group: "management", permissions: ["MANAGE_CHANNELS", "MANAGE_ROLES", "MANAGE_WEBHOOKS"] },
 ];
@@ -193,6 +195,7 @@ export const PERMISSION_LABELS: { name: PermissionName; label: string; group: st
   { name: "MOVE_MEMBERS", label: "Move members", group: "Voice" },
   { name: "USE_SOUNDBOARD", label: "Use soundboard", group: "Voice" },
   { name: "PRIORITY_SPEAKER", label: "Priority speaker", group: "Voice" },
+  { name: "WHISPER", label: "Initiate whisper audio", group: "Voice" },
   { name: "VOICE_STATUS", label: "Set voice channel status", group: "Voice" },
   { name: "READ_HISTORY", label: "Read history from before joining", group: "Text" },
   { name: "USE_EXTERNAL_EMOJIS", label: "Use external emojis", group: "General" },
@@ -277,7 +280,7 @@ export const SCOPES: readonly (readonly [string, bigint])[] = [
       Permission.MANAGE_THREADS,
   ],
   ["rooms:manage", Permission.MANAGE_ROOM | Permission.MANAGE_CHANNELS | Permission.MANAGE_ROLES | Permission.CREATE_INVITES | Permission.MANAGE_EMOJIS | Permission.MANAGE_FILES | Permission.MANAGE_APPLICATIONS | Permission.VOICE_STATUS],
-  ["voice", Permission.CONNECT | Permission.SPEAK | Permission.STREAM | Permission.USE_CAMERA | Permission.USE_SOUNDBOARD | Permission.USE_EXTERNAL_SOUNDS | Permission.PRIORITY_SPEAKER],
+  ["voice", Permission.CONNECT | Permission.SPEAK | Permission.STREAM | Permission.USE_CAMERA | Permission.USE_SOUNDBOARD | Permission.USE_EXTERNAL_SOUNDS | Permission.PRIORITY_SPEAKER | Permission.WHISPER],
   ["whiteboard", Permission.USE_WHITEBOARD | Permission.MANAGE_WHITEBOARD],
   ["commands", 0n],
   ["webhooks:manage", Permission.MANAGE_WEBHOOKS],

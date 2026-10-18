@@ -6,6 +6,9 @@ tags of this repository are `vX.Y.Z`. The protocol they implement is versioned s
 
 ## Unreleased
 
+- Add `Permission.WHISPER` (bit 41), Voice override grouping, and authenticated whisper start/receive/end API wrappers and generated types.
+
+
 First public release, published to npm (with provenance). `@tavrn/crypto` becomes a version range of the published
 package instead of a git dependency.
 
