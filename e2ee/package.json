@@ -31,7 +31,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@tavrn/crypto": "^0.1.0",
+    "@tavrn/crypto": "^0.1.2",
     "@tavrn/sdk": "workspace:*"
   },
   "devDependencies": {

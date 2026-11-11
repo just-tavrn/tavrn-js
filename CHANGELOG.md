@@ -18,6 +18,13 @@ The first release published through npm trusted publishing. Protocol at tavrn-pr
   `components.modal_select.v1`); submissions stay the same string map, checked with `validateModalValues`.
 - **`@tavrn/sdk`**: `validateModalValues` reads only the submission's own fields: an input id such as `constructor`
   that is absent from the values counts as empty instead of an inherited object property.
+- **`@tavrn/e2ee`**, **`@tavrn/bot`**: `@tavrn/crypto` ^0.1.2 (from ^0.1.0): OpenMLS 0.9.2 with the fixes for
+  [GHSA-94v4-rg25-x625](https://github.com/openmls/openmls/security/advisories/GHSA-94v4-rg25-x625) (removed leaves
+  reappearing after an external commit) and
+  [GHSA-p276-g3f3-wwgh](https://github.com/openmls/openmls/security/advisories/GHSA-p276-g3f3-wwgh) (a rejected
+  private message advancing the sender ratchet), ctutils 0.4.8
+  ([RUSTSEC-2026-0385](https://rustsec.org/advisories/RUSTSEC-2026-0385)), and the WebAssembly glue of wasm-bindgen
+  0.2.130 (`externref` table, i.e. WebAssembly reference types, which every current browser and Node.js support).
 - Releases publish to npm through trusted publishing (OIDC, with provenance) instead of an npm token; a rerun of the
   publish job skips packages whose version is already on npm.
 
