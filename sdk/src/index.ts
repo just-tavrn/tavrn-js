@@ -3,7 +3,7 @@
  * @tavrn/sdk – API client, WebSocket client and permission logic for the web client and bots.
  * Types are generated from the protocol's `openapi.json` (`just generate`, committed in `src/generated/`).
  */
-export const SDK_VERSION = "0.2.1";
+export const SDK_VERSION = "0.2.2";
 export * from "./age";
 export * from "./api";
 export * from "./components";

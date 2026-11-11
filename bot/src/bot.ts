@@ -42,7 +42,7 @@ const MLS_SAVE_FAILURES_FATAL = 3;
 /** Wait before the second try of a message whose author's devices could not be looked up (reason `retry`). */
 const DECRYPT_RETRY_MS = 1000;
 
-export const BOT_VERSION = "0.2.1";
+export const BOT_VERSION = "0.2.2";
 /** Default state directory (`TAVRN_BOT_STATE_DIR`, APPLICATIONS.md §3.3). */
 export const DEFAULT_STATE_DIR = ".tavrn-state";
 /** Channel kinds whose MLS groups the bot joins (voice groups only carry frame keys). */
