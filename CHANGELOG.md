@@ -4,17 +4,35 @@ Changes of `@tavrn/sdk`, `@tavrn/e2ee` and `@tavrn/bot`, newest first. The three
 tags of this repository are `vX.Y.Z`. The protocol they implement is versioned separately in
 [tavrn-protocol](https://github.com/just-tavrn/tavrn-protocol/blob/main/CHANGELOG.md).
 
-## Unreleased
+## 0.2.2
 
-- Add `Permission.WHISPER` (bit 41), Voice override grouping, and authenticated whisper start/receive/end API wrappers and generated types.
+The first release published through npm trusted publishing. Protocol at tavrn-protocol `79fd064`.
 
+- **`@tavrn/sdk`**: whisper audio: `Permission.WHISPER` (bit 41, in the voice group and the voice defaults) and the
+  authenticated voice wrappers `startWhisper`, `receiveWhisper` (validate a received whisper before attaching its
+  audio) and `endWhisper` (resolves after the server confirmed the SFU removal), with the generated types.
+- **`@tavrn/sdk`**: `rooms.preview(roomId)` (`GET /rooms/{room_id}/preview`: room, rules, privacy notice and legal
+  notice before joining) and the room's `privacy_notice` / `legal_notice` in `rooms.update` (protocol PROTOCOL.md
+  §6b); `InvitePreview` carries the documents too.
+- **`@tavrn/sdk`**, **`@tavrn/bot`**: personal single-choice selects in modals (`selectInput`, when the node advertises
+  `components.modal_select.v1`); submissions stay the same string map, checked with `validateModalValues`.
+- **`@tavrn/sdk`**: `validateModalValues` reads only the submission's own fields: an input id such as `constructor`
+  that is absent from the values counts as empty instead of an inherited object property.
+- **`@tavrn/e2ee`**, **`@tavrn/bot`**: `@tavrn/crypto` ^0.1.2 (from ^0.1.0): OpenMLS 0.9.2 with the fixes for
+  [GHSA-94v4-rg25-x625](https://github.com/openmls/openmls/security/advisories/GHSA-94v4-rg25-x625) (removed leaves
+  reappearing after an external commit) and
+  [GHSA-p276-g3f3-wwgh](https://github.com/openmls/openmls/security/advisories/GHSA-p276-g3f3-wwgh) (a rejected
+  private message advancing the sender ratchet), ctutils 0.4.8
+  ([RUSTSEC-2026-0385](https://rustsec.org/advisories/RUSTSEC-2026-0385)), and the WebAssembly glue of wasm-bindgen
+  0.2.130 (`externref` table, i.e. WebAssembly reference types, which every current browser and Node.js support).
+- Releases publish to npm through trusted publishing (OIDC, with provenance) instead of an npm token; a rerun of the
+  publish job skips packages whose version is already on npm.
+
+## 0.2.1
 
 First public release, published to npm (with provenance). `@tavrn/crypto` becomes a version range of the published
 package instead of a git dependency.
 
-- **`@tavrn/sdk`**: `rooms.preview(roomId)` (`GET /rooms/{room_id}/preview`: room, rules, privacy notice and legal
-  notice before joining) and the room's `privacy_notice` / `legal_notice` in `rooms.update` (protocol PROTOCOL.md
-  §6b); `InvitePreview` carries the documents too.
 - **`@tavrn/sdk`**: typed HTTP client generated from the protocol's `openapi.json` with hand-written wrappers
   (threads and forum posts, moderation and reports, web push, age assurance, files channels, history restore,
   layered permissions, voice moves and `/users/me/voice`), the WebSocket client with reconnection, permission

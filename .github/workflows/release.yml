@@ -4,8 +4,12 @@
 # carries version X.Y.Z in all three package.json files: the workflow checks the tag, the generated types and the
 # tests, packs the three npm tarballs (pnpm pack replaces workspace:* with the version) and attaches them to a
 # GitHub release. Publishing to npm (with provenance) additionally needs the repository variable PUBLISH_ENABLED and
-# the secret NPM_TOKEN of the environment `release`, and refuses git dependencies (they must become version ranges
-# first). Gated by CI_ENABLED.
+# refuses git dependencies (they must become version ranges first). Gated by CI_ENABLED.
+#
+# npm uses trusted publishing (OIDC, no token): the trusted publisher of @tavrn/sdk, @tavrn/e2ee and @tavrn/bot on
+# npmjs.com is this repository, workflow release.yml, environment `release`, allowed action npm publish only; npm >=
+# 11.5.1 exchanges the job's id-token for a short-lived publish token and attaches provenance. Rerunning the failed
+# `publish` job after a partial publication is safe: a package whose version is already on npm is skipped.
 #
 # Three jobs, so that no dependency code ever runs next to a publishing credential: `build` installs, tests and packs
 # without the npm token (and with read-only repository contents), `release` attaches the tarballs to the GitHub
@@ -108,10 +112,24 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # No registry-url: it would write an .npmrc with `_authToken=${NODE_AUTH_TOKEN}`, which npm keeps as a literal
+      # token when the variable is unset. Trusted publishing needs no token; npmjs.org is npm's default registry.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
-          registry-url: https://registry.npmjs.org
+      - name: npm supports trusted publishing
+        run: |
+          # Trusted publishing (the OIDC token exchange) needs npm 11.5.1 or later; this job installs nothing.
+          v=$(npm --version)
+          if ! node -e '
+            const [a, b, c] = process.argv[1].split(".").map((n) => parseInt(n, 10));
+            process.exit(a > 11 || (a === 11 && (b > 5 || (b === 5 && c >= 1))) ? 0 : 1);
+          ' "$v"; then
+            echo "npm $v of Node.js $(node --version) cannot use trusted publishing (needs npm >= 11.5.1)." >&2
+            echo "Use a Node.js release that bundles a newer npm in actions/setup-node." >&2
+            exit 1
+          fi
+          echo "npm $v"
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: npm-packages
@@ -140,7 +158,6 @@ jobs:
           done
       - name: Publish
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           TAG: ${{ github.ref_name }}
         run: |
           version="${TAG#v}"
@@ -153,6 +170,24 @@ jobs:
               exit 1
             fi
           done
+          # published NAME: whether npm has exactly $version of NAME (the version's own document, whose version field
+          # must equal $version): 0 yes, 1 no (HTTP 404), anything else stops the job.
+          published() {
+            local body="$RUNNER_TEMP/registry.json" code
+            code=$(curl -sS -o "$body" -w '%{http_code}' "https://registry.npmjs.org/${1/\//%2f}/$version")
+            case "$code" in
+              200) node -e '
+                     const v = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).version;
+                     if (v !== process.argv[2]) { console.error(`unexpected version ${v} of ${process.argv[3]}`); process.exit(2); }
+                   ' "$body" "$version" "$1" || exit 1 ;;
+              404) return 1 ;;
+              *) echo "$1 $version: HTTP $code" >&2; exit 1 ;;
+            esac
+          }
           for p in sdk e2ee bot; do
-            npm publish "$RUNNER_TEMP/release/tavrn-$p-$version.tgz" --provenance --access public
+            if published "@tavrn/$p"; then
+              echo "@tavrn/$p $version is already on npm: skipped"
+            else
+              npm publish "$RUNNER_TEMP/release/tavrn-$p-$version.tgz" --provenance --access public
+            fi
           done

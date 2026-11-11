@@ -31,8 +31,8 @@ Every job carries `if: ${{ vars.CI_ENABLED == 'true' }}`.
 | `PUBLISH_CHECK_PRIVATE` | secret (repository or organization) | comma-separated private domains, hosts and addresses that must never appear in the tree (`Publication hygiene`). Without it the check fails on purpose, except on Dependabot's pull requests (below). Locally the same list lives in an untracked `.publish-check.private` (in the repository or its parent directory). |
 | Dependabot secrets | secret (Dependabot) | Dependabot pull requests run with Dependabot's own secret store: add `TAVRN_READ_PAT` and `PUBLISH_CHECK_PRIVATE` again under Settings → Secrets and variables → Dependabot (or as organization Dependabot secrets), otherwise their CI fails at the private git dependencies, and the hygiene check skips its private-pattern step with a warning (the workflow sets `PUBLISH_CHECK_ALLOW_UNCONFIGURED=1` for Dependabot's pull requests only; the push to `main` runs the full check). |
 | `PUBLISH_ENABLED` | variable | `true` lets the release workflow publish to npm (after the GitHub release). Leave unset until the repositories are public and the git dependencies have become version ranges. |
-| `NPM_TOKEN` | secret of the environment `release` (never a repository secret) | npm automation token with publish rights for the `@tavrn` scope (only with `PUBLISH_ENABLED`). |
-| environment `release` | Settings → Environments | deployment only from tags `v*`, required reviewer the owner; holds `NPM_TOKEN` (`gh secret set NPM_TOKEN --env release`). Only the job `publish` declares it. |
+| npm trusted publisher | npmjs.com → each package → Settings → Trusted publishing | `@tavrn/sdk`, `@tavrn/e2ee` and `@tavrn/bot` trust GitHub Actions: repository `just-tavrn/tavrn-js`, workflow `release.yml`, environment `release`, allowed action npm publish only. The job `publish` exchanges its OIDC id-token for a short-lived publish token (npm >= 11.5.1, checked by the job) and attaches provenance; no npm token is stored. The former `NPM_TOKEN` secret is no longer used; the owner deletes it after the first successful release through trusted publishing. |
+| environment `release` | Settings → Environments | deployment only from tags `v*`, required reviewer the owner; holds no npm credential (trusted publishing above). Only the job `publish` declares it. |
 | `CLA_PAT` | organization secret | the CLA bot's token (`contents: write` on `just-tavrn/cla-signatures`). Organization secrets do not reach private repositories on the free plan: until the repository is public, add it as a repository secret as well. |
 
 ## Bot integration tests on the self-hosted runner
@@ -55,8 +55,9 @@ The job never runs for pull requests: a self-hosted runner executes the code it 
    `sdk/src/index.ts`, `BOT_VERSION` in `bot/src/bot.ts`) to the same `X.Y.Z`; if the protocol moved, bump the
    `protocol` submodule to its tag, run `just generate` and commit `sdk/src/generated`.
 2. `just check`, commit, tag `vX.Y.Z`, push the tag (only organization owners may create `v*` tags).
-3. With `CI_ENABLED` the release workflow attaches the three tarballs to a GitHub release. `v0.1.0` was tagged before
-   the CI ran, without a GitHub release.
+3. With `CI_ENABLED` the release workflow attaches the three tarballs to a GitHub release, and with `PUBLISH_ENABLED`
+   publishes them to npm through trusted publishing. If `publish` fails after some packages went out, rerun the
+   failed job: versions already on npm are skipped. `v0.1.0` was tagged before the CI ran, without a GitHub release.
 
 Consumers (`tavrn-web`, bots) reference the tag: `github:just-tavrn/tavrn-js#vX.Y.Z&path:sdk` (and `&path:e2ee`,
 `&path:bot`, with the `overrides` from the README). When the packages are published to npm, `@tavrn/crypto`
