@@ -7,6 +7,8 @@ tags of this repository are `vX.Y.Z`. The protocol they implement is versioned s
 ## Unreleased
 
 - Add `Permission.WHISPER` (bit 41), Voice override grouping, and authenticated whisper start/receive/end API wrappers and generated types.
+- Releases publish to npm through trusted publishing (OIDC, with provenance) instead of an npm token; a rerun of the
+  publish job skips packages whose version is already on npm.
 
 
 First public release, published to npm (with provenance). `@tavrn/crypto` becomes a version range of the published
